@@ -1,0 +1,33 @@
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment and secrets
+.env
+*.key
+*.pem
+*.crt
+*.token
+secrets/
+credentials/
+
+# Proxmox and VM artifacts
+*.iso
+*.qcow2
+*.vmdk
+*.ova
+*.ovf
+*.img
+*.raw
+
+# Screenshots or exports that may contain sensitive info
+private-screenshots/
+sensitive/
+redacted-needed/
+
+# Temporary files
+tmp/
+temp/
