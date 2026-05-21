@@ -38,8 +38,3 @@ The goal is not only to show that the lab works.
 
 The goal is to make the lab understandable enough that someone else could learn from it and eventually recreate their own version.
 
-## Current Documentation Phase
-
-The current documentation phase is focused on the custom PC build, Proxmox installation, and initial host validation.
-
-No virtual machines should be created until the Proxmox host has been reviewed, updated, and documented.
