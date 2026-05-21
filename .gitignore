@@ -2,10 +2,12 @@
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs and temporary files
 *.log
+tmp/
+temp/
 
-# Environment and secrets
+# Environment files and secrets
 .env
 *.key
 *.pem
@@ -14,7 +16,12 @@ Thumbs.db
 secrets/
 credentials/
 
-# Proxmox and VM artifacts
+# SSH and access files
+id_rsa
+id_rsa.pub
+*.ppk
+
+# Proxmox and virtual machine files
 *.iso
 *.qcow2
 *.vmdk
@@ -22,12 +29,18 @@ credentials/
 *.ovf
 *.img
 *.raw
+*.vdi
 
-# Screenshots or exports that may contain sensitive info
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Screenshots or exports that need review before publishing
 private-screenshots/
 sensitive/
 redacted-needed/
 
-# Temporary files
-tmp/
-temp/
+# Editor and workspace files
+.vscode/
+.idea/
