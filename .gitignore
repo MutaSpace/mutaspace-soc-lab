@@ -2,6 +2,10 @@
 .DS_Store
 Thumbs.db
 
+# Editor and workspace files
+.vscode/
+.idea/
+
 # Logs and temporary files
 *.log
 tmp/
@@ -13,6 +17,7 @@ temp/
 *.pem
 *.crt
 *.token
+*.env.local
 secrets/
 credentials/
 
@@ -21,7 +26,7 @@ id_rsa
 id_rsa.pub
 *.ppk
 
-# Proxmox and virtual machine files
+# Proxmox and virtual machine artifacts
 *.iso
 *.qcow2
 *.vmdk
@@ -36,11 +41,11 @@ id_rsa.pub
 *.backup
 *.old
 
-# Screenshots or exports that need review before publishing
+# Sensitive screenshots or exports that require review before publishing
 private-screenshots/
 sensitive/
 redacted-needed/
 
-# Editor and workspace files
-.vscode/
-.idea/
+# Local notes not intended for public documentation
+private-notes/
+scratch/
