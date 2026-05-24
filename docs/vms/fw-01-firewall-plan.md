@@ -1,295 +1,187 @@
-# fw-01 Firewall VM Plan
+# fw-01 Firewall Build
 
-This document explains the plan for `fw-01`, the firewall/router VM for the MutaSpace SOC Lab.
+This document records the installation and initial configuration of `fw-01`, the firewall/router VM for the MutaSpace SOC Lab.
 
-The firewall VM is one of the most important systems in the lab because it controls how traffic moves between networks.
-
-Before building endpoints, Wazuh, Suricata, or Active Directory, the lab needs a clear routing and firewall foundation.
+The firewall VM is the first major lab VM because it controls how traffic moves between the Proxmox bridges and the internal SOC lab network.
 
 ---
 
 ## VM Purpose
 
-`fw-01` will act as the firewall and router for the SOC lab.
+`fw-01` acts as the firewall and router for the SOC lab.
 
-It will separate the lab networks and control traffic between them.
-
-The firewall VM will support:
+It provides the network foundation for:
 
 - WAN and LAN separation
-- Lab network routing
+- Internal SOC lab routing
 - DHCP services
-- DNS forwarding
-- Firewall rules
-- Controlled access between networks
-- Isolation for attack simulation systems
-- Better visibility into network behavior
+- Gateway services
+- Firewall rule testing
+- Network troubleshooting
+- Future segmentation
+- Controlled attack simulation
 
-This VM helps the lab behave more like a real enterprise environment.
-
----
-
-## Why the Firewall Comes First
-
-The firewall should be built before most other VMs because other systems will depend on it for network access.
-
-If the firewall is configured correctly, the rest of the lab becomes easier to build.
-
-The firewall will help define:
-
-- Which network a VM belongs to
-- Which gateway a VM uses
-- Which systems can reach the internet
-- Which systems can communicate internally
-- Which traffic should be allowed or blocked
-- Where network troubleshooting should begin
-
-Building the firewall first prevents the lab from becoming a flat network where every VM is connected directly to the management bridge.
+This VM helps the lab behave more like a real enterprise environment instead of placing every system on one flat network.
 
 ---
 
-## Planned Firewall Software
+## Firewall Platform
 
-The planned firewall/router platform is:
+The firewall platform selected for this build is:
 
 ```text
-pfSense
+pfSense Community Edition
 ```
 
-pfSense will be used because it provides a web interface and supports common firewall/router functions used in real environments.
-
-The lab will use pfSense to practice:
-
-- Interface assignment
-- WAN and LAN configuration
-- DHCP setup
-- Gateway configuration
-- Firewall rules
-- DNS forwarding
-- Connectivity testing
-- Basic network troubleshooting
+pfSense was selected because it supports firewall, routing, DHCP, DNS forwarding, interface assignment, and web-based administration.
 
 ---
 
-## Planned Interfaces
+## VM Configuration
 
-The firewall VM will connect to multiple Proxmox bridges.
+| Setting | Value |
+|---|---|
+| VM Name | `fw-01` |
+| Platform | pfSense CE |
+| vCPU | 2 |
+| Memory | 4GB |
+| Disk | 20GB |
+| Boot Media | Netgate Installer ISO |
+| WAN Bridge | `vmbr0` |
+| LAN Bridge | `vmbr1` |
 
-| pfSense Interface | Proxmox Bridge | Role |
-|---|---|---|
-| WAN | `vmbr0` | Outside/upstream network |
-| LAN | `vmbr1` | Internal SOC lab network |
-| OPT1 | `vmbr2` | Isolated or untrusted network |
+---
 
-The WAN interface connects toward the outside network.
+## Interface Mapping
+
+The firewall VM uses two virtual network interfaces.
+
+| pfSense Interface | Virtual NIC | Proxmox Bridge | Purpose |
+|---|---|---|---|
+| WAN | `vtnet0` | `vmbr0` | Outside/upstream network |
+| LAN | `vtnet1` | `vmbr1` | Internal SOC lab network |
+
+The WAN interface connects to the upstream side of the lab.
 
 The LAN interface connects to the internal SOC lab network.
 
-The OPT1 interface can be used later for isolated testing, controlled attack simulation, or trust-boundary experiments.
-
 ---
 
-## Planned Network Roles
+## Network Configuration
 
-| Network | Bridge | Purpose |
+Public documentation uses example values instead of live environment details.
+
+| Interface | Example Address | Purpose |
 |---|---|---|
-| Management / WAN | `vmbr0` | Proxmox management and pfSense WAN |
-| SOC LAN | `vmbr1` | Main internal lab network |
-| Isolated / Untrusted | `vmbr2` | Controlled attack simulation and isolated testing |
+| WAN | `10.0.0.x/24` | Upstream network address from the existing network |
+| LAN | `10.10.10.1/24` | Internal SOC lab gateway |
 
----
-
-## Example Addressing Plan
-
-Public documentation should use example values instead of live environment details.
-
-| Network | Example Subnet | Example Gateway |
-|---|---|---|
-| SOC LAN | `10.10.10.0/24` | `10.10.10.1` |
-| Isolated / Untrusted | `10.10.20.0/24` | `10.10.20.1` |
-
-In this example:
-
-- `10.10.10.1` would be the pfSense LAN gateway.
-- `10.10.20.1` would be the pfSense OPT1 gateway.
-- Internal VMs on `vmbr1` would use `10.10.10.1` as their gateway.
-- Isolated VMs on `vmbr2` would use `10.10.20.1` as their gateway.
-
-These values are examples and can be adjusted during the actual build.
-
----
-
-## Suggested VM Resources
-
-The firewall VM does not need large resources at the beginning.
-
-| Resource | Starting Value |
-|---|---|
-| vCPU | 2 |
-| RAM | 2GB |
-| Disk | 20GB |
-| Network Interfaces | 2 to 3 |
-| Boot Media | pfSense ISO |
-
-This can be adjusted later if the firewall begins handling more traffic or services.
-
----
-
-## Firewall VM Placement
-
-The firewall VM should be connected like this:
+The LAN interface was configured as:
 
 ```text
-fw-01
-├── NIC 1 -> vmbr0 -> WAN
-├── NIC 2 -> vmbr1 -> SOC LAN
-└── NIC 3 -> vmbr2 -> Isolated / Untrusted
+10.10.10.1/24
 ```
 
-This placement allows the firewall to route and filter traffic between the networks.
+This address becomes the default gateway for VMs placed on the internal SOC lab bridge.
 
 ---
 
-## Initial Firewall Goals
+## DHCP Configuration
 
-The first firewall build should accomplish the following:
+DHCP was enabled on the LAN interface.
 
-- pfSense installed successfully
-- WAN interface assigned to `vmbr0`
-- LAN interface assigned to `vmbr1`
-- Optional OPT1 interface assigned to `vmbr2`
-- LAN gateway configured
-- DHCP enabled on the SOC LAN
-- Internal client receives an IP address
-- Internal client can reach the gateway
-- Internal client can reach the internet if allowed
-- Firewall web interface can be accessed from the internal lab network
-
----
-
-## Why WAN and LAN Separation Matters
-
-WAN and LAN separation is one of the most important firewall concepts.
-
-The WAN side faces the outside or upstream network.
-
-The LAN side protects the internal systems.
-
-In this lab:
+The DHCP range is:
 
 ```text
-WAN = upstream side of pfSense
-LAN = internal SOC lab side of pfSense
+10.10.10.100 - 10.10.10.200
 ```
 
-This design helps teach how real networks separate trusted and less-trusted areas.
-
-It also helps prevent lab systems from being placed directly on the Proxmox management network.
+This means internal lab VMs connected to `vmbr1` can automatically receive an IP address from pfSense.
 
 ---
 
-## DHCP Plan
+## Installation Notes
 
-pfSense can provide DHCP for the internal SOC LAN.
+The pfSense installation used the Netgate Installer ISO for AMD64 virtual machines.
 
-DHCP allows internal VMs to automatically receive:
+During installation, the VM initially failed to boot because the installer file was still compressed as an `.iso.gz` file.
 
-- IP address
-- Subnet mask
-- Gateway
-- DNS server
-
-This makes early VM setup easier.
-
-Later, when Active Directory and DNS are introduced, DNS settings may change so that domain-joined systems use the domain controller for DNS.
+The issue was resolved by extracting the file into a real `.iso` file and attaching the extracted ISO to the VM CD/DVD drive.
 
 ---
 
-## DNS Plan
+## Boot Issue
 
-At first, pfSense may provide DNS forwarding for internal systems.
-
-Later, when Active Directory is installed, the domain controller will likely become the main DNS server for domain systems.
-
-This matters because Active Directory depends heavily on DNS.
-
-The lab should document DNS changes carefully because DNS problems can cause:
-
-- Domain join failures
-- Authentication issues
-- Wazuh agent communication problems
-- Hostname resolution failures
-- Confusing logs
-
----
-
-## Firewall Rule Philosophy
-
-The first firewall rules should be simple.
-
-Early goals:
-
-- Allow SOC LAN systems to reach the internet if needed
-- Allow internal systems to reach required lab services
-- Keep isolated systems controlled
-- Avoid exposing Proxmox management unnecessarily
-- Document each firewall rule and why it exists
-
-Firewall rules should not be random.
-
-Each rule should answer:
+The VM originally displayed:
 
 ```text
-What traffic is allowed?
-From where?
-To where?
-On what port?
-Why is it needed?
-How was it validated?
+Boot failed: Could not read from CDROM
+No bootable device
 ```
 
----
+Root cause:
 
-## Common Beginner Mistakes
+```text
+The attached installer file was compressed and not a bootable ISO.
+```
 
-### Mistake: Assigning interfaces randomly
+Resolution:
 
-If WAN and LAN are assigned incorrectly, the firewall may block access or route traffic incorrectly.
+```text
+Extract the .iso.gz file into a real .iso file.
+Upload the extracted .iso to Proxmox.
+Attach the .iso to the fw-01 CD/DVD drive.
+Set CD/DVD first in boot order for installation.
+```
 
-The correct Proxmox bridge should be matched to the correct pfSense interface.
+Lesson learned:
 
-### Mistake: Putting internal VMs on `vmbr0`
-
-Internal lab systems should not be placed directly on the management/WAN bridge unless there is a specific reason.
-
-Most internal lab systems should use `vmbr1`.
-
-### Mistake: Forgetting the gateway
-
-A VM can have an IP address and still fail to reach other networks if the gateway is missing or wrong.
-
-### Mistake: Changing too many rules at once
-
-Firewall troubleshooting is easier when one change is made at a time.
+A file ending in `.iso.gz` cannot be used directly as a bootable ISO in Proxmox. It must be extracted first.
 
 ---
 
-## Troubleshooting Mindset
+## Memory Issue
 
-If a VM cannot communicate, ask:
+After installation, the firewall VM showed memory usage above the assigned 2GB.
 
-1. Is the VM connected to the correct Proxmox bridge?
-2. Does the VM have an IP address?
-3. Is the IP address in the correct subnet?
-4. Is the gateway correct?
-5. Can the VM ping the firewall LAN interface?
-6. Can the firewall see the interface as up?
-7. Is DHCP working?
-8. Is DNS working?
-9. Is a firewall rule blocking the traffic?
-10. What do the firewall logs show?
+The VM memory was increased from:
 
-This approach teaches network troubleshooting instead of guessing.
+```text
+2048 MB
+```
+
+to:
+
+```text
+4096 MB
+```
+
+This resolved instability during the first boot process.
+
+Lesson learned:
+
+Minimum requirements may work, but giving infrastructure VMs more breathing room can prevent confusing behavior during installation and first boot.
+
+---
+
+## Installation Result
+
+pfSense installed successfully and booted from the virtual hard disk.
+
+The ISO was detached after installation so the VM could boot into the installed system.
+
+The pfSense console confirmed:
+
+```text
+WAN -> vtnet0
+LAN -> vtnet1
+```
+
+The LAN interface was changed from the default address to the SOC lab gateway address:
+
+```text
+10.10.10.1/24
+```
 
 ---
 
@@ -297,27 +189,57 @@ This approach teaches network troubleshooting instead of guessing.
 
 | Validation Item | Status |
 |---|---|
-| pfSense ISO obtained | Pending |
-| VM created in Proxmox | Pending |
-| WAN connected to `vmbr0` | Pending |
-| LAN connected to `vmbr1` | Pending |
-| OPT1 connected to `vmbr2` | Pending |
-| pfSense installed | Pending |
-| Interfaces assigned correctly | Pending |
-| LAN gateway configured | Pending |
-| DHCP configured | Pending |
-| Test VM receives IP address | Pending |
+| pfSense ISO obtained | Completed |
+| ISO extracted successfully | Completed |
+| ISO uploaded to Proxmox | Completed |
+| `fw-01` VM created | Completed |
+| WAN connected to `vmbr0` | Completed |
+| LAN connected to `vmbr1` | Completed |
+| pfSense installed | Completed |
+| ISO detached after install | Completed |
+| VM booted from hard disk | Completed |
+| WAN assigned to `vtnet0` | Completed |
+| LAN assigned to `vtnet1` | Completed |
+| LAN IP set to `10.10.10.1/24` | Completed |
+| DHCP enabled on LAN | Completed |
+| DHCP range set | Completed |
+| Test VM receives DHCP address | Pending |
 | Test VM can ping gateway | Pending |
-| Firewall web interface accessible | Pending |
+| Test VM can reach internet | Pending |
+| DNS resolution works | Pending |
+
+---
+
+## Troubleshooting Lessons
+
+This build reinforced several important troubleshooting lessons:
+
+- Boot errors are not always VM configuration problems.
+- Installer files must be in the correct format.
+- A compressed `.iso.gz` file is not the same as an extracted `.iso`.
+- VM memory should be reviewed when a service behaves unexpectedly.
+- Network interface mapping should be documented immediately.
+- WAN and LAN interfaces should not be guessed.
+- One change should be made at a time and then validated.
+
+---
+
+## Why This Matters
+
+The firewall VM creates the network foundation for the rest of the SOC lab.
+
+Future systems will depend on this firewall for routing, DHCP, DNS forwarding, segmentation, and controlled traffic flow.
+
+This step teaches that cybersecurity tools depend on infrastructure. Before alerts, detections, dashboards, and investigations can work, the network must be designed and validated.
 
 ---
 
 ## Learning Reflection
 
-The firewall VM teaches that cybersecurity labs are not just about installing tools.
+Building `fw-01` showed that firewall setup is not just a checkbox.
 
-The network has to be designed first.
+It requires understanding how Proxmox bridges, virtual NICs, WAN interfaces, LAN interfaces, DHCP, gateways, and boot media all work together.
 
-A firewall controls trust boundaries, routing, access, and visibility. Understanding the firewall helps explain why traffic moves, why traffic fails, and where security monitoring should happen.
+This is the first real infrastructure service in the MutaSpace SOC Lab.
 
-A good SOC lab starts with a network that makes sense.
+The lab now has a network control point.
