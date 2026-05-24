@@ -104,9 +104,13 @@ This means internal lab VMs connected to `vmbr1` can automatically receive an IP
 
 The pfSense installation used the Netgate Installer ISO for AMD64 virtual machines.
 
-During installation, the VM initially failed to boot because the installer file was still compressed as an `.iso.gz` file.
+During setup, the installer download was provided as a compressed `.iso.gz` file. The file needed to be extracted into a usable `.iso` before it could be attached to the VM as boot media.
 
-The issue was resolved by extracting the file into a real `.iso` file and attaching the extracted ISO to the VM CD/DVD drive.
+The extraction process caused issues on macOS, so the file had to be handled carefully before the VM could boot from it successfully.
+
+Lesson learned:
+
+Installer format matters during VM creation. Even when the correct installer is downloaded, the file still has to be prepared in a format the hypervisor can boot from.
 
 ---
 
@@ -122,7 +126,7 @@ No bootable device
 Root cause:
 
 ```text
-The attached installer file was compressed and not a bootable ISO.
+The installer file was still compressed and Proxmox could not boot it as a CD/DVD image.
 ```
 
 Resolution:
@@ -136,7 +140,7 @@ Set CD/DVD first in boot order for installation.
 
 Lesson learned:
 
-A file ending in `.iso.gz` cannot be used directly as a bootable ISO in Proxmox. It must be extracted first.
+- Installer files may need to be extracted or prepared before a VM can boot from them.
 
 ---
 
