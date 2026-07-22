@@ -48,7 +48,15 @@
 # -----------------------------------------------------------------------------
 site:
   # The Proxmox node name. Single-node lab, so this appears in every API call.
-  node: mutaspace-soc-node01
+  #
+  # This is the node's actual hostname as Proxmox knows it, NOT a name you choose.
+  # Get it wrong and every API call 404s against a node that does not exist.
+  # Confirm with `hostname` on the host, or `pvesh get /nodes`.
+  #
+  # The earlier documentation refers to `mutaspace-soc-node01`, which was the
+  # planned name for the original Ryzen build. The host this lab actually runs on
+  # is a different machine - see docs/hardware/ for the discrepancy.
+  node: swc2026
 
   # LVM-thin pool that holds every VM disk.
   #
@@ -265,7 +273,7 @@ vms:
     os_type: win11 # Proxmox's ostype for Server 2022/2025 and Windows 11
     cores: 2
     memory: { dedicated: 4096, floating: 0 }
-    disk: { size: 60, interface: scsi0 }
+    disk: { size: 50, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:10" }
     ipv4: { mode: static, address: 10.10.10.10/24, gateway: 10.10.10.1 }
     agent: true
@@ -327,7 +335,12 @@ vms:
     os_type: l26
     cores: 4
     memory: { dedicated: 8192, floating: 0 } # NEVER balloon the indexer
-    disk: { size: 100, interface: scsi0 }
+    # 60 rather than the 100 the design asked for. The real host's thin pool is
+    # 816 GiB, not the 1.74 TiB the design assumed, so every size here is sized
+    # to fit rather than to be generous. This is the disk most likely to need
+    # revisiting: the indexer grows with every alert, so watch it and raise it
+    # before it fills rather than after.
+    disk: { size: 60, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:20" }
     ipv4: { mode: static, address: 10.10.10.20/24, gateway: 10.10.10.1 }
     agent: true
@@ -358,7 +371,7 @@ vms:
     os_type: win11
     cores: 2
     memory: { dedicated: 4096, floating: 0 } # Windows needs blnsvr.exe to balloon; assume not
-    disk: { size: 60, interface: scsi0 }
+    disk: { size: 50, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:51" }
     ipv4: { mode: dhcp, reservation: 10.10.10.51 }
     agent: true
@@ -464,7 +477,7 @@ vms:
     os_type: l26
     cores: 4
     memory: { dedicated: 8192, floating: 4096 }
-    disk: { size: 80, interface: scsi0 }
+    disk: { size: 40, interface: scsi0 }
     nic: { bridge: vmbr2, model: virtio, mac: "BC:24:11:10:20:30" }
     ipv4: { mode: static, address: 10.10.20.30/24, gateway: 10.10.20.1 }
     agent: true
@@ -499,13 +512,22 @@ vms:
 learner_endpoints:
   win-client:
     vmid_offset: 5
-    lifecycle: reprovisioned
+    # linked, not reprovisioned. This is the single biggest storage saving in the
+    # file: a full clone per learner costs 50 GB each, so three learners is 150 GB
+    # of a 816 GiB pool spent on three near-identical Windows boxes. A linked clone
+    # shares the template's base image and only stores what the learner changes.
+    #
+    # The tradeoff is real and worth teaching: linked clones cannot move to another
+    # datastore, and they keep the template pinned - VMID 9003 can never be deleted
+    # or rebuilt while any learner clone exists. Rebuilding the Windows template
+    # therefore means destroying every learner endpoint first.
+    lifecycle: linked
     template: win11-client
     guest: windows
     os_type: win11
     cores: 2
     memory: { dedicated: 4096, floating: 0 }
-    disk: { size: 60, interface: scsi0 }
+    disk: { size: 50, interface: scsi0 }
     nic: { model: virtio }
     network: lan
     ipv4: { mode: dhcp, host_base: 60, host_step: 2 }
