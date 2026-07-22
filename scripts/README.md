@@ -1,5 +1,7 @@
 # Operational Scripts
 
+![The classroom cycle: snapshot a clean baseline, let learners break it, then roll it back](../docs/images/classroom-reset-cycle.webp)
+
 This folder holds the shell scripts that sit either side of the infrastructure
 code: the ones that prepare a bare Proxmox host so the code can run, and the
 ones that run a classroom once the lab exists.
@@ -64,24 +66,29 @@ Two guards:
 
 ## Order of Operations
 
-```text
-  1. bootstrap-host.sh          (on the host, as root)
-        |
-        |  prints the two API token secrets ONCE
-        v
-  2. put those secrets in a gitignored .envrc on the workstation
-        |
-        v
-  3. preflight.sh --offline     (while the host is still being built)
-     preflight.sh               (once the host is up)
-        |
-        v
-  4. packer build ...  ->  tofu apply ...  ->  ansible-playbook ...
-        |
-        v
-  5. learner-snapshot.sh 01     (per learner, at the start of a module)
-  6. learner-reset.sh 01        (as often as the learner needs)
+```mermaid
+graph TD
+    B["1 · bootstrap-host.sh<br/><i>on the host, as root</i>"]
+    E["2 · paste secrets into a gitignored .envrc<br/><i>on the workstation</i>"]
+    P["3 · preflight.sh --offline, then preflight.sh"]
+    BUILD["4 · packer build → tofu apply → ansible-playbook"]
+    S["5 · learner-snapshot.sh 01<br/><i>per learner, per module</i>"]
+    R["6 · learner-reset.sh 01<br/><i>as often as the learner needs</i>"]
+
+    B -->|"prints the two API token secrets ONCE"| E
+    E --> P
+    P --> BUILD
+    BUILD --> S
+    S --> R
+    R -->|"learner keeps working"| S
+
+    classDef host fill:#3f2d0f,stroke:#f59e0b,color:#fde68a
+    classDef work fill:#0f2942,stroke:#22d3ee,color:#e2e8f0
+    class B,S,R host
+    class E,P,BUILD work
 ```
+
+Amber steps run **on the Proxmox host**; cyan steps run on the workstation.
 
 Steps 5 and 6 run on the host. `task learner:snapshot LEARNER=01` and
 `task learner:reset LEARNER=01` do the copy-and-ssh for you.

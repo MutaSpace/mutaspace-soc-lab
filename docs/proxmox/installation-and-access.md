@@ -1,5 +1,7 @@
 # Proxmox Installation and Access
 
+![Three steps: boot the installer from USB onto the NVMe drive, land a hypervisor layer on the host, then reach it in a browser on port 8006](../images/proxmox-install.webp)
+
 This document records the Proxmox VE installation and web access validation for the MutaSpace SOC Lab host.
 
 Proxmox is the hypervisor that runs the virtual machines for the lab. Installing Proxmox is the step that turns the custom PC from a normal computer into a virtualization host.

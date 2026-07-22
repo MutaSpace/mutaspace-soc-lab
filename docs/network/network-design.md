@@ -1,5 +1,7 @@
 # Network Design
 
+![The firewall as the only path between a trusted lane of SOC systems and a walled-off untrusted lane](../images/network-segmentation.webp)
+
 This document explains the planned network design for the MutaSpace SOC Lab.
 
 The network design matters because a SOC lab is not just a group of virtual machines. The systems need to communicate in controlled ways so traffic can be routed, monitored, logged, and investigated.
@@ -152,18 +154,31 @@ This design helps teach:
 
 The general traffic flow will look like this:
 
-```text
-Internet / Home Network
-        |
-      vmbr0
-        |
-   Firewall VM
-    /        \
- vmbr1      vmbr2
- SOC LAN    Isolated / Untrusted
+```mermaid
+graph TD
+    NET["Internet / Home network"]
+    NET --> VMBR0["vmbr0<br/>management + WAN"]
+    VMBR0 -->|"vtnet0 · WAN"| FW["fw-01 — OPNsense 26.7<br/>gateway · DHCP · DNS · NTP"]
+    FW -->|"vtnet1 · LAN<br/>10.10.10.1"| VMBR1["vmbr1 — SOC LAN<br/>10.10.10.0/24"]
+    FW -->|"vtnet2 · OPT<br/>10.10.20.1"| VMBR2["vmbr2 — isolated<br/>10.10.20.0/24"]
+    VMBR2 -. "default-deny toward vmbr1" .-> VMBR1
+
+    classDef mgmt fill:#1e3a5f,stroke:#22d3ee,color:#e2e8f0
+    classDef lan fill:#0f2942,stroke:#22d3ee,color:#e2e8f0
+    classDef iso fill:#3f2d0f,stroke:#f59e0b,color:#fde68a
+    class NET,VMBR0,FW mgmt
+    class VMBR1 lan
+    class VMBR2 iso
 ```
 
 This means the firewall/router VM becomes the gatekeeper for lab traffic.
+
+The NIC order above is the wire: Proxmox maps the first NIC to `net0`, which OPNsense
+sees as `vtnet0` and assigns to WAN. Swapping two entries in `lab.yaml` boots the
+firewall with WAN and LAN reversed, and nothing in a `tofu plan` hints at why.
+
+A fourth bridge, `vmbr9`, exists but carries no lab traffic — it is the build plane
+Packer uses before `fw-01` is routing. See [build-plane.md](build-plane.md).
 
 ---
 

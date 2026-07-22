@@ -1,5 +1,7 @@
 # MutaSpace SOC Lab
 
+![A single Proxmox host fanning out into the lab's virtual machines, with the untrusted segment walled off in amber](docs/images/hero-soc-lab.webp)
+
 This repository documents the design, build, and development of the MutaSpace SOC Lab, a Proxmox-based cybersecurity lab focused on SOC analyst training, detection engineering, virtual networking, SIEM operations, endpoint telemetry, infrastructure troubleshooting, and hands-on cybersecurity education.
 
 This lab is intentionally documented end-to-end, including hardware decisions, architecture choices, configuration steps, troubleshooting, validation, mistakes, rebuilds, and lessons learned. The goal is to reflect real-world cybersecurity and infrastructure work rather than a perfect lab environment.
@@ -127,6 +129,32 @@ The first planned network design includes:
 | `vmbr0` | Proxmox management network and external access |
 | `vmbr1` | Internal SOC lab LAN |
 | `vmbr2` | Isolated or untrusted lab network |
+
+```mermaid
+graph TD
+    NET["Home network / Internet"]
+    NET --> VMBR0["vmbr0 — management + WAN"]
+    VMBR0 --> FW["fw-01<br/>OPNsense firewall"]
+    FW --> VMBR1["vmbr1 — SOC LAN<br/>10.10.10.0/24"]
+    FW --> VMBR2["vmbr2 — isolated<br/>10.10.20.0/24"]
+
+    VMBR1 --> DC["dc-01 · AD + DNS"]
+    VMBR1 --> WZ["wazuh-01 · SIEM"]
+    VMBR1 --> APP["ubuntu-app-01"]
+    VMBR1 --> AN["analyst-01"]
+    VMBR1 --> WIN["win-client-01"]
+
+    VMBR2 --> KALI["kali-01"]
+    VMBR2 --> UNT["untrusted-01"]
+    VMBR2 --> NLP["nlp-01"]
+
+    classDef mgmt fill:#1e3a5f,stroke:#22d3ee,color:#e2e8f0
+    classDef lan fill:#0f2942,stroke:#22d3ee,color:#e2e8f0
+    classDef iso fill:#3f2d0f,stroke:#f59e0b,color:#fde68a
+    class NET,VMBR0,FW mgmt
+    class VMBR1,DC,WZ,APP,AN,WIN lan
+    class VMBR2,KALI,UNT,NLP iso
+```
 
 This separation helps teach virtual networking concepts and mirrors real enterprise infrastructure principles.
 

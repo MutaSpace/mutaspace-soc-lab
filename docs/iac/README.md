@@ -1,5 +1,7 @@
 # Infrastructure as Code
 
+![One source file feeding a pipeline of build, provision and configure stages, which stamps out a grid of identical virtual machines](../images/iac-pipeline.webp)
+
 This folder documents the effort to rebuild the MutaSpace SOC Lab as Infrastructure as Code.
 
 The lab was originally built by hand through the Proxmox web interface, and documented step by
@@ -11,6 +13,26 @@ This area covers the work of turning that hand-built lab into code:
 - **Packer** builds golden VM templates from installer media
 - **OpenTofu** provisions VMs on Proxmox from those templates
 - **Ansible** configures the things that live inside the VMs
+
+```mermaid
+graph LR
+    YAML["lab.yaml<br/>single source of truth"]
+    YAML --> PK["Packer<br/>6 golden templates<br/>VMID 9000–9005"]
+    PK --> TF["OpenTofu<br/>clones + places VMs<br/>on vmbr1 / vmbr2"]
+    TF --> AN["Ansible<br/>AD forest · DNS · Wazuh<br/>telemetry · detections"]
+    AN --> LAB["Running lab<br/>+ per-learner endpoints"]
+
+    classDef src fill:#0f2942,stroke:#22d3ee,color:#e2e8f0
+    classDef stage fill:#3f2d0f,stroke:#f59e0b,color:#fde68a
+    classDef out fill:#0f2942,stroke:#22d3ee,color:#e2e8f0
+    class YAML src
+    class PK,TF,AN stage
+    class LAB out
+```
+
+Every stage reads `lab.yaml`. Nothing downstream invents a VMID, an IP address or a
+MAC address of its own — which is why changing one line in that file is enough to
+add a learner to the classroom.
 
 ---
 
