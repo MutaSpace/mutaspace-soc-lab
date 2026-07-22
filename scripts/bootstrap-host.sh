@@ -91,6 +91,7 @@ DO_SNIPPETS=1
 DO_NETWORK=1
 UPLINK_IF=""
 SNIPPET_STORAGE="local"
+BUILD_PLANE_DHCP=0   # opt-in: only needed when builds run on vmbr9
 
 # -----------------------------------------------------------------------------
 # Output helpers. Colour only when stdout is a terminal, so logs stay readable.
@@ -166,6 +167,10 @@ OPTIONS
   --skip-repos              Do not touch apt sources.
   --skip-users              Do not create users/roles/tokens.
   --skip-snippets           Do not touch storage content types.
+  --build-plane-dhcp        Install dnsmasq and serve DHCP on ${BR_BUILD}.
+                            ONLY needed when Packer builds run on the isolated
+                            build plane. If vmbr0 already has DHCP and a gateway
+                            (the usual case), build there instead and skip this.
   --skip-network            Do not touch ${INTERFACES_FILE}.
   -h, --help                Show this help and exit.
 
@@ -196,6 +201,7 @@ parse_args() {
       --skip-repos)       DO_REPOS=0 ;;
       --skip-users)       DO_USERS=0 ;;
       --skip-snippets)    DO_SNIPPETS=0 ;;
+      --build-plane-dhcp) BUILD_PLANE_DHCP=1 ;;
       --skip-network)     DO_NETWORK=0 ;;
       -h|--help)          usage; exit 0 ;;
       *)                  usage >&2; die "unknown argument: $1" ;;
@@ -1205,8 +1211,17 @@ main() {
   if (( DO_USERS ));    then configure_users;    else skipped "users/roles/tokens (--skip-users)"; fi
   if (( DO_SNIPPETS )); then configure_snippets; else skipped "snippets content type (--skip-snippets)"; fi
   if (( DO_NETWORK ));  then create_bridges;     else skipped "bridges (--skip-network)"; fi
-  # Must follow create_bridges: dnsmasq binds vmbr9, so the bridge has to exist.
-  if (( DO_NETWORK ));  then configure_build_dhcp; else skipped "build-plane DHCP (--skip-network)"; fi
+  # Must follow create_bridges: dnsmasq binds the build bridge, so it has to exist.
+  #
+  # OPT-IN. Most hosts do not need this. The build plane only needs its own DHCP
+  # server when Packer builds run on it, and builds should run on vmbr0 whenever
+  # vmbr0 has DHCP and a gateway - it needs no extra services and, unlike the
+  # build plane, leaves the VM reachable from the workstation for Packer's SSH.
+  if (( DO_NETWORK && BUILD_PLANE_DHCP )); then
+    configure_build_dhcp
+  else
+    skipped "build-plane DHCP (not requested; pass --build-plane-dhcp if builds run on ${BR_BUILD})"
+  fi
 
   if (( DO_USERS )); then print_credentials; fi
   print_next_steps

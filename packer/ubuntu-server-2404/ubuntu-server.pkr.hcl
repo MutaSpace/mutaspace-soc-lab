@@ -117,9 +117,32 @@ variable "iso_storage_pool" {
 }
 
 variable "build_bridge" {
-  type        = string
-  default     = "vmbr9"
-  description = "Build-plane bridge. NOT vmbr1 - vmbr1 has no route out until fw-01 exists."
+  type = string
+
+  # DEFAULT CHANGED after first contact with real hardware, 2026-07-22.
+  #
+  # This was vmbr9, an isolated build plane the host masquerades out of. That
+  # design assumed vmbr0 was a bare WAN uplink with no DHCP and no route - true
+  # of the hardware the design was written against, and false of the host it
+  # actually runs on, where vmbr0 is a working LAN.
+  #
+  # Building on vmbr0 removes three moving parts at once:
+  #   * no dnsmasq needed - the LAN already serves DHCP
+  #   * no MASQUERADE rule - the LAN already has a real gateway
+  #   * the build VM is REACHABLE, which vmbr9 was not. Packer has to SSH to the
+  #     machine it just installed, and an isolated NAT'd subnet that nothing
+  #     outside the host has a route to makes that impossible. That failure
+  #     arrives late, after a full install, and looks like an SSH problem.
+  #
+  # Use vmbr9 when vmbr0 genuinely cannot serve a build: a bare WAN uplink, or a
+  # management network you are not willing to put an installing VM on. In that
+  # case run scripts/bootstrap-host.sh --build-plane-dhcp, and make sure the
+  # workstation running Packer has a route to 10.99.0.0/24.
+  #
+  # NEVER vmbr1: it has no route out until fw-01 exists, which is the whole
+  # bootstrapping problem this lab has to solve.
+  default     = "vmbr0"
+  description = "Bridge used during the build. vmbr0 when it has DHCP and a gateway; vmbr9 for an isolated build plane."
 }
 
 # ---------------------------------------------------------------------------------------
@@ -134,7 +157,49 @@ variable "build_bridge" {
 variable "iso_url" {
   type        = string
   default     = "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
-  description = "Ubuntu Server 24.04 LTS live-server ISO."
+  description = "Ubuntu Server 24.04 LTS live-server ISO. Ignored when iso_file is set."
+}
+
+variable "http_bind_address" {
+  type    = string
+  default = ""
+
+  # The address Packer's seed server binds to, and the value {{ .HTTPIP }}
+  # expands to in the boot command.
+  #
+  # PIN THIS whenever the workstation has more than one interface. Packer binds
+  # the listener to *:port but auto-detects a SINGLE address to advertise, and
+  # that heuristic has no idea which of your interfaces the lab can reach. A
+  # workstation running Docker, libvirt and a VPN can easily have ten candidates
+  # - docker0, half a dozen br-*, virbr0, tun0, a public IP - and if Packer picks
+  # any of them the guest requests the seed from an address that does not exist
+  # on its network.
+  #
+  # The failure is silent and slow: cloud-init retries, gives up, and subiquity
+  # falls back to its interactive menu. Identical symptom to having no network at
+  # all, and to a mangled boot command. Three different causes, one appearance.
+  #
+  # Set it to the address on the network the lab can route back to. Here that is
+  # the WireGuard address, because the workstation reaches the lab over a tunnel.
+  description = "Address Packer serves the autoinstall seed on. Empty = auto-detect (only safe with one interface)."
+}
+
+variable "iso_file" {
+  type    = string
+  default = ""
+
+  # Set this to an ISO already on the Proxmox host and Packer will neither
+  # download nor upload anything:
+  #
+  #   iso_file = "local:iso/ubuntu-24.04.4-live-server-amd64.iso"
+  #
+  # Worth doing as soon as the file is on the host. Otherwise every single build
+  # re-uploads 3.2 GB from the workstation, and if the workstation reaches the
+  # host over a VPN that upload dominates the build time.
+  #
+  # Empty means "use iso_url and verify iso_checksum", which is right for a first
+  # run or a rebuilt host.
+  description = "Pre-uploaded ISO on the host, e.g. local:iso/name.iso. Takes precedence over iso_url."
 }
 
 variable "iso_checksum" {
@@ -325,10 +390,26 @@ source "proxmox-iso" "ubuntu-server-2404" {
 
   # --- Boot media -------------------------------------------------------------------
   boot_iso {
-    type             = "ide"
-    index            = "2"
-    iso_url          = var.iso_url
-    iso_checksum     = var.iso_checksum
+    type  = "ide"
+    index = "2"
+
+    # Two ways to supply the installer, and which one is used depends on whether
+    # iso_file is set.
+    #
+    #   iso_file  = "local:iso/ubuntu-24.04.4-live-server-amd64.iso"
+    #       Use an ISO ALREADY on the Proxmox host. Nothing is downloaded and
+    #       nothing is uploaded. Strongly preferred once the file is on the host:
+    #       the alternative re-pushes 3.2 GB from the workstation on EVERY build,
+    #       which is slow over any link and painful over a VPN.
+    #
+    #   iso_url + iso_checksum
+    #       Download to the workstation, then upload to the host. Correct for a
+    #       first run or a clean host, and the checksum is verified.
+    #
+    # Precedence is explicit rather than implied so a half-set pair fails loudly.
+    iso_file         = var.iso_file != "" ? var.iso_file : null
+    iso_url          = var.iso_file == "" ? var.iso_url : null
+    iso_checksum     = var.iso_file == "" ? var.iso_checksum : null
     iso_storage_pool = var.iso_storage_pool
     unmount          = true
 
@@ -382,6 +463,9 @@ source "proxmox-iso" "ubuntu-server-2404" {
 
   # --- Autoinstall seed over HTTP ---------------------------------------------------
   http_content = local.http_content
+
+  # Empty string means "auto-detect", which is Packer's default behaviour.
+  http_bind_address = var.http_bind_address
 
   boot_command = [
     # Ubuntu 24.04's ISO boots straight into a GRUB menu. Press `c` to drop to the GRUB
