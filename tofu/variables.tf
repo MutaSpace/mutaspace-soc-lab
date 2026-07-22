@@ -195,3 +195,30 @@ variable "learner_count" {
     error_message = "learner_count must be a whole number between 0 and 20. Above 20 the per-learner address block (host .60 upward, step 2) runs into the DHCP pool at .100."
   }
 }
+
+# -----------------------------------------------------------------------------
+# assume_all_enabled
+# -----------------------------------------------------------------------------
+# Ignore every `enabled: false` in lab.yaml and treat the lab as fully declared.
+#
+# This exists for the TEST SUITE, and the reason is worth stating because the
+# alternative is a subtle rot.
+#
+# tofu/tests/ asserts invariants about the whole lab: that no two machines claim
+# the same VMID, that every MAC encodes its address, that the learner VMID
+# formula holds, that the firewall's DHCP reservations match the machines they
+# are written for. Those are properties of the lab as DESIGNED.
+#
+# During bring-up most machines are switched off, because their templates do not
+# exist yet. If the tests only checked what happens to be enabled, then turning a
+# machine off would also turn off the checks that protect it - and the suite
+# would get quieter exactly as the lab got less complete. A test that passes
+# because there is nothing left to test is worse than a failing one.
+#
+# So the tests set this to true and assert against the full declared lab. A plan
+# or apply leaves it false and builds only what is enabled.
+variable "assume_all_enabled" {
+  type        = bool
+  default     = false
+  description = "Test-only. Ignore enabled:false in lab.yaml so invariants are checked against the complete declared lab."
+}

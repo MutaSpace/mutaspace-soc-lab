@@ -41,7 +41,15 @@ mock_provider "proxmox" {
   }
 }
 
+
+
 variables {
+  # Assert against the COMPLETE declared lab, not just whatever is switched on
+  # today. During bring-up most machines carry enabled: false because their
+  # templates do not exist yet - and if these checks only covered enabled
+  # machines, switching one off would switch off the checks that protect it.
+  assume_all_enabled = true
+
   # The encryption block in versions.tf needs a passphrase. This one is not a
   # secret: a test's state is held in memory and thrown away.
   state_passphrase = "offline-test-passphrase-not-a-secret"
@@ -55,12 +63,12 @@ override_data {
   target = data.proxmox_virtual_environment_vms.templates
   values = {
     vms = [
-      { vm_id = 9000, name = "tpl-ubuntu-server-2404", node_name = "mutaspace-soc-node01", status = "stopped", template = true, tags = [] },
-      { vm_id = 9001, name = "tpl-ubuntu-desktop-2404", node_name = "mutaspace-soc-node01", status = "stopped", template = true, tags = [] },
-      { vm_id = 9002, name = "tpl-win-server-2022", node_name = "mutaspace-soc-node01", status = "stopped", template = true, tags = [] },
-      { vm_id = 9003, name = "tpl-win11-client", node_name = "mutaspace-soc-node01", status = "stopped", template = true, tags = [] },
-      { vm_id = 9004, name = "tpl-opnsense-267", node_name = "mutaspace-soc-node01", status = "stopped", template = true, tags = [] },
-      { vm_id = 9005, name = "tpl-kali-rolling", node_name = "mutaspace-soc-node01", status = "stopped", template = true, tags = [] },
+      { vm_id = 9000, name = "tpl-ubuntu-server-2404", node_name = "swc2026", status = "stopped", template = true, tags = [] },
+      { vm_id = 9001, name = "tpl-ubuntu-desktop-2404", node_name = "swc2026", status = "stopped", template = true, tags = [] },
+      { vm_id = 9002, name = "tpl-win-server-2022", node_name = "swc2026", status = "stopped", template = true, tags = [] },
+      { vm_id = 9003, name = "tpl-win11-client", node_name = "swc2026", status = "stopped", template = true, tags = [] },
+      { vm_id = 9004, name = "tpl-opnsense-267", node_name = "swc2026", status = "stopped", template = true, tags = [] },
+      { vm_id = 9005, name = "tpl-kali-rolling", node_name = "swc2026", status = "stopped", template = true, tags = [] },
     ]
   }
 }

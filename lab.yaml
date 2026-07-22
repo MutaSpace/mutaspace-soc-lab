@@ -220,6 +220,7 @@ vms:
   # install, and claiming otherwise is how you buy a 15-minute timeout per refresh.
   fw-01:
     vm_id: 100
+    enabled: false # template 9004 (OPNsense) not built - needs a manually decompressed ISO
     # `role: firewall` is not decoration. It is the flag that switches on the
     # plan-time preconditions in tofu/modules/proxmox-vm/main.tf: this is the only
     # machine permitted on vmbr0, and its net0 MUST be the vmbr0 leg.
@@ -267,6 +268,7 @@ vms:
   # teaching rather than hiding.
   dc-01:
     vm_id: 102
+    enabled: false # template 9002 (Windows Server 2022) not built - needs a registration-gated ISO
     lifecycle: reprovisioned
     template: win-server-2022
     guest: windows
@@ -295,6 +297,7 @@ vms:
   # static mappings are templated from this same map.
   analyst-01:
     vm_id: 103
+    enabled: false # template 9001 (Ubuntu Desktop) not built yet
     lifecycle: reprovisioned
     template: ubuntu-desktop-2404
     guest: linux
@@ -365,6 +368,7 @@ vms:
   # in-place conversion to a full edition. A rebuild is the only path out.
   win-client-01:
     vm_id: 105
+    enabled: false # template 9003 (Windows 11) not built - needs a registration-gated ISO
     lifecycle: reprovisioned
     template: win11-client
     guest: windows
@@ -423,6 +427,7 @@ vms:
   # instead of copying 40 GB every time.
   kali-01:
     vm_id: 108
+    enabled: false # template 9005 (Kali) not built yet
     lifecycle: linked
     template: kali-rolling
     guest: linux
@@ -446,6 +451,7 @@ vms:
   # It exists to BE a trust boundary, not to do work. 2 GB and 20 GB is the point.
   untrusted-01:
     vm_id: 109
+    enabled: false # template 9005 (Kali) not built yet
     lifecycle: linked
     template: kali-rolling
     guest: linux
@@ -512,6 +518,7 @@ vms:
 learner_endpoints:
   win-client:
     vmid_offset: 5
+    enabled: false # template 9003 (Windows 11) not built yet
     # linked, not reprovisioned. This is the single biggest storage saving in the
     # file: a full clone per learner costs 50 GB each, so three learners is 150 GB
     # of a 816 GiB pool spent on three near-identical Windows boxes. A linked clone
@@ -542,6 +549,7 @@ learner_endpoints:
 
   kali:
     vmid_offset: 6
+    enabled: false # template 9005 (Kali) not built yet
     lifecycle: linked
     template: kali-rolling
     guest: linux

@@ -81,6 +81,33 @@ locals {
   # ---------------------------------------------------------------------------
   # Core VMs (lab.yaml -> vms:)
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # The `enabled` flag
+  # ---------------------------------------------------------------------------
+  # Every machine in lab.yaml may carry `enabled: false`, and defaults to true.
+  # A disabled machine is not built, is not counted, and - the part that actually
+  # matters - does not drag its template into templates_in_use, so a plan is not
+  # blocked by a template nothing is asking for.
+  #
+  # This exists for two reasons that arrived from opposite directions.
+  #
+  # BRING-UP. Templates are built one at a time, and until every one of them
+  # exists the template preconditions fail and NOTHING can be applied - not even
+  # the machines whose own template is ready. Disabling the machines you cannot
+  # build yet lets the lab come up in the order it is actually built in.
+  #
+  # CAPACITY. The host has 94 GB and the full lab plus a class of three asks for
+  # more than that if everything runs at once. The research plane (kali-01,
+  # untrusted-01, nlp-01) is not needed during a Wazuh detection lab, and turning
+  # it off is a one-word edit rather than a commented-out block.
+  #
+  # Disabling is NOT the same as `started: false`. `started: false` creates the
+  # machine and leaves it powered off - it still occupies disk and still has to
+  # clone. `enabled: false` means the machine does not exist at all.
+  #
+  # WARNING: flipping a live machine to enabled: false DESTROYS it on the next
+  # apply, along with its disk. That is the intended meaning, and it is why the
+  # flag is read with try(..., true) - a machine with no opinion is built.
   core_vms = {
     for name, vm in local.lab.vms : name => {
       name    = name
@@ -150,7 +177,14 @@ locals {
 
       description = trimspace(vm.description)
     }
+    if var.assume_all_enabled || try(vm.enabled, true)
   }
+
+  # Everything lab.yaml declares, enabled or not. Used only for reporting, so a
+  # human can see what is switched off rather than having to diff against git.
+  disabled_vm_names = sort([
+    for name, vm in local.lab.vms : name if !try(vm.enabled, true)
+  ])
 
   # ---------------------------------------------------------------------------
   # Learner endpoint VMs (lab.yaml -> learners: x learner_endpoints:)
@@ -167,6 +201,10 @@ locals {
   # Flatten (learner x endpoint) into one list before turning it into a map. The
   # index into the ORIGINAL roster is what drives both the VMID and the address, so
   # it is captured here rather than recomputed later.
+  # An endpoint ROLE can be disabled too, which switches it off for the whole
+  # class at once rather than learner by learner. Same semantics as a core
+  # machine: enabled: false on learner_endpoints.win-client means nobody gets a
+  # Windows endpoint, and template 9003 stops being required.
   learner_pairs = flatten([
     for idx, learner in local.enabled_learners : [
       for role in learner.endpoints : {
@@ -175,6 +213,7 @@ locals {
         role          = role
         spec          = local.lab.learner_endpoints[role]
       }
+      if var.assume_all_enabled || try(local.lab.learner_endpoints[role].enabled, true)
     ]
   ])
 

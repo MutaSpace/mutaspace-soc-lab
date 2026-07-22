@@ -180,3 +180,30 @@ output "ansible_inventory" {
     }
   }
 }
+
+# -----------------------------------------------------------------------------
+# Bring-up visibility
+# -----------------------------------------------------------------------------
+# What lab.yaml declares but is currently switched off.
+#
+# Worth surfacing rather than leaving to a diff against git: a machine that is
+# absent because somebody set enabled:false looks exactly like a machine that was
+# never written, and the difference matters when a lab is half built.
+output "disabled_vms" {
+  value       = local.disabled_vm_names
+  description = "Machines declared in lab.yaml but switched off with enabled:false."
+}
+
+# Which templates the current plan actually requires. Shrinks as machines are
+# disabled, which is the mechanism that lets a partly-built lab plan at all.
+output "templates_required" {
+  value       = local.templates_in_use
+  description = "Template key -> VMID for every template an enabled machine needs on the host."
+}
+
+# Which template each planned machine clones from. Paired with the above, this is
+# what makes "why is this template still required?" answerable.
+output "vm_templates" {
+  value       = { for name, vm in local.all_vms : name => vm.template_key }
+  description = "Machine -> template key it clones from."
+}
