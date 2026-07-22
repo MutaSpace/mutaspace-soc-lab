@@ -1,0 +1,129 @@
+#ps1_sysnative
+# =============================================================================
+# Cloudbase-Init user-data - Windows guests
+# =============================================================================
+# Rendered per VM by tofu/snippets.tf and attached through Proxmox's configdrive2
+# cloud-init drive, which is the format Cloudbase-Init reads on Windows.
+#
+# WHY THIS IS POWERSHELL AND NOT CLOUD-CONFIG
+#   Cloudbase-Init understands a subset of cloud-config, but the parts of Windows
+#   this lab needs to touch on first boot - the network profile, WinRM, the DNS
+#   client - have no cloud-config equivalent. A #ps1_sysnative script is the
+#   supported escape hatch and is honest about what it is doing.
+#
+# WHAT IS DELIBERATELY NOT HERE
+#   * The hostname. Cloudbase-Init sets it from the cloud-init drive's metadata,
+#     which Proxmox generates from the VM name, and it reboots once to apply it.
+#     Setting it again here would fight that.
+#   * The username. Proxmox's `ciuser` is ignored on Windows entirely; the account
+#     Cloudbase-Init manages is named in cloudbase-init.conf inside the image.
+#   * Any password. Credentials belong to Ansible over WinRM, not to a file that
+#     lands on a readable virtual drive.
+#   * The domain join, Sysmon, the Wazuh agent. All Ansible - all of them need to
+#     be re-runnable against a machine that already exists.
+#
+# Generated for: ${hostname}
+# ---------------------------------------------------------------------------
+
+$ErrorActionPreference = 'Stop'
+$log = 'C:\Windows\Temp\mutaspace-cloudinit.log'
+
+function Write-Step {
+    param([string] $Message)
+    $line = '[{0}] {1}' -f (Get-Date -Format 'o'), $Message
+    Add-Content -Path $log -Value $line
+    Write-Output $line
+}
+
+Write-Step 'MutaSpace lab first-boot configuration starting for ${hostname}'
+
+# ---------------------------------------------------------------------------
+# DNS
+# ---------------------------------------------------------------------------
+# Point the resolver at the domain controller statically rather than accepting
+# whatever DHCP offers.
+#
+# This is what breaks the circular dependency at the heart of the lab: every guest
+# needs dc-01 to resolve names, and dc-01 is itself a guest. If members waited for
+# DHCP to tell them where DNS lives, the first boot of the first machine would have
+# nowhere to ask. Writing the resolver in at build time removes the question.
+#
+# It also matters for correctness rather than just ordering: a domain member that
+# resolves at the firewall instead of the domain controller cannot find the
+# _ldap._tcp SRV records, and the domain join fails with an error that blames the
+# network.
+$dnsServers = @(${dns_servers})
+if ($dnsServers.Count -gt 0) {
+    Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+        Write-Step ('Setting DNS on adapter {0} to {1}' -f $_.Name, ($dnsServers -join ', '))
+        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $dnsServers
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Network profile
+# ---------------------------------------------------------------------------
+# WinRM refuses to configure itself on an interface Windows considers Public, and
+# a freshly cloned client SKU calls every new network Public. This is the specific
+# reason WinRM bootstrap "works on Server 2022 and hangs on Windows 11" - the
+# server SKU is more permissive. Flipping the profile first is not optional.
+Get-NetConnectionProfile | ForEach-Object {
+    if ($_.NetworkCategory -ne 'DomainAuthenticated') {
+        Write-Step ('Setting network category to Private on {0}' -f $_.InterfaceAlias)
+        Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
+    }
+}
+
+# ---------------------------------------------------------------------------
+# WinRM - the door Ansible comes in through
+# ---------------------------------------------------------------------------
+# HTTP on 5985 with NTLM, used only by the bootstrap inventory group that talks to
+# the local Administrator account before the machine is a domain member. Once the
+# machine has joined mutaspace.local, Ansible switches to Kerberos.
+#
+# NTLM cannot delegate, which is why every play that creates an Active Directory
+# object runs against dc-01 itself rather than reaching through another host.
+Write-Step 'Configuring WinRM'
+winrm quickconfig -quiet -force
+
+# Without this, a local administrator account authenticating remotely is filtered
+# down to a standard-user token and everything fails with access denied.
+New-ItemProperty `
+    -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+    -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force | Out-Null
+
+if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
+        -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow | Out-Null
+}
+
+# Delayed start: WinRM occasionally loses a race against the network stack on a
+# freshly cloned machine and comes up before there is an interface to listen on.
+sc.exe config WinRM start= delayed-auto | Out-Null
+
+# ---------------------------------------------------------------------------
+# Time
+# ---------------------------------------------------------------------------
+# Same reasoning as the Linux guests: the classroom reset is a snapshot rollback,
+# and a machine that comes back believing it is two weeks ago fails Kerberos
+# because the skew exceeds five minutes. Domain members inherit their time from the
+# domain hierarchy once joined, so this only has to hold until then.
+Write-Step 'Setting timezone and time source'
+tzutil /s 'UTC' | Out-Null
+w32tm /config /manualpeerlist:"${ntp_server},0x8" /syncfromflags:manual /update | Out-Null
+Restart-Service w32time -ErrorAction SilentlyContinue
+w32tm /resync | Out-Null
+
+# ---------------------------------------------------------------------------
+# Breadcrumb
+# ---------------------------------------------------------------------------
+$marker = @{
+    hostname        = '${hostname}'
+    fqdn            = '${fqdn}'
+    role            = '${role}'
+    managed_by      = 'opentofu'
+    source_of_truth = 'lab.yaml'
+} | ConvertTo-Json
+Set-Content -Path 'C:\Windows\Temp\mutaspace-lab.json' -Value $marker
+
+Write-Step 'MutaSpace lab first-boot configuration complete'

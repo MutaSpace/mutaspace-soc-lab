@@ -1,0 +1,98 @@
+# inventory/group_vars/all.yml
+#
+# Lab-wide facts that more than one playbook needs, plus every credential the playbooks use.
+#
+# CREDENTIAL POLICY: no password, token, key or real management address is ever written here. Every
+# secret is read from an environment variable at run time. The `default=Undefined` argument to the
+# env lookup is deliberate - it makes a missing variable an immediate, named error instead of an
+# empty string that silently sets a blank password on a domain controller.
+#
+# Copy lab-credentials.env.example, fill it in, and `source` it before running anything.
+---
+
+# ---------------------------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------------------------
+lab_domain: mutaspace.local
+lab_netbios: MUTASPACE
+lab_domain_dn: "DC=mutaspace,DC=local"
+
+# Server 2022 has no Win2019/Win2022 functional level. WinThreshold (Server 2016) is the ceiling.
+lab_forest_mode: WinThreshold
+lab_domain_mode: WinThreshold
+
+# ---------------------------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------------------------
+lab_soc_lan_cidr: 10.10.10.0/24
+lab_soc_lan_gateway: 10.10.10.1
+lab_isolated_cidr: 10.10.20.0/24
+lab_isolated_gateway: 10.10.20.1
+
+lab_dns_server: 10.10.10.10
+lab_dc_hostname: dc-01
+lab_dc_fqdn: "dc-01.{{ lab_domain }}"
+
+# The reverse lookup zone name for 10.10.10.0/24. Recorded here because it is derived, not obvious,
+# and because 20-dns-records.yml and 10-dc-promote.yml must agree on it exactly.
+lab_reverse_zone: "10.10.10.in-addr.arpa"
+
+# ---------------------------------------------------------------------------------------------
+# Wazuh
+# ---------------------------------------------------------------------------------------------
+# 4.14.6 is pinned deliberately. Wazuh 5.0 is still beta at the time of writing and removes
+# Filebeat in favour of a native indexer connector, which makes it a rewrite rather than an upgrade.
+wazuh_version: "4.14.6"
+wazuh_package_revision: "1"
+wazuh_major: "4.14"
+
+# Agents ENROLL against the IP address, because the FQDN does not resolve until 20-dns-records.yml
+# has run and a failed name lookup during package installation is a silent, confusing failure.
+# A later task in the agent roles rewrites ossec.conf to the FQDN, which is what you actually want
+# long-term: the manager can be re-addressed without touching every agent.
+wazuh_manager_ip: 10.10.10.20
+wazuh_manager_fqdn: "wazuh-01.{{ lab_domain }}"
+
+# The Wazuh API listens on 55000. The dashboard is the separate HTTPS service on 443.
+wazuh_api_port: 55000
+
+# Custom rule IDs must live in Wazuh's reserved user range, 100000-120000. Anything outside it can
+# collide with a shipped rule on the next ruleset update.
+wazuh_local_rules_file: local_rules.xml
+
+# ---------------------------------------------------------------------------------------------
+# Local paths
+# ---------------------------------------------------------------------------------------------
+# Generated credentials are written here and nowhere else. ansible/.gitignore excludes it.
+lab_secrets_dir: "{{ playbook_dir | dirname }}/.secrets"
+
+# ---------------------------------------------------------------------------------------------
+# Credentials - environment variables only
+# ---------------------------------------------------------------------------------------------
+# Local Administrator on a freshly-cloned Windows template, set by Cloudbase-Init/Autounattend.
+# Used only by the bootstrap_windows group.
+lab_win_local_admin_password: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_WIN_ADMIN_PASSWORD', default=Undefined) }}
+
+# MUTASPACE\Administrator after the forest exists. Kept as a separate variable from the local
+# password so it can be rotated independently once the domain is real.
+lab_domain_admin_user: Administrator
+lab_domain_admin_password: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_DOMAIN_ADMIN_PASSWORD', default=Undefined) }}
+
+# Directory Services Restore Mode password, set once at forest creation and needed again only in a
+# disaster. It is not the same thing as the domain administrator password and should not be reused.
+lab_safe_mode_password: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_SAFE_MODE_PASSWORD', default=Undefined) }}
+
+# Shared password for the seeded lab accounts (test.user, lab.user02). These are teaching accounts
+# in an isolated lab; they are still not written down in the repository.
+lab_user_password: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_LAB_USER_PASSWORD', default=Undefined) }}
+
+# Wazuh API credentials. The installer generates these; 40-wazuh-server.yml captures them into
+# lab_secrets_dir and the operator exports them before running 70-detections.yml.
+wazuh_api_user: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_API_USER', default='wazuh') }}
+wazuh_api_password: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_API_PASSWORD', default=Undefined) }}

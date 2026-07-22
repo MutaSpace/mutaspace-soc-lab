@@ -1,0 +1,28 @@
+# inventory/group_vars/linux.yml
+#
+# How Ansible connects to the Linux hosts, and nothing else.
+#
+# Connection variables live in exactly one place per group. If you find yourself setting
+# ansible_user on an individual host, the host probably belongs in a different group.
+---
+ansible_connection: ansible.builtin.ssh
+
+# The cloud-init user baked into the 9000/9001/9005 templates. Overridable because a fork of this
+# lab will very likely use a different name.
+ansible_user: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_LINUX_USER', default='labadmin') }}
+
+# Key-based authentication only. The key path is an environment variable so the repository never
+# contains a path into someone's home directory, and so CI can point at a different key.
+ansible_ssh_private_key_file: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_LINUX_SSH_KEY', default=Undefined) }}
+
+# Privilege escalation. cloud-init grants the template user passwordless sudo, so no become
+# password is set here. If your template does not, export MUTASPACE_LINUX_BECOME_PASSWORD and
+# uncomment ansible_become_password below rather than putting a password in this file.
+ansible_become: true
+ansible_become_method: ansible.builtin.sudo
+# ansible_become_password: >-
+#   {{ lookup('ansible.builtin.env', 'MUTASPACE_LINUX_BECOME_PASSWORD', default=Undefined) }}
+
+ansible_python_interpreter: /usr/bin/python3

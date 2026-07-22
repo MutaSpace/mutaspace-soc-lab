@@ -1,0 +1,24 @@
+# roles/wazuh_agent_windows/defaults/main.yml
+#
+# Defaults for the Windows Wazuh agent role.
+#
+# The parameter names are identical to the Linux role's environment variables - WAZUH_MANAGER,
+# WAZUH_AGENT_NAME, WAZUH_AGENT_GROUP - because Wazuh uses the same names as MSI properties on
+# Windows. That symmetry is worth pointing out to learners: the two platforms differ in packaging,
+# not in the enrollment model.
+---
+wazuh_agent_enroll_address: "{{ wazuh_manager_ip }}"
+wazuh_agent_final_address: "{{ wazuh_manager_fqdn }}"
+wazuh_agent_use_fqdn: true
+
+wazuh_agent_name: "{{ inventory_hostname }}"
+wazuh_agent_group: default
+
+wazuh_agent_msi_url: >-
+  https://packages.wazuh.com/4.x/windows/wazuh-agent-{{ wazuh_version }}-{{ wazuh_package_revision }}.msi
+wazuh_agent_msi_path: 'C:\Windows\Temp\wazuh-agent.msi'
+
+# The agent installs to the x86 Program Files directory even on 64-bit Windows. This path is a
+# frequent source of "the file is not there" confusion.
+wazuh_agent_config_path: 'C:\Program Files (x86)\ossec-agent\ossec.conf'
+wazuh_agent_service_name: WazuhSvc

@@ -1,0 +1,31 @@
+# inventory/group_vars/bootstrap_windows.yml
+#
+# How Ansible talks to a Windows machine that is NOT yet part of the domain.
+#
+# This is the identity a freshly-cloned Windows template has: a local Administrator account set by
+# Cloudbase-Init or Autounattend, reachable over WinRM with NTLM. It is the only identity available
+# before 10-dc-promote.yml and 30-domain-join.yml run, because there is no domain to authenticate
+# against yet.
+#
+# Hosts in this group carry the `-bootstrap` suffix in the inventory. See the header of
+# inventory/hosts.yml for why the same machine is listed twice.
+---
+ansible_connection: ansible.builtin.winrm
+ansible_port: 5985
+ansible_winrm_transport: ntlm
+
+ansible_user: Administrator
+ansible_password: "{{ lab_win_local_admin_password }}"
+
+# Port 5985 is plain HTTP, which looks alarming until you know that NTLM negotiates a session key
+# and Ansible encrypts the WinRM message payload with it. The traffic on the wire is encrypted; it
+# is simply not TLS. This avoids having to provision and trust a certificate on every Windows
+# template before the CA that would issue it exists. Because the payload is encrypted, no
+# ansible_winrm_server_cert_validation setting is needed at all here.
+#
+# It is still HTTP, and it is still a lab. Do not copy this group into a production inventory.
+
+# The default is 30 seconds, which is not enough for a Windows machine that is still finishing its
+# first boot when the play starts.
+ansible_winrm_operation_timeout_sec: 120
+ansible_winrm_read_timeout_sec: 150

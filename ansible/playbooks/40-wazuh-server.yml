@@ -1,0 +1,183 @@
+# playbooks/40-wazuh-server.yml
+#
+# Install the Wazuh 4.14.6 all-in-one deployment on wazuh-01: manager, indexer and dashboard on one
+# host, which is the right shape for a lab of this size.
+#
+# ---------------------------------------------------------------------------------------------
+# READ THIS BEFORE RUNNING IT: this playbook is a BUILD-PLANE concern wearing a configuration
+# playbook's clothes.
+# ---------------------------------------------------------------------------------------------
+# The Wazuh installation assistant does not install from a self-contained package set. During the
+# indexer stage it fetches `wazuh-template.json` from raw.githubusercontent.com, and the package
+# repositories themselves are on packages.wazuh.com. That means running this playbook requires
+# wazuh-01 to have working outbound internet access and working name resolution for GitHub - on the
+# SOC LAN, behind fw-01, on a network whose entire design premise is isolation.
+#
+# The better place for this work is the Packer build of template 9000, on the build plane (vmbr9),
+# where outbound access already exists by design and where the result is baked into an image that
+# never needs the internet again. This playbook is kept because it documents what the template must
+# end up containing, because it is how the lab is rebuilt when the template is not yet updated, and
+# because "the SIEM install needs the internet" is a constraint worth teaching rather than hiding.
+#
+# If you run it as-is, fw-01 must permit wazuh-01 outbound HTTPS for the duration.
+# ---------------------------------------------------------------------------------------------
+#
+# Usage:
+#   ansible-playbook playbooks/40-wazuh-server.yml
+---
+- name: Install the Wazuh all-in-one deployment on wazuh-01
+  hosts: wazuh_manager
+  gather_facts: true
+  become: true
+
+  vars:
+    wazuh_installer_path: /root/wazuh-install.sh
+    wazuh_files_tar: /root/wazuh-install-files.tar
+    wazuh_files_dir: /root/wazuh-install-files
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # Is it already installed?
+    # -----------------------------------------------------------------------------------------
+    # The installation assistant is not idempotent. Re-running it on a working installation is
+    # destructive: it regenerates certificates and passwords, which disconnects every enrolled
+    # agent. Everything below is guarded on this one check.
+    - name: Check whether Wazuh is already installed
+      ansible.builtin.stat:
+        path: /var/ossec/bin/wazuh-control
+      register: wazuh_control
+
+    - name: Report the installation state
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Wazuh is already installed - the installer will be skipped.'
+             if wazuh_control.stat.exists
+             else 'Wazuh is not installed - the installation assistant will run.' }}
+
+    # -----------------------------------------------------------------------------------------
+    # Install
+    # -----------------------------------------------------------------------------------------
+    - name: Download the pinned Wazuh installation assistant
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/{{ wazuh_major }}/wazuh-install.sh"
+        dest: "{{ wazuh_installer_path }}"
+        mode: "0700"
+        owner: root
+        group: root
+      when: not wazuh_control.stat.exists
+
+    # -a is the all-in-one deployment. -i skips the hardware precheck, which the assistant fails on
+    # anything under its recommended sizing - this lab gives wazuh-01 4 vCPU and 8 GB, which works
+    # for a classroom but is below what the check wants to see.
+    #
+    # The command deliberately does not have a `changed_when: false`: it changes a great deal.
+    - name: Run the Wazuh installation assistant (all-in-one)
+      ansible.builtin.command:
+        cmd: "bash {{ wazuh_installer_path }} --all-in-one --ignore-check"
+        creates: /var/ossec/bin/wazuh-control
+      register: wazuh_install
+      when: not wazuh_control.stat.exists
+      # The installer echoes the generated admin password to stdout on completion. Suppressing the
+      # output is the entire reason this task has no_log - the credential is retrieved deliberately
+      # and privately a few tasks below instead.
+      no_log: true
+      async: 3600
+      poll: 30
+
+    # -----------------------------------------------------------------------------------------
+    # Capture the generated credentials - privately
+    # -----------------------------------------------------------------------------------------
+    # The assistant writes every generated password into wazuh-install-files.tar. Those passwords
+    # are needed by 70-detections.yml and by anyone who wants to log into the dashboard, so they
+    # cannot simply be discarded - but they must never reach the terminal, the log, or the repo.
+    # The bundle is deleted on some rebuild paths, and on a manager installed before this playbook
+    # existed it may never have been kept. That is not a failure - it just means the credentials
+    # have to come from wherever they were saved the first time. Guarding on the tar's existence
+    # keeps a re-run from stopping on a file that is legitimately absent.
+    - name: Check whether the generated credential bundle is still present
+      ansible.builtin.stat:
+        path: "{{ wazuh_files_tar }}"
+      register: wazuh_tar
+
+    - name: Capture the generated credentials
+      when: wazuh_tar.stat.exists
+      block:
+
+        - name: Extract the generated credential bundle on the manager
+          ansible.builtin.unarchive:
+            src: "{{ wazuh_files_tar }}"
+            dest: /root/
+            remote_src: true
+            creates: "{{ wazuh_files_dir }}/wazuh-passwords.txt"
+
+        - name: Read the generated passwords file
+          ansible.builtin.slurp:
+            src: "{{ wazuh_files_dir }}/wazuh-passwords.txt"
+          register: wazuh_passwords_raw
+          no_log: true
+
+        - name: Ensure the local secrets directory exists
+          ansible.builtin.file:
+            path: "{{ lab_secrets_dir }}"
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
+          become: false
+
+        # ansible/.gitignore excludes .secrets/ entirely. Mode 0600 so that a shared workstation
+        # does not hand the SIEM's admin password to the next person who logs in.
+        - name: Write the generated passwords to the gitignored secrets directory
+          ansible.builtin.copy:
+            content: "{{ wazuh_passwords_raw.content | b64decode }}"
+            dest: "{{ lab_secrets_dir }}/wazuh-passwords.txt"
+            mode: "0600"
+          delegate_to: localhost
+          become: false
+          no_log: true
+
+        - name: Tell the operator where the credentials went, without printing them
+          ansible.builtin.debug:
+            msg:
+              - "Wazuh credentials were written to {{ lab_secrets_dir }}/wazuh-passwords.txt (mode 0600, gitignored)."
+              - "Export the API user and password from that file before running 70-detections.yml:"
+              - "  export MUTASPACE_WAZUH_API_USER=wazuh"
+              - "  export MUTASPACE_WAZUH_API_PASSWORD='<the wazuh-wui / api password from that file>'"
+
+    - name: Note that the credential bundle was not available
+      ansible.builtin.debug:
+        msg: >-
+          {{ wazuh_files_tar }} is not present, so no credentials were captured. This is expected on
+          a manager that was installed before this playbook ran. Use the credentials saved at
+          installation time when running 70-detections.yml.
+      when: not wazuh_tar.stat.exists
+
+    # -----------------------------------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------------------------------
+    - name: Confirm the three Wazuh services are running
+      ansible.builtin.service_facts:
+
+    - name: Assert that manager, indexer and dashboard are all up
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item + '.service'] is defined
+          - ansible_facts.services[item + '.service'].state == 'running'
+        fail_msg: "{{ item }} is not running. Check `journalctl -u {{ item }}` on wazuh-01."
+        success_msg: "{{ item }} is running"
+      loop:
+        - wazuh-manager
+        - wazuh-indexer
+        - wazuh-dashboard
+
+    - name: Confirm the Wazuh API is listening
+      ansible.builtin.wait_for:
+        port: "{{ wazuh_api_port }}"
+        host: 127.0.0.1
+        timeout: 300
+
+    - name: Confirm the dashboard is listening on 443
+      ansible.builtin.wait_for:
+        port: 443
+        host: 127.0.0.1
+        timeout: 300

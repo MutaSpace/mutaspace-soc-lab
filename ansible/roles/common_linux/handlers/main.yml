@@ -1,0 +1,8 @@
+# roles/common_linux/handlers/main.yml
+#
+# Handlers for the baseline Linux role.
+---
+- name: Restart chrony
+  ansible.builtin.systemd_service:
+    name: chrony
+    state: restarted

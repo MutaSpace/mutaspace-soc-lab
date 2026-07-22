@@ -1,0 +1,8 @@
+# roles/wazuh_agent_windows/handlers/main.yml
+#
+# Handlers for the Windows Wazuh agent role.
+---
+- name: Restart the Wazuh agent service
+  ansible.windows.win_service:
+    name: "{{ wazuh_agent_service_name }}"
+    state: restarted

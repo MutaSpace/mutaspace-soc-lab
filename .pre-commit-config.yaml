@@ -1,0 +1,131 @@
+# .pre-commit-config.yaml --- checks that run before every commit
+#
+# WHAT THIS IS
+#   A set of hooks that git runs on staged files. They are fast, they are
+#   deterministic, and they refuse the commit rather than warning about it.
+#
+# WHY IT EXISTS
+#   This repository has one Proxmox host and no staging environment. There is
+#   no second machine to catch a mistake on. The lab it describes is also
+#   published --- it is portfolio and teaching material --- so a leaked home
+#   subnet or a leaked API token cannot be quietly rotated and forgotten.
+#
+#   That makes the pre-commit hook the earliest and cheapest place to catch
+#   two categories of problem:
+#
+#     1. Secrets and policy violations (gitleaks). GitHub push protection is
+#        the server-side backstop, but it scans for vendor credential
+#        formats --- it will never flag a home LAN subnet, a physical NIC's
+#        MAC address, or a file called wazuh-passwords.txt. Those are this
+#        repository's own rules and only .gitleaks.toml knows them.
+#
+#     2. Formatting and syntax drift (tofu fmt, packer fmt, yamllint). Not
+#        important on its own, but a diff full of whitespace changes hides
+#        the one line that actually changed --- and `tofu plan` is supposed to
+#        be readable by learners.
+#
+# INSTALL
+#   pip install pre-commit        (or: pipx install pre-commit)
+#   pre-commit install            # installs the git hook
+#   pre-commit run --all-files    # run everything once, now
+#
+# PINNING
+#   Every `rev` is an exact tag, never a branch. A hook that silently updates
+#   itself is a hook that can silently start passing.
+
+repos:
+
+  # -------------------------------------------------------------------------
+  # Secret and policy scanning
+  # -------------------------------------------------------------------------
+  # Reads .gitleaks.toml from the repository root. That file extends the
+  # default ruleset rather than replacing it, so the vendor-credential rules
+  # (AWS, GitHub, private keys) stay active alongside this lab's own rules
+  # for public IPv4 literals, hardware MAC addresses, Proxmox API tokens and
+  # Wazuh generated passwords.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # -------------------------------------------------------------------------
+  # HCL formatting --- OpenTofu
+  # -------------------------------------------------------------------------
+  # A `system` hook rather than a published one, because the published
+  # terraform hooks call `terraform`, and this repository uses OpenTofu.
+  #
+  # pass_filenames is false and the command is recursive: `tofu fmt` on a
+  # single file works, but the recursive form also catches .tftest.hcl files
+  # in tofu/tests/, which the file filter alone would not reliably reach.
+  - repo: local
+    hooks:
+      - id: tofu-fmt
+        name: tofu fmt (check only)
+        description: Fail if any OpenTofu file is not canonically formatted.
+        entry: tofu fmt -check -recursive tofu
+        language: system
+        pass_filenames: false
+        files: ^tofu/.*\.(tf|tfvars|tftest\.hcl)$
+
+      # `tofu validate` is deliberately NOT a pre-commit hook. It needs
+      # `tofu init` to have run, which downloads a provider --- too slow and
+      # too network-dependent for something that runs on every commit. Run
+      # `task validate` instead, and run it in CI.
+
+  # -------------------------------------------------------------------------
+  # HCL formatting --- Packer
+  # -------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: packer-fmt
+        name: packer fmt (check only)
+        description: Fail if any Packer template is not canonically formatted.
+        entry: packer fmt -check -recursive packer
+        language: system
+        pass_filenames: false
+        files: ^packer/.*\.(pkr\.hcl|pkrvars\.hcl|pkrtpl\.hcl)$
+
+  # -------------------------------------------------------------------------
+  # YAML linting
+  # -------------------------------------------------------------------------
+  # The configuration is inline rather than in a .yamllint file, to keep the
+  # number of dotfiles at the repository root down.
+  #
+  # Relaxations, each with a reason:
+  #   line-length 120   --- the Taskfile's precondition messages are prose and
+  #                         are more readable long than wrapped.
+  #   truthy off        --- Ansible playbooks legitimately use `yes`/`no`.
+  #   comments-indentation off
+  #                     --- the block comments in Taskfile.yml sit at column 0
+  #                         above indented keys on purpose, as section headers.
+  #   document-start off --- neither go-task nor Ansible requires `---`.
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args:
+          - --strict
+          - -d
+          - |
+            extends: default
+            rules:
+              line-length: {max: 120, allow-non-breakable-words: true}
+              truthy: disable
+              comments-indentation: disable
+              document-start: disable
+              braces: {max-spaces-inside: 1}
+              octal-values: {forbid-implicit-octal: true, forbid-explicit-octal: true}
+
+  # -------------------------------------------------------------------------
+  # Whitespace and merge hygiene
+  # -------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+        # Binary and image assets are excluded --- "fixing" them corrupts them.
+        exclude: \.(png|jpg|jpeg|gif|svg|pdf|ico|tar|gz|zip)$
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+        exclude: \.(png|jpg|jpeg|gif|svg|pdf|ico|tar|gz|zip)$
+      - id: check-merge-conflict

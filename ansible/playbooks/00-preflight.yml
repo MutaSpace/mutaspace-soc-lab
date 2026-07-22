@@ -1,0 +1,162 @@
+# playbooks/00-preflight.yml
+#
+# Prove the lab is in a state worth mutating, before anything mutates it.
+#
+# Everything after this playbook changes something that is expensive to undo: a forest is promoted,
+# a machine is renamed and rebooted, a SIEM is installed. This playbook changes nothing. It answers
+# three questions and then stops:
+#
+#   1. Does the operator have every credential the run will need?
+#   2. Is every host that this run will touch actually reachable?
+#   3. Does DNS look the way the current stage of the build expects?
+#
+# The third check is informational rather than fatal, because "DNS does not work yet" is the normal
+# state of a greenfield lab before 10-dc-promote.yml has ever run. Reporting it and continuing is
+# honest; failing on it would make the first run of a fresh lab impossible.
+#
+# Usage:
+#   ansible-playbook playbooks/00-preflight.yml
+#   ansible-playbook playbooks/00-preflight.yml -l bootstrap_windows   # just the Windows side
+---
+- name: Preflight - verify the operator's environment
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+
+    # Each of these is read straight from the environment. `| length > 0` is checked rather than
+    # the value itself, and no_log keeps the value out of the run output even on failure.
+    - name: Assert that every required credential is present in the environment
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', item) | length > 0
+        fail_msg: >-
+          Environment variable {{ item }} is not set. Copy lab-credentials.env.example to
+          lab-credentials.env, fill it in, and `source` it before running this playbook.
+        success_msg: "{{ item }} is set"
+      loop:
+        - MUTASPACE_WIN_ADMIN_PASSWORD
+        - MUTASPACE_DOMAIN_ADMIN_PASSWORD
+        - MUTASPACE_SAFE_MODE_PASSWORD
+        - MUTASPACE_LAB_USER_PASSWORD
+        - MUTASPACE_LINUX_SSH_KEY
+      no_log: true
+      tags: [credentials]
+
+    - name: Ensure the local secrets directory exists and is private
+      ansible.builtin.file:
+        path: "{{ lab_secrets_dir }}"
+        state: directory
+        mode: "0700"
+      tags: [credentials]
+
+    - name: Report the credential check result
+      ansible.builtin.debug:
+        msg: "All required environment variables are set. Secrets will be written to {{ lab_secrets_dir }}."
+      tags: [credentials]
+
+- name: Preflight - Linux reachability
+  hosts: linux
+  gather_facts: false
+
+  tasks:
+
+    - name: Confirm SSH and a usable Python interpreter
+      ansible.builtin.ping:
+      register: linux_ping
+      # A host on the isolated segment may legitimately be unreachable from the control node until
+      # fw-01 is routing. Record the outcome and let the summary task explain it.
+      failed_when: false
+      changed_when: false
+
+    - name: Summarise Linux reachability
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}, {{ lab_segment | default('segment unknown') }}):
+          {{ 'reachable' if linux_ping.ping is defined else 'NOT reachable - ' ~ (linux_ping.msg | default('no detail')) }}
+
+- name: Preflight - Windows reachability before the domain exists
+  hosts: bootstrap_windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Confirm WinRM over NTLM as the local Administrator
+      ansible.windows.win_ping:
+      register: win_ping
+      failed_when: false
+      changed_when: false
+
+    - name: Summarise Windows reachability
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}):
+          {{ 'WinRM 5985/NTLM OK' if win_ping.ping is defined else 'NOT reachable - ' ~ (win_ping.msg | default('no detail')) }}
+
+- name: Preflight - DNS sanity
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+
+    # `dig` is not installed everywhere. Without this check, a missing dig looks identical to a DNS
+    # server that is not answering, which is exactly the wrong conclusion to hand someone.
+    - name: Check that dig is available on the control node
+      ansible.builtin.command:
+        cmd: "dig -v"
+      register: dig_present
+      failed_when: false
+      changed_when: false
+
+    - name: Explain how to install dig if it is missing
+      ansible.builtin.debug:
+        msg: >-
+          `dig` was not found on this control node, so the DNS checks below cannot run and will
+          report NO ANSWER regardless of the actual state of DNS. Install it with
+          `sudo apt install dnsutils` and re-run this playbook.
+      when: dig_present.rc != 0
+
+    # This is a plain DNS query against the lab's DNS server, run from the control node. It is
+    # expected to FAIL on a brand-new lab: 10.10.10.10 is not a DNS server until dc-01 has been
+    # promoted. The point of running it anyway is that it tells you which stage of the build you
+    # are actually at, which is more useful than an assumption.
+    - name: Ask the lab DNS server for the domain controller's own record
+      ansible.builtin.command:
+        argv:
+          - dig
+          - "+short"
+          - "+time=2"
+          - "+tries=1"
+          - "@{{ lab_dns_server }}"
+          - "{{ lab_dc_fqdn }}"
+      register: dns_dc
+      failed_when: false
+      changed_when: false
+
+    - name: Ask the lab DNS server for the Wazuh manager's record
+      ansible.builtin.command:
+        argv:
+          - dig
+          - "+short"
+          - "+time=2"
+          - "+tries=1"
+          - "@{{ lab_dns_server }}"
+          - "{{ wazuh_manager_fqdn }}"
+      register: dns_wazuh
+      failed_when: false
+      changed_when: false
+
+    - name: Report what DNS currently knows
+      ansible.builtin.debug:
+        msg:
+          - "DNS server queried: {{ lab_dns_server }}"
+          - "{{ lab_dc_fqdn }} -> {{ dns_dc.stdout | default('') | trim | default('NO ANSWER', true) }}"
+          - "{{ wazuh_manager_fqdn }} -> {{ dns_wazuh.stdout | default('') | trim | default('NO ANSWER', true) }}"
+          - >-
+            {{
+              'DNS is serving the lab zone. You are past 20-dns-records.yml.'
+              if (dns_wazuh.stdout | default('') | trim | length > 0)
+              else 'No answers yet. This is normal before 10-dc-promote.yml and 20-dns-records.yml have run.'
+            }}

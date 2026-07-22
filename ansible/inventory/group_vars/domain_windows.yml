@@ -1,0 +1,52 @@
+# inventory/group_vars/domain_windows.yml
+#
+# How Ansible talks to a Windows machine that IS part of the domain.
+#
+# After 10-dc-promote.yml, the local Administrator on dc-01 no longer exists as a local account -
+# it has become MUTASPACE\Administrator. After 30-domain-join.yml, win-client-01 is a domain member
+# and the correct way to authenticate to it is the domain, not a local account. So the credentials
+# change, and so does the transport.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY KERBEROS, AND THE CONSTRAINT IT DOES NOT FIX
+# ---------------------------------------------------------------------------------------------
+# NTLM cannot delegate. A connection authenticated with NTLM gets a network logon token with no
+# credentials attached to it, so anything the remote machine tries to do that requires
+# authenticating onwards - which includes every Active Directory object operation - fails with
+# "Failed to contact the AD server" or an "Access is denied" that has nothing to do with the
+# permissions of the account you used. This is the classic Kerberos double-hop problem.
+#
+# Kerberos with delegation solves that in general. This lab does NOT rely on that: every play that
+# touches an AD object (20-dns-records.yml, 90-lab-seed.yml) runs AGAINST dc-01 ITSELF, so the
+# operation is local to the domain controller and there is no second hop to fail. Kerberos is used
+# here because it is the correct transport for a domain member, not because the lab depends on
+# delegation working.
+#
+# CONTROL NODE PREREQUISITE: Kerberos authentication requires a working krb5 client on the machine
+# running Ansible. See ansible/README.md for the /etc/krb5.conf stanza and the `kinit` check.
+# ---------------------------------------------------------------------------------------------
+---
+ansible_connection: ansible.builtin.winrm
+ansible_port: 5985
+ansible_winrm_transport: kerberos
+
+# Kerberos wants a UPN, not a DOMAIN\user string. The realm is upper-cased by convention and by
+# most krb5 configurations' expectations.
+ansible_user: "{{ lab_domain_admin_user }}@{{ lab_domain | upper }}"
+ansible_password: "{{ lab_domain_admin_password }}"
+
+# Ask the winrm connection plugin to obtain the ticket itself rather than depending on whatever is
+# already in the operator's credential cache. This keeps runs reproducible - a stale kinit from a
+# previous class is a genuinely confusing failure mode.
+ansible_winrm_kinit_mode: managed
+
+# NOTE ON ADDRESSING: Kerberos requires the target to be addressed by a name that matches its
+# service principal name, so hosts in this group set `ansible_host` to the FQDN in hosts.yml rather
+# than to an IP address. That is also why 20-dns-records.yml has to run before anything else uses
+# this group - and why dc-01 itself must have resolved its own name before it can be reached here.
+#
+# `ansible_host` is deliberately NOT set in this file: inventory host variables take precedence
+# over group variables, so a value here would be silently ignored.
+
+ansible_winrm_operation_timeout_sec: 120
+ansible_winrm_read_timeout_sec: 150

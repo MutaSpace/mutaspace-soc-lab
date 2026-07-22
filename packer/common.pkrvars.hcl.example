@@ -1,0 +1,100 @@
+# common.pkrvars.hcl.example
+#
+# WHAT THIS IS
+#   The template for `packer/common.pkrvars.hcl`, the variable file shared by every Packer
+#   build in this repository. Copy it, edit the values, and pass it to every build:
+#
+#     cp packer/common.pkrvars.hcl.example packer/common.pkrvars.hcl
+#     packer build -var-file=../common.pkrvars.hcl .
+#
+# WHY THE REAL FILE IS GITIGNORED
+#   `packer/common.pkrvars.hcl` is listed in .gitignore. Nothing in THIS file is secret -
+#   there are no credentials here on purpose - but the node name and the management network
+#   are lab-identifying details, and the repository's documentation policy is that public
+#   documents use placeholders like <LAB_MANAGEMENT_IP> rather than real addresses.
+#
+#   Keeping the real file out of git also means that the day someone does paste a token in
+#   here by mistake, `git add -A` does not publish it.
+#
+# WHAT IS DELIBERATELY NOT IN THIS FILE
+#   Credentials. All four of them:
+#
+#     PKR_VAR_proxmox_username      packer@pve!buildtoken
+#     PKR_VAR_proxmox_token         the token secret (a bare UUID)
+#     PKR_VAR_build_password_hash   SHA-512 crypt hash for the build account
+#     PKR_VAR_ssh_public_key        the public half of the build key pair
+#
+#   Packer reads any variable `foo` from the environment variable `PKR_VAR_foo`, so secrets
+#   live in your shell (or in a gitignored .envrc via direnv) and never in a file. See
+#   packer/README.md for the full list and for the credential-shape trap that catches
+#   everyone who tries to share one variable between Packer and OpenTofu.
+
+# ---------------------------------------------------------------------------------------
+# Proxmox connection
+# ---------------------------------------------------------------------------------------
+
+# The API endpoint, WITH /api2/json.
+#
+# TRAP: the bpg OpenTofu provider wants the SAME host WITHOUT /api2/json. Two tools, two
+# spellings of one URL. Getting it wrong produces a 501 or a 404 rather than a clear error.
+proxmox_url = "https://<LAB_MANAGEMENT_IP>:8006/api2/json"
+
+# The Proxmox node that runs the build. Single-node lab, so this is the only value there is.
+proxmox_node = "mutaspace-soc-node01"
+
+# Proxmox installs with a self-signed certificate. `true` is the honest setting for a lab
+# on a private management network; set it to false once a real certificate is installed and
+# the endpoint above uses the name on that certificate.
+proxmox_insecure_tls = true
+
+# ---------------------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------------------
+
+# Where template disks are written.
+#
+# This is NOT a free choice. kali-01 and untrusted-01 are LINKED clones of tpl-kali-rolling,
+# and Proxmox cannot change the target storage of a linked clone - "it is a storage internal
+# feature". So the template has to be written to the same datastore its clones will live on.
+# On a default PVE install with ext4 that is the LVM-thin pool, `local-lvm`.
+storage_pool = "local-lvm"
+
+# Where ISO files live. On a default install this is the directory storage `local`, which is
+# carved out of the root logical volume.
+#
+# WATCH THIS ONE. `local` is roughly 96 GB on a default 2 TB install, and it is where ISOs,
+# snippets, snapshot RAM state and vzdump backups all land by default. The ISO shelf alone
+# is about 26 GB once the Windows media is on it. The thin pool is not the constraint here;
+# the root volume is.
+iso_storage_pool = "local"
+
+# ---------------------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------------------
+
+# The build plane.
+#
+# vmbr9 (10.99.0.0/24) has no physical port. It exists because this lab is greenfield:
+# nothing on vmbr1 can reach the internet until fw-01 is routing, and fw-01 is itself a VM
+# that has to be built first. The Proxmox host is the gateway at 10.99.0.1 and masquerades
+# the subnet out through its own NIC, so template builds can reach archive.ubuntu.com and
+# http.kali.org before any lab network exists.
+#
+# The templates are built here and nothing runs here afterwards. OpenTofu re-points each
+# clone's NIC to vmbr1 or vmbr2 at clone time - `bridge` is a normal, non-ForceNew attribute
+# on the bpg provider, so moving the interface costs nothing.
+#
+# DO NOT set this to vmbr1. A build on vmbr1 has no route out and will hang fetching
+# packages, in a way that looks like an installer problem rather than a network one.
+build_bridge = "vmbr9"
+
+# ---------------------------------------------------------------------------------------
+# Timeouts
+# ---------------------------------------------------------------------------------------
+
+# How long to wait for a single Proxmox API task.
+#
+# The plugin default is ONE MINUTE, which is not enough for an ISO upload, a disk import or
+# a template conversion. When this is too low the failure reads as an API timeout and gives
+# no hint that the operation itself was fine and merely slow.
+task_timeout = "10m"

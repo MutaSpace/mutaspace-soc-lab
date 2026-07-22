@@ -1,0 +1,29 @@
+# ansible/.gitignore
+#
+# Scoped to the ansible/ tree. The repository root has its own .gitignore for repository-wide
+# patterns; this file covers the things only this area produces.
+
+# Generated credentials. 40-wazuh-server.yml writes the Wazuh installer's generated passwords here
+# so they never reach stdout, a log, or a commit. Everything in this directory is a secret.
+.secrets/
+
+# Environment files holding lab credentials. Only the .example is committed.
+lab-credentials.env
+*.env
+!*.env.example
+
+# Collections installed by `ansible-galaxy collection install -r requirements.yml`. Pinned in
+# requirements.yml, so the installed copy is a build artifact rather than source.
+collections/
+
+# wazuh-ansible is cloned from Wazuh's own repository when a distributed install is needed. Someone
+# else's repository does not belong in this one's history.
+roles/wazuh-ansible/
+
+# Project-local SSH known_hosts, created by the ssh_args setting in ansible.cfg. Host keys change
+# on every VM rebuild, so this is disposable state.
+.ssh/
+
+# Ansible run artifacts.
+*.retry
+facts_cache/

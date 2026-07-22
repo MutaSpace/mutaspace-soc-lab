@@ -1,0 +1,453 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  packer/win11-client/cd/Autounattend.xml.pkrtpl
+
+  WHAT THIS IS
+    The Windows Setup answer file for golden template 9003 (tpl-win11-client),
+    rendered by Packer's templatefile() and written to the root of a small generated
+    ISO labelled PACKERCD.
+
+  HOW IT DIFFERS FROM THE SERVER 2022 ANSWER FILE
+    1. windowsPE DriverPaths point at the `w11` virtio driver directories, not `2k22`.
+    2. A RunSynchronous block writes the HKLM\System\Setup\LabConfig bypass values.
+       See the long comment on that block - the vTPM is real, so the interesting
+       bypasses are the RAM and CPU ones.
+    3. Everything else is the same by design. Two answer files that diverge for no
+       reason are two answer files nobody can diff.
+
+  WHY IT EXISTS
+    Windows Setup is an interactive installer. Every question it would ask a human -
+    which disk, which edition, which keyboard, what password - has to be answered
+    here or the build sits at a dialog until Packer's winrm_timeout expires.
+
+  HOW WINDOWS FINDS IT
+    Setup scans the root of every removable, read-only volume for a file named
+    exactly "Autounattend.xml". No floppy drive is involved; the proxmox-iso builder
+    does not support floppies at all.
+
+  THE FOUR PASSES USED BELOW, IN THE ORDER WINDOWS RUNS THEM
+    windowsPE   - runs inside the boot environment, before anything is on disk.
+                  This is the ONLY place VirtIO drivers can be injected early enough
+                  to matter, and where the disk gets partitioned.
+    specialize  - runs after the image is applied, before first boot completes.
+                  Machine identity: computer name, time zone, RDP.
+    oobeSystem  - runs at the out-of-box experience. Local Administrator password,
+                  autologon, and the FirstLogonCommands that bootstrap WinRM so
+                  Packer can finally connect.
+
+  ⚠️ THE PASSWORD BELOW IS IN PLAINTEXT.
+    That is how Windows answer files work; there is no way around it for a password
+    Setup itself must consume. It is a build-only credential supplied from the
+    environment, the answer file's ISO is unmounted before the template is created,
+    C:\Windows\Panther is scrubbed in 90-cleanup.ps1, and sysprep /generalize clears
+    the LSA secret. Rotate the real Administrator password from Ansible anyway.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+  <!-- ==================================================================== -->
+  <!-- PASS 1: windowsPE                                                     -->
+  <!-- ==================================================================== -->
+  <settings pass="windowsPE">
+
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <SetupUILanguage>
+        <UILanguage>en-US</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <!--
+      THE POINT OF THIS WHOLE TEMPLATE.
+
+      Windows Setup draws its disk list from whatever storage controllers WinPE can
+      already see. WinPE ships no VirtIO driver, so on a virtio-scsi controller it
+      shows an empty list and the install dead-ends. The historical workaround, and
+      what every hand-built Windows VM in the old lab did, was to fall back to a SATA
+      disk and an E1000 NIC - emulated 1990s hardware carried forward forever.
+
+      The driver paths here name the `w11` directories on the virtio-win ISO, not the
+      `2k22` ones the server template uses. Loading a Server 2022 driver into a
+      Windows 11 install is one of those mistakes that appears to work and then
+      produces intermittent storage errors months later.
+
+      PnpCustomizationsWinPE loads drivers INTO WinPE before the disk list is drawn,
+      so Setup sees the real controller and installs onto it. The template then
+      matches every other VM in the lab: scsi0 on virtio-scsi-single, virtio NIC.
+
+      Every plausible CD drive letter is listed for every driver directory because
+      drive letters in an answer file are positional and there is no way to run a
+      lookup script this early. Paths that do not exist are noted in setupact.log and
+      skipped, so the redundancy is free.
+    -->
+    <component name="Microsoft-Windows-PnpCustomizationsWinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <DriverPaths>
+%{ for i, p in driver_paths ~}
+        <PathAndCredentials wcm:action="add" wcm:keyValue="${i + 1}">
+          <Path>${p}</Path>
+        </PathAndCredentials>
+%{ endfor ~}
+      </DriverPaths>
+    </component>
+
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+
+      <!--
+        THE WINDOWS 11 HARDWARE-REQUIREMENT BYPASS.
+
+        Windows 11 Setup refuses to install on a machine that fails its hardware
+        checks, and the error it shows ("This PC can't run Windows 11") does not say
+        WHICH check failed. These registry values, written into the WinPE registry
+        before the check runs, turn the individual checks off.
+
+        BE CLEAR ABOUT WHY EACH ONE IS HERE, BECAUSE IT IS NOT WHAT PEOPLE ASSUME:
+
+          BypassTPMCheck        - BELT AND BRACES ONLY. Proxmox gives this VM a REAL
+                                  vTPM 2.0 through tpm_config, and the OpenTofu module
+                                  gives the cloned VM one too. The TPM check should
+                                  pass on its own merits. This is here so that a
+                                  mistyped tpm_config produces a working build with a
+                                  missing device rather than an opaque Setup failure
+                                  at minute 40 of a 90-minute build.
+          BypassSecureBootCheck - same reasoning: OVMF with pre-enrolled keys satisfies
+                                  this, but the certificate situation is in flux (the
+                                  2011 Microsoft certificate set began expiring in
+                                  June 2026).
+          BypassRAMCheck        - THIS ONE IS LOAD-BEARING. Not because 4 GB fails the
+                                  4 GB minimum, but because the check is fussy about
+                                  how memory is reported, and this build sits exactly
+                                  on the boundary.
+          BypassCPUCheck        - ALSO LOAD-BEARING. cpu_type = "host" passes the
+                                  physical CPU through, and Windows 11's supported-CPU
+                                  list is a model allow-list, not a feature test. A
+                                  perfectly capable host CPU that is not on Microsoft's
+                                  list fails here.
+          BypassStorageCheck    - the 64 GB minimum against a 60 GB disk. Sizing the
+                                  disk to the licence check rather than to the lab's
+                                  needs would be the tail wagging the dog.
+
+        This is a lab workstation for detection engineering, not a machine Microsoft
+        supports. Bypassing the checks is the honest configuration; pretending the
+        hardware is something it is not would be worse.
+      -->
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Create the LabConfig key</Description>
+          <Path>reg.exe add HKLM\System\Setup\LabConfig /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>Bypass the TPM check (belt and braces - a real vTPM is present)</Description>
+          <Path>reg.exe add HKLM\System\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Bypass the Secure Boot check</Description>
+          <Path>reg.exe add HKLM\System\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Description>Bypass the RAM check</Description>
+          <Path>reg.exe add HKLM\System\Setup\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Description>Bypass the CPU model allow-list check</Description>
+          <Path>reg.exe add HKLM\System\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>6</Order>
+          <Description>Bypass the storage size check</Description>
+          <Path>reg.exe add HKLM\System\Setup\LabConfig /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+
+      <!--
+        GPT layout, because this VM boots OVMF/UEFI.
+
+        An MBR DiskConfiguration will not boot under OVMF. The required shape is:
+          1. EFI System Partition, FAT32, 260 MB  (the firmware reads this)
+          2. Microsoft Reserved (MSR), 16 MB      (no filesystem, no letter)
+          3. Windows, NTFS, everything else       (InstallTo points here)
+
+        Note InstallTo PartitionID = 3, not 1. Getting that wrong installs Windows
+        onto the 260 MB EFI partition and fails in a confusing way.
+
+        WillWipeDisk = true is safe here and only here: this is a fresh Packer VM
+        with one empty disk.
+      -->
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order>
+              <Type>EFI</Type>
+              <Size>260</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
+              <Type>Primary</Type>
+              <Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order>
+              <PartitionID>1</PartitionID>
+              <Label>System</Label>
+              <Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order>
+              <PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order>
+              <PartitionID>3</PartitionID>
+              <Label>Windows</Label>
+              <Letter>C</Letter>
+              <Format>NTFS</Format>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <!--
+            Which edition to install. See the windows_image_index variable for how to
+            confirm the index on YOUR ISO:
+              dism /Get-WimInfo /WimFile:D:\sources\install.wim
+          -->
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/INDEX</Key>
+              <Value>${image_index}</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <FullName>MutaSpace SOC Lab</FullName>
+        <Organization>MutaSpace</Organization>
+%{ if product_key != "" ~}
+        <ProductKey>
+          <Key>${product_key}</Key>
+          <WillShowUI>OnError</WillShowUI>
+        </ProductKey>
+%{ else ~}
+        <!--
+          No ProductKey element at all. Evaluation media carries its own edition and
+          rejects a key. If you are installing from Volume Licensing media instead,
+          set the product_key variable to the appropriate GVLK.
+        -->
+%{ endif ~}
+      </UserData>
+
+      <EnableFirewall>true</EnableFirewall>
+      <EnableNetwork>true</EnableNetwork>
+    </component>
+  </settings>
+
+  <!-- ==================================================================== -->
+  <!-- PASS 2: specialize                                                    -->
+  <!-- ==================================================================== -->
+  <settings pass="specialize">
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <!--
+        A build-time placeholder name, NOT win-client-01.
+
+        This is a generalised template, and it is cloned more than any other machine in
+        the lab - once for win-client-01 and again for every learner endpoint. The real
+        computer name is set per-VM after cloning by Cloudbase-Init from the OpenTofu
+        initialization block, and then confirmed when microsoft.ad.membership renames
+        and domain-joins the machine in a single task.
+
+        Baking a real name in here would give every learner the same computer name,
+        which breaks domain join, breaks Group Policy, and - the reason it matters for
+        this lab specifically - collapses every learner's telemetry into one Wazuh
+        agent name, so the incident scenarios in docs/incident-scenarios/ can no longer
+        tell whose workstation an event came from.
+      -->
+      <ComputerName>${computer_name}</ComputerName>
+      <TimeZone>UTC</TimeZone>
+    </component>
+
+    <!--
+      Windows 11 22H2 and later push hard toward a Microsoft account during OOBE, and
+      24H2 removed the oobe\BypassNRO.cmd script people used to rely on. The unattend
+      settings in the oobeSystem pass below (a local Administrator password plus
+      AutoLogon) are what actually keep OOBE local; this registry value is the
+      belt-and-braces version of the same thing, written before OOBE runs.
+    -->
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Allow OOBE to complete without a network or a Microsoft account</Description>
+          <Path>reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+
+    <!--
+      RDP on. This is a lab whose whole purpose is that learners look at things, and
+      the Windows console through the Proxmox noVNC viewer is painful. UserAuthentication
+      0 disables Network Level Authentication, which is a real weakening - it is
+      accepted here because the machine sits behind fw-01 on an isolated lab LAN, and
+      because turning NLA back on is itself a worthwhile hardening exercise.
+    -->
+    <component name="Microsoft-Windows-TerminalServices-LocalSessionManager"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <fDenyTSConnections>false</fDenyTSConnections>
+    </component>
+
+    <component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <UserAuthentication>0</UserAuthentication>
+    </component>
+  </settings>
+
+  <!-- ==================================================================== -->
+  <!-- PASS 3: oobeSystem                                                    -->
+  <!-- ==================================================================== -->
+  <settings pass="oobeSystem">
+
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+
+      <!--
+        Every OOBE screen a human would click through.
+
+        ProtectYourPC = 3 declines the optional telemetry/privacy defaults rather than
+        accepting them. SkipMachineOOBE and SkipUserOOBE are deliberately NOT used:
+        they have been deprecated for years and cause more breakage on current builds
+        than the explicit Hide* settings they were meant to replace.
+      -->
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+
+      <!--
+        Setting AdministratorPassword enables the built-in Administrator account and
+        is what stops OOBE from demanding that a new user be created.
+      -->
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>${admin_password}</Value>
+          <PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+
+      <!--
+        Autologon exists for exactly one reason: FirstLogonCommands do not run until
+        somebody logs on, and the thing they run is the WinRM bootstrap that lets
+        Packer connect at all.
+
+        LogonCount 2 leaves one spare logon in case a driver install forces a reboot
+        before the bootstrap finishes. The AutoAdminLogon and DefaultPassword registry
+        values this creates are deleted in scripts/90-cleanup.ps1 - note that the
+        commonly-cited "AutoLogonCount = 0" trick is a logon-counter fix and does NOT
+        scrub those values.
+      -->
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <Username>Administrator</Username>
+        <LogonCount>2</LogonCount>
+        <Password>
+          <Value>${admin_password}</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+
+      <TimeZone>UTC</TimeZone>
+
+      <!--
+        Find setup.ps1 by VOLUME LABEL, never by drive letter.
+
+        Three CDs are attached during the build. Adding, removing or reordering one
+        shifts every letter after it. The label is stable; D:/E:/F: are not.
+
+        The command deliberately contains no & < or > characters - those are XML
+        metacharacters and would have to be entity-escaped, which is a classic source
+        of answer files that parse but do nothing. Dot-sourcing runs the script in the
+        current session without needing the call operator.
+      -->
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Bootstrap WinRM and the QEMU guest agent for Packer</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq '${seed_cd_label}' } | Select-Object -First 1; . ($v.DriveLetter + ':\setup.ps1')"</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>

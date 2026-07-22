@@ -1,0 +1,97 @@
+# playbooks/30-domain-join.yml
+#
+# Rename win-client-01 and join it to mutaspace.local, in one operation.
+#
+# This runs against the `-bootstrap` inventory identity, because a workgroup machine has no domain
+# credentials to offer yet. Unlike a domain controller, a joined WORKSTATION keeps its local
+# Administrator account, so the bootstrap identity would still work afterwards - but every later
+# play targets the plain `win-client-01` name anyway, because the domain identity is the correct
+# one to use once it exists.
+#
+# WHY RENAME AND JOIN TOGETHER: microsoft.ad.membership takes a `hostname` parameter and performs
+# the rename as part of the join. Doing them as two separate operations means two reboots, and it
+# means a window in which the computer object in AD carries the template's name. One task, one
+# reboot, one computer object with the right name from the start.
+#
+# Usage:
+#   ansible-playbook playbooks/30-domain-join.yml
+---
+- name: Join Windows workstations to mutaspace.local
+  hosts: win-client-01-bootstrap
+  gather_facts: false
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # DNS first - the join finds the domain by SRV record, not by address
+    # -----------------------------------------------------------------------------------------
+    # A domain join looks up _ldap._tcp.dc._msdcs.mutaspace.local. If the machine is still using a
+    # DHCP-supplied upstream resolver, that query fails and the join reports that the domain could
+    # not be contacted, which reads like a network fault. Pointing the resolver at dc-01 first
+    # removes an entire class of confusing failure.
+    - name: Point the workstation's resolver at the domain controller
+      ansible.windows.win_dns_client:
+        adapter_names: "*"
+        dns_servers:
+          - "{{ lab_dns_server }}"
+
+    - name: Confirm the domain controller answers on LDAP before attempting the join
+      ansible.windows.win_wait_for:
+        host: "{{ lab_dns_server }}"
+        port: 389
+        timeout: 120
+        delay: 2
+
+    # -----------------------------------------------------------------------------------------
+    # Rename and join
+    # -----------------------------------------------------------------------------------------
+    # The computer name matters beyond tidiness: it becomes `agent.name` in Wazuh, and both
+    # completed incident scenarios search on `agent.name: "win-client-01"`. A machine that joins as
+    # WIN-ABC123 breaks those searches without breaking anything else, which is the worst kind of
+    # failure - silent and downstream.
+    - name: Rename and join the domain in one operation
+      microsoft.ad.membership:
+        dns_domain_name: "{{ lab_domain }}"
+        hostname: "{{ lab_target_hostname }}"
+        domain_admin_user: "{{ lab_domain_admin_user }}@{{ lab_domain }}"
+        domain_admin_password: "{{ lab_domain_admin_password }}"
+        state: domain
+        reboot: true
+        reboot_timeout: 1800
+      no_log: true
+
+    # -----------------------------------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------------------------------
+    - name: Confirm the machine reports itself as a domain member with the expected name
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          $Ansible.Result = @{
+              Name          = $cs.Name
+              Domain        = $cs.Domain
+              PartOfDomain  = $cs.PartOfDomain
+          }
+      register: join_state
+      changed_when: false
+
+    - name: Assert the join produced the identity the lab expects
+      ansible.builtin.assert:
+        that:
+          - join_state.result.PartOfDomain
+          - join_state.result.Domain | lower == lab_domain
+          - join_state.result.Name | lower == lab_target_hostname
+        fail_msg: >-
+          Expected {{ lab_target_hostname }} in {{ lab_domain }}, but the machine reports
+          {{ join_state.result.Name }} in {{ join_state.result.Domain }}
+          (PartOfDomain={{ join_state.result.PartOfDomain }}).
+        success_msg: >-
+          {{ join_state.result.Name }} is joined to {{ join_state.result.Domain }}.
+
+    - name: Remind the operator that the inventory identity has now changed
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} has been joined. Every play from here on targets
+          `{{ lab_target_hostname }}` in the domain_windows group, using Kerberos - not this
+          bootstrap entry.

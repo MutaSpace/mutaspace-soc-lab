@@ -1,0 +1,45 @@
+# roles/common_linux/tasks/main.yml
+#
+# The baseline every Linux host in the lab needs before any other role runs.
+#
+# This role is deliberately small. The golden templates built by Packer are supposed to arrive
+# complete, so this is a guard rather than a build step: it makes the assumptions explicit and
+# repairs them if a template drifted.
+---
+- name: Refresh the apt cache if it is older than an hour
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  # A Kali rolling host with a stale mirror can fail here for reasons that have nothing to do with
+  # this lab. Surface it, but do not stop the whole run on it.
+  register: apt_cache
+  failed_when: false
+
+- name: Install the baseline packages
+  ansible.builtin.apt:
+    name: "{{ common_linux_packages }}"
+    state: present
+
+- name: Point chrony at the lab's authoritative time source
+  ansible.builtin.copy:
+    dest: /etc/chrony/conf.d/mutaspace-lab.conf
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible - roles/common_linux
+      #
+      # The domain controller holds the PDC emulator FSMO role, which makes it the time root for
+      # the forest. Kerberos refuses tickets when client and DC clocks differ by more than five
+      # minutes, and a SIEM sorts events by timestamp - so this file is a correctness control, not
+      # a convenience.
+      server {{ common_linux_ntp_server }} iburst
+  when: common_linux_configure_ntp | bool
+  notify: Restart chrony
+
+- name: Ensure chrony is enabled and running
+  ansible.builtin.systemd_service:
+    name: chrony
+    state: started
+    enabled: true
+  when: common_linux_configure_ntp | bool

@@ -1,0 +1,176 @@
+# playbooks/90-lab-seed.yml
+#
+# Create the Active Directory objects that the completed incident scenarios depend on.
+#
+# ---------------------------------------------------------------------------------------------
+# THIS PLAYBOOK IS LOAD-BEARING COURSEWORK, NOT A CONVENIENCE SCRIPT
+# ---------------------------------------------------------------------------------------------
+# Two finished pieces of work in this repository reference specific domain accounts by name:
+#
+#   docs/incident-scenarios/failed-login-investigation.md
+#       Step 2 has the learner fail logons as MUTASPACE\test.user on win-client-01, then find the
+#       resulting Event ID 4625 in Wazuh.
+#
+#   docs/incident-scenarios/account-creation-investigation.md
+#       The lab creates lab.user02 - "First name: Lab, Last name: User02, User logon name:
+#       lab.user02" - and the learner finds the resulting Event ID 4720 from dc-01.
+#
+# In the old hand-built lab those accounts existed because someone clicked them into existence. On
+# a greenfield host they exist only if this playbook creates them. If the names, or the sAMAccount
+# names, drift from what those documents say, both exercises stop reproducing - and they will not
+# fail loudly. The searches will simply return nothing.
+#
+# So the names below are a contract with two documents, not a preference.
+# ---------------------------------------------------------------------------------------------
+#
+# WHY IT RUNS AGAINST dc-01: every task here is an AD object operation. NTLM cannot delegate, so a
+# play that connected to any other host and reached onward to the domain controller would fail with
+# "Failed to contact the AD server". Running on the domain controller makes the operation local and
+# removes the second hop entirely. Same rule as 20-dns-records.yml.
+#
+# Usage:
+#   ansible-playbook playbooks/90-lab-seed.yml
+---
+- name: Seed the lab's organisational units and accounts
+  hosts: dc-01
+  gather_facts: false
+
+  vars:
+    lab_ou_name: "MutaSpace Lab"
+    lab_ou_path: "{{ lab_domain_dn }}"
+    lab_users_ou_name: "Lab Users"
+
+    # Where the seeded accounts are placed.
+    #
+    # The original hand-built lab put lab.user02 straight into the default CN=Users container,
+    # because that is what Active Directory Users and Computers opens on. This playbook places the
+    # accounts in a dedicated OU instead, because a container cannot have Group Policy linked to it
+    # and an OU can - which matters the first time the lab wants to apply a policy to lab accounts
+    # only.
+    #
+    # Nothing in either incident scenario depends on the location: the searches match on the
+    # account name in the event, not on its distinguished name. To reproduce the original layout
+    # exactly, set this to "CN=Users,{{ lab_domain_dn }}" and skip the OU tasks.
+    lab_users_path: "OU={{ lab_users_ou_name }},OU={{ lab_ou_name }},{{ lab_domain_dn }}"
+
+    # The accounts themselves. `name` is the CN as it appears in Active Directory Users and
+    # Computers; `sam_account_name` is what a user types to log on and what Windows writes into the
+    # TargetUserName field of events 4625 and 4720. The scenarios search on the latter.
+    lab_seed_users:
+      - name: "Test User"
+        sam_account_name: test.user
+        firstname: Test
+        surname: User
+        description: >-
+          Lab account used by docs/incident-scenarios/failed-login-investigation.md to generate
+          Windows Event ID 4625 on win-client-01.
+      - name: "Lab User02"
+        sam_account_name: lab.user02
+        firstname: Lab
+        surname: User02
+        description: >-
+          Lab account referenced by docs/incident-scenarios/account-creation-investigation.md as
+          the account whose creation produces Windows Event ID 4720 on dc-01.
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # Organisational units
+    # -----------------------------------------------------------------------------------------
+    # protect_from_deletion defaults to TRUE on creation. In a production directory that is exactly
+    # right. In a lab that gets torn down and rebuilt it means a later cleanup fails with an access
+    # denied that is not a permissions problem at all, and the operator has to go and clear the flag
+    # by hand. Setting it false here is a deliberate lab decision, not sloppiness.
+    - name: Create the top-level lab OU
+      microsoft.ad.ou:
+        name: "{{ lab_ou_name }}"
+        path: "{{ lab_ou_path }}"
+        state: present
+        protect_from_deletion: false
+        description: "Container for MutaSpace SOC Lab objects created by Ansible"
+
+    - name: Create the lab users OU
+      microsoft.ad.ou:
+        name: "{{ lab_users_ou_name }}"
+        path: "OU={{ lab_ou_name }},{{ lab_domain_dn }}"
+        state: present
+        protect_from_deletion: false
+        description: "Accounts used by the MutaSpace incident scenarios"
+
+    # -----------------------------------------------------------------------------------------
+    # Accounts
+    # -----------------------------------------------------------------------------------------
+    # update_password: on_create is important. Without it, every re-run resets the password of an
+    # account a learner may be in the middle of using, and reports "changed" every single time,
+    # which destroys the idempotence signal.
+    #
+    # password_never_expires is set because a teaching account that silently expires between
+    # semesters produces a failed logon that looks exactly like the exercise and is not.
+    - name: Create the lab accounts
+      microsoft.ad.user:
+        name: "{{ item.name }}"
+        sam_account_name: "{{ item.sam_account_name }}"
+        upn: "{{ item.sam_account_name }}@{{ lab_domain }}"
+        firstname: "{{ item.firstname }}"
+        surname: "{{ item.surname }}"
+        description: "{{ item.description }}"
+        path: "{{ lab_users_path }}"
+        password: "{{ lab_user_password }}"
+        update_password: on_create
+        password_never_expires: true
+        enabled: true
+        state: present
+      loop: "{{ lab_seed_users }}"
+      loop_control:
+        label: "{{ item.sam_account_name }}"
+      no_log: true
+
+    # -----------------------------------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------------------------------
+    # Creating an object and being able to find it by the identifier the coursework uses are two
+    # different claims. This looks each account up by sAMAccountName, which is exactly the string
+    # the incident scenarios read out of the Wazuh event.
+    - name: Look each account up the way the incident scenarios identify it
+      ansible.windows.win_powershell:
+        parameters:
+          SamAccountName: "{{ item.sam_account_name }}"
+        script: |
+          param([String]$SamAccountName)
+
+          $Ansible.Changed = $false
+
+          $user = Get-ADUser -Identity $SamAccountName -Properties Enabled, UserPrincipalName -ErrorAction Stop
+          $Ansible.Result = @{
+              SamAccountName    = $user.SamAccountName
+              UserPrincipalName = $user.UserPrincipalName
+              Enabled           = $user.Enabled
+              DistinguishedName = $user.DistinguishedName
+          }
+      loop: "{{ lab_seed_users }}"
+      loop_control:
+        label: "{{ item.sam_account_name }}"
+      register: seeded_users
+      changed_when: false
+
+    - name: Assert that every seeded account exists and is enabled
+      ansible.builtin.assert:
+        that:
+          - item.result.SamAccountName == item.item.sam_account_name
+          - item.result.Enabled
+        fail_msg: >-
+          {{ item.item.sam_account_name }} was not found in a usable state. Both incident scenarios
+          depend on this account; do not run the exercises until this passes.
+        success_msg: >-
+          {{ item.result.SamAccountName }} exists, is enabled, and sits at
+          {{ item.result.DistinguishedName }}
+      loop: "{{ seeded_users.results }}"
+      loop_control:
+        label: "{{ item.item.sam_account_name }}"
+
+    - name: Summarise what the coursework can now rely on
+      ansible.builtin.debug:
+        msg:
+          - "MUTASPACE\\test.user   - failed-login-investigation.md can generate Event ID 4625 on win-client-01"
+          - "MUTASPACE\\lab.user02  - account-creation-investigation.md can find Event ID 4720 from dc-01"
+          - "Both accounts share the password in MUTASPACE_LAB_USER_PASSWORD and never expire."

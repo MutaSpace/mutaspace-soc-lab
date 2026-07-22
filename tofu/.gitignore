@@ -1,0 +1,35 @@
+# =============================================================================
+# tofu/.gitignore - things that must never reach a public repository
+# =============================================================================
+
+# State. Encrypted at rest by the encryption block in versions.tf, but an
+# encrypted state file in a public repo is still an offline brute-force target,
+# and the backup copies below are written before encryption is applied on some
+# code paths.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Saved plan files. `tofu plan -out=tfplan` records every value it resolved,
+# including the sensitive ones. Same exposure as state.
+tfplan
+*.tfplan
+
+# Real variable values. The .example file is committed; this one is not.
+terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Provider binaries and module cache.
+.terraform/
+
+# Crash dumps contain the full request/response history, tokens included.
+crash.log
+crash.*.log
+
+# Deliberately NOT ignored:
+#
+#   .terraform.lock.hcl  - the provider pin is only meaningful if the lock file
+#                          that records its checksums travels with it. Committing
+#                          it is what makes "exactly 0.111.1" true on someone
+#                          else's machine as well as on yours.

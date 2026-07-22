@@ -1,0 +1,124 @@
+#cloud-config
+# =============================================================================
+# cloud-init user-data - Linux guests
+# =============================================================================
+# Rendered per VM by tofu/snippets.tf and uploaded to the Proxmox `local` datastore
+# as a snippet. Proxmox attaches it with `cicustom user=`, which REPLACES the
+# user-data Proxmox would otherwise generate - so anything Proxmox would normally
+# have done here (creating the user, installing keys, deciding whether to upgrade
+# packages) has to be done explicitly below.
+#
+# Deliberately small. This file exists to make the machine reachable and correctly
+# named, and then to get out of the way. Everything stateful - Wazuh agents, the
+# domain join, Suricata, detection rules - is Ansible's job, because Ansible can be
+# re-run against a machine that already exists and cloud-init cannot.
+#
+# Generated for: ${hostname}
+# ---------------------------------------------------------------------------
+
+hostname: ${hostname}
+fqdn: ${fqdn}
+
+# Keeps 127.0.1.1 in /etc/hosts pointing at the real hostname. Without it, some
+# services resolve their own name to nothing and log confusing errors on boot.
+manage_etc_hosts: true
+
+# Do not touch the package manager on first boot.
+#
+# Proxmox's own cloud-init defaults to running a package upgrade the first time a
+# clone boots. That is a bad fit here for two reasons: this lab has machines whose
+# software versions are pinned deliberately (Wazuh 4.14.6), and on the isolated
+# plane there is no route to a mirror at all, so the upgrade just hangs the boot
+# for its timeout. Patching is a deliberate, Ansible-driven act.
+#
+# (Proxmox's `ciupgrade` option would express this too, but the API restricts it to
+# root@pam, and this lab authenticates with an API token. Setting it here works
+# because custom user-data replaces the generated user-data wholesale.)
+package_update: false
+package_upgrade: false
+
+timezone: ${timezone}
+
+users:
+  - name: ${admin_username}
+    gecos: MutaSpace lab administrator
+    groups: [adm, sudo]
+    shell: /bin/bash
+    lock_passwd: ${password == null ? "true" : "false"}
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+%{ if length(ssh_authorized_keys) > 0 ~}
+    ssh_authorized_keys:
+%{ for key in ssh_authorized_keys ~}
+      - ${key}
+%{ endfor ~}
+%{ endif ~}
+
+%{ if password != null ~}
+# Console password. Present only because a teaching lab occasionally needs a login
+# at the Proxmox console when the network is the thing being broken. SSH password
+# authentication stays off.
+chpasswd:
+  expire: false
+  users:
+    - name: ${admin_username}
+      password: ${password}
+      type: text
+%{ endif ~}
+
+ssh_pwauth: false
+
+# Clock discipline.
+#
+# This matters more than it looks. The classroom reset mechanism is a snapshot
+# rollback, which means a machine can come back believing it is two weeks ago.
+# Kerberos rejects authentication outside a five-minute skew, so a rolled-back
+# domain member fails to log in for reasons that have nothing to do with the
+# exercise - and Wazuh correlation across four machines is meaningless if their
+# clocks disagree. The firewall is the lab's single time source.
+ntp:
+  enabled: true
+  servers:
+    - ${ntp_server}
+
+write_files:
+  # Pin the datasource list.
+  #
+  # Without this every boot probes the EC2, Azure and GCE metadata endpoints in
+  # turn before falling back to NoCloud, adding tens of seconds to a boot that
+  # should take five. On the isolated plane, where those probes cannot even fail
+  # fast, it is worse.
+  - path: /etc/cloud/cloud.cfg.d/99-pve.cfg
+    permissions: "0644"
+    content: |
+      datasource_list: [ NoCloud, ConfigDrive ]
+
+  # A breadcrumb for whoever is debugging this machine at 11pm.
+  - path: /etc/mutaspace-lab.json
+    permissions: "0644"
+    content: |
+      {
+        "hostname": "${hostname}",
+        "fqdn": "${fqdn}",
+        "role": "${role}",
+        "managed_by": "opentofu",
+        "source_of_truth": "lab.yaml"
+      }
+
+runcmd:
+  # The guest agent is baked into the template by Packer, not installed here -
+  # installing it at first boot would need a package mirror, and the whole point of
+  # the build plane is that clones do not need one. This only makes sure it is
+  # running, because the provider is configured to wait for it.
+  - [systemctl, enable, --now, qemu-guest-agent]
+
+  # Never let a clone inherit an agent identity.
+  #
+  # If a Wazuh agent key is baked into a template, every machine cloned from it
+  # registers as the same agent and the manager rejects all but the first with
+  # "Duplicate agent name". Packer truncates this file as its last step; this is
+  # the belt to that braces, and it is cheap.
+  # (Shell form with a guard, because most guests have no Wazuh agent at all and a
+  # failing runcmd entry marks the whole cloud-init run as errored.)
+  - 'truncate -s 0 /var/ossec/etc/client.keys 2>/dev/null || true'
+
+final_message: "MutaSpace lab guest ${hostname} ready after $UPTIME seconds"

@@ -49,3 +49,89 @@ redacted-needed/
 # Local notes not intended for public documentation
 private-notes/
 scratch/
+
+# ---------------------------------------------------------------------------
+# Infrastructure as Code
+#
+# Everything below this line exists because the repository gained OpenTofu,
+# Packer and Ansible sources. The rules fall into three groups:
+#
+#   1. State and cache files that are machine-specific and often contain
+#      secrets in plaintext.
+#   2. Variable files that the tools load AUTOMATICALLY, which makes an
+#      accidental "git add -A" a one-keystroke credential leak.
+#   3. Build and run artifacts that are regenerated on demand.
+#
+# The one file in this area that MUST be committed is called out explicitly
+# at the bottom.
+# ---------------------------------------------------------------------------
+
+# --- OpenTofu / Terraform state ---
+# State holds every attribute the provider read back from Proxmox, including
+# cloud-init passwords and the firewall's WAN address. OpenTofu's native state
+# encryption protects the file at rest, but an encrypted secret committed to a
+# public repository is still a secret waiting for a passphrase leak.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.tfstate.lock.info
+
+# --- OpenTofu / Terraform crash dumps ---
+# A crash log is a full stack dump of the running process. It can contain
+# request bodies, and therefore API tokens.
+crash.log
+crash.*.log
+
+# --- Auto-loaded variable files ---
+# OpenTofu loads *.auto.tfvars and Packer loads *.auto.pkrvars.hcl WITHOUT
+# being asked. That convenience is exactly why they must never be tracked.
+# Commit the .example files instead; they carry placeholders, not values.
+*.auto.tfvars
+*.auto.tfvars.json
+terraform.tfvars
+terraform.tfvars.json
+
+# --- Packer ---
+# manifest.json records the VMID and build UUID of the last template build.
+# It is a per-host build artifact, and feeding it back into OpenTofu's
+# clone{} block would be actively dangerous (clone is ForceNew).
+*.auto.pkrvars.hcl
+packer/**/manifest.json
+manifest.json
+packer_cache/
+packer/common.pkrvars.hcl
+
+# --- direnv ---
+# .envrc holds every credential the stack needs. .envrc.example is the
+# committed template.
+.envrc
+.direnv/
+
+# --- Ansible ---
+# A retry file lists the hosts that failed, which leaks internal inventory
+# naming into the repository for no benefit.
+*.retry
+ansible/roles/wazuh-ansible/
+ansible/*.log
+
+# --- Generated credentials ---
+# The Wazuh all-in-one installer writes its generated admin, indexer and API
+# passwords into this tarball. It is the single highest-value file the lab
+# produces and it must never be committed.
+wazuh-install-files.tar
+wazuh-passwords.txt
+*-credentials.txt
+
+# --- DELIBERATELY NOT IGNORED ---
+# .terraform.lock.hcl IS COMMITTED ON PURPOSE. Do not add it above.
+#
+# The lock file pins the exact provider version and the checksums of every
+# platform's provider binary. Committing it is what makes "bpg/proxmox
+# = 0.111.1" a real guarantee rather than an intention: without it, a fresh
+# `tofu init` on another machine can resolve a different build of the same
+# version, and a supply-chain swap of the provider binary would go unnoticed.
+# This lab pins that provider exactly because v0.109.0 inverted the semantics
+# of an agent setting; the lock file is the mechanism that pin relies on.
+#
+# If you ever see .terraform.lock.hcl show up as untracked, commit it.
+!.terraform.lock.hcl

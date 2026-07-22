@@ -1,0 +1,39 @@
+# roles/wazuh_agent_linux/defaults/main.yml
+#
+# Defaults for the Linux Wazuh agent role.
+---
+# ---------------------------------------------------------------------------------------------
+# The two-address dance
+# ---------------------------------------------------------------------------------------------
+# Agents ENROLL against the IP address and then RUN against the FQDN.
+#
+# Enrollment happens inside the .deb postinst script, which runs before this playbook can fix
+# anything. If the FQDN does not resolve at that moment - and it does not, on any host that has not
+# yet been pointed at dc-01 - the agent registers against a name it cannot reach and the failure
+# surfaces later as an agent that appears in the manager and never sends data.
+#
+# Running against the FQDN afterwards is what you actually want long term: the manager can be
+# re-addressed without touching eight agents.
+wazuh_agent_enroll_address: "{{ wazuh_manager_ip }}"
+wazuh_agent_final_address: "{{ wazuh_manager_fqdn }}"
+wazuh_agent_use_fqdn: true
+
+# `agent.name` in the Wazuh dashboard. Both completed incident scenarios search on it, so it must
+# match the inventory hostname exactly.
+wazuh_agent_name: "{{ inventory_hostname }}"
+
+# Agent groups must already exist on the manager. Enrolling into a group that does not exist does
+# not create it - the agent lands in `default` and the group-specific configuration never applies.
+# 50-wazuh-agents.yml creates the groups before this role runs anywhere.
+wazuh_agent_group: default
+
+# Debian package repository. The `4.x` path is correct for the whole 4 series; the exact version is
+# pinned on the package itself below.
+wazuh_apt_key_url: "https://packages.wazuh.com/key/GPG-KEY-WAZUH"
+wazuh_apt_keyring: /usr/share/keyrings/wazuh.gpg
+wazuh_apt_repo: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
+
+# Exact version, and then held. An unattended `apt upgrade` that moves an agent to a newer minor
+# than the manager is a supported configuration in one direction only, and finding out which
+# direction during a class is not a good use of anyone's time.
+wazuh_agent_package: "wazuh-agent={{ wazuh_version }}-{{ wazuh_package_revision }}"

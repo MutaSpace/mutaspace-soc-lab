@@ -1,0 +1,559 @@
+# =============================================================================
+# lab.yaml - the single source of truth for the MutaSpace SOC Lab
+# =============================================================================
+#
+# WHAT THIS FILE IS
+#   Every virtual machine in the lab, every VMID, every IP address and every MAC
+#   address is declared here once. The OpenTofu code in tofu/ reads this file with
+#   `yamldecode()` and builds the lab from it. Nothing about a VM is hard-coded in
+#   HCL - if you want to change the lab, you change this file.
+#
+# WHY IT EXISTS AS YAML AND NOT AS HCL
+#   Two reasons.
+#
+#   1. A learner can read YAML. The whole point of this repository is that somebody
+#      who has never seen OpenTofu can still look at one file and understand the
+#      shape of the lab: nine machines, three networks, six golden templates.
+#
+#   2. It stays lintable. A previous generation of lab-building projects (GOAD)
+#      generated .tf files from Jinja templates in Python. That works right up until
+#      you want `tofu validate`, `tofu fmt`, an HCL language server or CI - none of
+#      which can see through a code generator. Plain HCL reading plain YAML gives
+#      the same result with none of that cost.
+#
+# WHAT IS DELIBERATELY *NOT* HERE
+#   Secrets. There is no password, no API token, and no real management/WAN subnet
+#   in this file. The vmbr0 uplink carries the real home network, so its addressing
+#   lives in a gitignored `tofu/terraform.tfvars` and is passed in as variables.
+#   Everything on 10.10.10.0/24 and 10.10.20.0/24 is RFC1918 lab space that the
+#   existing documentation already publishes in full, so it is safe to commit.
+#
+# HOW TO READ THE MAC ADDRESSES
+#   Every MAC starts with BC:24:11 - the OUI Proxmox itself uses, so the addresses
+#   look native on the host. The last three octets are the last three octets of the
+#   machine's IPv4 address written as decimal digits. dc-01 is 10.10.10.10, so its
+#   MAC is BC:24:11:10:10:10. win-client-01 has DHCP reservation 10.10.10.51, so its
+#   MAC is BC:24:11:10:10:51.
+#
+#   This is not a clever trick, it is a debugging aid: when you are staring at a
+#   packet capture or a DHCP lease table at 11pm you can read the machine's address
+#   straight out of its hardware address. It is also what makes the reservations
+#   stable - the firewall's static DHCP mappings are templated from this same map,
+#   so analyst-01 gets .50 on every rebuild forever.
+#
+# ---------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# site - facts about the one physical machine everything runs on
+# -----------------------------------------------------------------------------
+site:
+  # The Proxmox node name. Single-node lab, so this appears in every API call.
+  node: mutaspace-soc-node01
+
+  # LVM-thin pool that holds every VM disk.
+  #
+  # This MUST be the same datastore Packer writes the golden templates to.
+  # Proxmox cannot move a linked clone to a different storage - "It is not possible
+  # to change the Target storage for linked clones, because this is a storage
+  # internal feature" - so kali-01 and untrusted-01 would simply fail to build.
+  datastore: local-lvm
+
+  # Directory storage that holds ISO images (installer media for Packer).
+  iso_store: local
+
+  # Directory storage that holds cloud-init snippets.
+  #
+  # The `snippets` content type is NOT enabled by default. Run
+  #   pvesm set local --content iso,vztmpl,backup,snippets
+  # on the host once, or every snippet upload fails.
+  snippets_store: local
+
+  # The bridge carrying the real home network and the Proxmox management address.
+  # Only fw-01 is ever allowed to touch it - see tofu/tests/network_placement.tftest.hcl.
+  wan_bridge: vmbr0
+
+  # Active Directory forest built by Ansible on dc-01.
+  domain: mutaspace.local
+  netbios: MUTASPACE
+
+  # The unprivileged account cloud-init creates on every Linux guest. The SSH keys
+  # and the (optional) password come from variables, never from this file.
+  admin_username: labadmin
+
+  # Guest timezone. Correlating Wazuh alerts across four machines is painful when
+  # their clocks disagree, so everything runs UTC and syncs from fw-01.
+  timezone: Etc/UTC
+
+# -----------------------------------------------------------------------------
+# networks - the three planes
+# -----------------------------------------------------------------------------
+#
+# A fourth plane exists and is deliberately absent from this map: vmbr0, the
+# management/WAN bridge. Its subnet is the operator's real home network, which the
+# repository's secrets policy forbids committing. It appears above as
+# `site.wan_bridge` by name only.
+#
+networks:
+  # The SOC LAN. Everything a learner interacts with lives here.
+  lan:
+    bridge: vmbr1
+    cidr: 10.10.10.0/24
+    gateway: 10.10.10.1 # fw-01
+    dns: [10.10.10.10] # dc-01 is the only resolver domain members may use
+    dhcp_pool: { start: 10.10.10.100, end: 10.10.10.200 }
+
+  # The isolated / untrusted plane. Attack tooling and untrusted corpora live here
+  # and the firewall is default-deny toward vmbr1.
+  isolated:
+    bridge: vmbr2
+    cidr: 10.10.20.0/24
+    gateway: 10.10.20.1 # fw-01's OPT leg
+    dns: [10.10.20.1] # resolve through the firewall, NOT through the DC
+
+  # The build plane.
+  #
+  # This bridge is the answer to a chicken-and-egg problem that is easy to miss:
+  # in a greenfield build nothing on vmbr1 can reach the internet until fw-01 is
+  # routing - and fw-01 is itself a VM that has to be built first. vmbr9 has no
+  # physical port; the Proxmox host itself is the gateway and masquerades out
+  # through the uplink NIC. Packer builds every template here, and OpenTofu then
+  # re-points the NIC to vmbr1 or vmbr2 at clone time (`bridge` is not ForceNew,
+  # so that switch costs nothing).
+  #
+  # Note 10.99.0.0/24 and not 10.10.10.0/24: Proxmox's own masquerading example in
+  # the admin guide uses 10.10.10.1/24, which is fw-01's LAN address in this lab.
+  # Copying that example verbatim would collide the build plane with the SOC LAN.
+  build:
+    bridge: vmbr9
+    cidr: 10.99.0.0/24
+    gateway: 10.99.0.1 # the Proxmox host
+    dns: [10.99.0.1]
+
+# -----------------------------------------------------------------------------
+# templates - the golden images Packer produces
+# -----------------------------------------------------------------------------
+#
+# These VMIDs are a hard contract between packer/ and tofu/. Packer pins them with
+# `vm_id`; OpenTofu asserts at plan time that a template with that VMID actually
+# exists on the host (see tofu/templates.tf) so that "you forgot to run Packer"
+# is a clear error instead of a weird one.
+#
+# The template's *name* on the host is "tpl-" + the key below. So the key
+# `ubuntu-server-2404` means a template named `tpl-ubuntu-server-2404` at VMID 9000.
+#
+# Do NOT renumber these to fix a drift. The entire `clone {}` block is ForceNew:
+# changing a template VMID here destroys and recreates every VM that clones it.
+# Fix Packer instead.
+#
+templates:
+  ubuntu-server-2404: 9000 # Ubuntu Server 24.04 LTS  -> wazuh-01, ubuntu-app-01, nlp-01
+  ubuntu-desktop-2404: 9001 # Ubuntu Desktop 24.04 LTS -> analyst-01
+  win-server-2022: 9002 # Windows Server 2022 Eval -> dc-01
+  win11-client: 9003 # Windows 11 Eval          -> win-client-01
+  opnsense-267: 9004 # OPNsense 26.7            -> fw-01
+  kali-rolling: 9005 # Kali Rolling             -> kali-01, untrusted-01
+
+# -----------------------------------------------------------------------------
+# vms - the nine core machines
+# -----------------------------------------------------------------------------
+#
+# Keys of each entry:
+#
+#   vm_id        Pinned. VMIDs are a teaching artifact here, not an implementation
+#                detail, so nothing is allowed to float. 100-199 is core infra.
+#   lifecycle    reprovisioned = full clone (independent disk)
+#                linked        = linked clone (shares the template's base image,
+#                                cheap to create and cheap to throw away)
+#   template     Key into the `templates:` map above.
+#   guest        linux | windows | appliance. Decides which cloud-init dialect is
+#                rendered, or none at all.
+#   os_type      Proxmox `ostype`. l26 = modern Linux. win11 covers both Windows 11
+#                and Server 2022/2025 in Proxmox's naming.
+#   cores        vCPU count. Host has 24 logical CPUs; the lab totals 24.
+#   memory       dedicated = the VM's RAM ceiling in MB
+#                floating  = the balloon floor. floating: 0 disables ballooning.
+#   disk         size in GB, and the bus. Always scsi so that `ssd = true` and
+#                `iothread = true` are legal (they are not on a virtio disk).
+#   nic / nics   `nic` for single-homed machines, `nics` (an ordered list) for
+#                fw-01. Order matters enormously - see the fw-01 comment.
+#   ipv4         mode: static  -> address + gateway, configured by cloud-init
+#                mode: dhcp    -> reservation, honoured by the firewall via the MAC
+#                mode: none    -> this guest configures its own addressing
+#   agent        Whether the QEMU guest agent is genuinely baked into the template.
+#                Setting this true when the agent is NOT installed costs a
+#                15-minute timeout on every single create AND refresh, because the
+#                provider cannot tell "agent missing" from "slow boot".
+#   started      Whether OpenTofu should leave this VM running. The research plane
+#                is off by default - 64 GB does not stretch to everything at once.
+#
+vms:
+  # ---------------------------------------------------------------------------
+  # fw-01 - OPNsense 26.7 firewall, router, DHCP server and NTP server
+  # ---------------------------------------------------------------------------
+  #
+  # This is the most important entry in the file and the one most likely to be
+  # broken by a careless edit.
+  #
+  # `nics` is an ORDERED LIST and the order is the wire. Proxmox maps the first
+  # entry to net0, the second to net1, the third to net2, and OPNsense maps those
+  # to vtnet0, vtnet1 and vtnet2 which it then assigns to WAN, LAN and OPT. Swap
+  # two entries during a refactor and the firewall boots with WAN and LAN reversed:
+  # the lab loses internet, the Proxmox management bridge starts taking DHCP leases
+  # from the firewall, and absolutely nothing in the `tofu plan` output hints at
+  # why. tofu/modules/proxmox-vm/main.tf carries a plan-time precondition that
+  # net0 of the firewall must be on vmbr0 for exactly this reason.
+  #
+  # ipv4 is `none` because OPNsense has no cloud-init. Its addressing is baked into
+  # the config.xml that Packer seeds into the template. The WAN address is a
+  # variable (tofu/variables.tf) because the real subnet is secret; the LAN and OPT
+  # addresses are 10.10.10.1 and 10.10.20.1 and are recorded in the network docs.
+  #
+  # agent is false: OPNsense/FreeBSD does not ship qemu-guest-agent in the base
+  # install, and claiming otherwise is how you buy a 15-minute timeout per refresh.
+  fw-01:
+    vm_id: 100
+    # `role: firewall` is not decoration. It is the flag that switches on the
+    # plan-time preconditions in tofu/modules/proxmox-vm/main.tf: this is the only
+    # machine permitted on vmbr0, and its net0 MUST be the vmbr0 leg.
+    role: firewall
+    lifecycle: reprovisioned
+    template: opnsense-267
+    guest: appliance
+    os_type: other
+    cores: 2
+    memory: { dedicated: 4096, floating: 0 }
+    disk: { size: 20, interface: scsi0 }
+    nics:
+      # net0 -> vtnet0 -> WAN. The MAC is NOT derived from an IP here, because the
+      # WAN address is the operator's real home network and must not be committed.
+      - { bridge: vmbr0, model: virtio, mac: "BC:24:11:00:00:01", role: wan }
+      # net1 -> vtnet1 -> LAN, 10.10.10.1
+      - { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:01", role: lan }
+      # net2 -> vtnet2 -> OPT, 10.10.20.1
+      - { bridge: vmbr2, model: virtio, mac: "BC:24:11:10:20:01", role: opt }
+    ipv4: { mode: none }
+    agent: false
+    started: true
+    startup_order: 1
+    description: >-
+      OPNsense 26.7. Gateway, DHCP server, DNS forwarder and NTP source for the SOC
+      LAN, plus inline Suricata. Three legs: WAN (vmbr0), LAN (vmbr1, 10.10.10.1)
+      and OPT (vmbr2, 10.10.20.1). Managed by hand and by the OPNsense API, not by
+      cloud-init.
+
+  # ---------------------------------------------------------------------------
+  # dc-01 - Active Directory domain controller and DNS server
+  # ---------------------------------------------------------------------------
+  #
+  # Built from a Packer template with virtio-scsi-single and a virtio NIC. The
+  # older hand-built documentation in docs/vms/ records SATA and E1000 - that was a
+  # workaround for a manual install with no VirtIO drivers on the installer media,
+  # not a preference. Packer injects the VirtIO drivers during Windows setup, so
+  # there is no reason to carry the legacy hardware forward.
+  #
+  # Licensing caveat that IaC cannot fix: Windows Server 2022 Evaluation is a
+  # 180-day licence that must be activated over the internet within its first 10
+  # days or the machine shuts itself down. Since vmbr1 has no route out until
+  # fw-01 is routing, the firewall must permit this VM outbound during that window.
+  # That rule sits in direct tension with the "isolated lab" framing and is worth
+  # teaching rather than hiding.
+  dc-01:
+    vm_id: 102
+    lifecycle: reprovisioned
+    template: win-server-2022
+    guest: windows
+    os_type: win11 # Proxmox's ostype for Server 2022/2025 and Windows 11
+    cores: 2
+    memory: { dedicated: 4096, floating: 0 }
+    disk: { size: 60, interface: scsi0 }
+    nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:10" }
+    ipv4: { mode: static, address: 10.10.10.10/24, gateway: 10.10.10.1 }
+    agent: true
+    started: true
+    startup_order: 2
+    description: >-
+      Windows Server 2022 Evaluation. Forest root for mutaspace.local (NetBIOS
+      MUTASPACE) and the only DNS server domain members are allowed to use.
+      Promotion, the 10.10.10.in-addr.arpa reverse zone, and the lab accounts
+      test.user and lab.user02 are all created by Ansible, not by OpenTofu.
+
+  # ---------------------------------------------------------------------------
+  # analyst-01 - the workstation a learner actually sits at
+  # ---------------------------------------------------------------------------
+  #
+  # DHCP with a reservation rather than a static address, on purpose: it exercises
+  # the firewall's DHCP server, which is a thing learners need to be able to debug.
+  # The reservation is stable because the MAC is pinned here and the firewall's
+  # static mappings are templated from this same map.
+  analyst-01:
+    vm_id: 103
+    lifecycle: reprovisioned
+    template: ubuntu-desktop-2404
+    guest: linux
+    os_type: l26
+    cores: 2
+    memory: { dedicated: 4096, floating: 4096 } # ballooning on - a desktop idles a lot
+    disk: { size: 40, interface: scsi0 }
+    nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:50" }
+    ipv4: { mode: dhcp, reservation: 10.10.10.50 }
+    agent: true
+    started: true
+    startup_order: 5
+    description: >-
+      Ubuntu Desktop 24.04 LTS. The analyst workstation - browser, Wazuh dashboard
+      access, and the machine incident-scenario walkthroughs are written from.
+      DHCP reservation 10.10.10.50.
+
+  # ---------------------------------------------------------------------------
+  # wazuh-01 - the SIEM
+  # ---------------------------------------------------------------------------
+  #
+  # floating: 0 is not an oversight and must not be "optimised".
+  #
+  # The Wazuh indexer is a JVM that commits its heap up front (Xms == Xmx). Memory
+  # the balloon driver reclaims from a committed heap is memory the JVM believes it
+  # still owns, so the host takes it back, the guest immediately touches it again,
+  # and the machine goes to swap - or the OOM killer arrives. Ballooning a search
+  # engine is how you turn a working SIEM into a mysteriously slow one.
+  #
+  # Wazuh itself is baked into the template by Packer rather than installed after
+  # cloning, because the installer fetches wazuh-template.json from
+  # raw.githubusercontent.com and vmbr1 has no route out at build time.
+  wazuh-01:
+    vm_id: 104
+    lifecycle: reprovisioned
+    template: ubuntu-server-2404
+    guest: linux
+    os_type: l26
+    cores: 4
+    memory: { dedicated: 8192, floating: 0 } # NEVER balloon the indexer
+    disk: { size: 100, interface: scsi0 }
+    nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:20" }
+    ipv4: { mode: static, address: 10.10.10.20/24, gateway: 10.10.10.1 }
+    agent: true
+    started: true
+    startup_order: 3
+    description: >-
+      Wazuh 4.14.6 all-in-one (manager, indexer, dashboard). Dashboard on
+      https://10.10.10.20 port 443. Agents enroll by IP first and are switched to
+      the FQDN by a later Ansible play, because the DNS record does not exist yet
+      the first time an agent registers.
+
+  # ---------------------------------------------------------------------------
+  # win-client-01 - the domain-joined endpoint that generates the telemetry
+  # ---------------------------------------------------------------------------
+  #
+  # This is the machine both completed incident scenarios were built against: the
+  # failed-logon lab reads Event ID 4625 from here, and the account-creation lab
+  # reads 4720. Its hostname must stay win-client-01 across every rebuild or those
+  # saved Wazuh queries stop returning anything.
+  #
+  # Windows 11 Enterprise Evaluation is a 90-day licence with two rearms and no
+  # in-place conversion to a full edition. A rebuild is the only path out.
+  win-client-01:
+    vm_id: 105
+    lifecycle: reprovisioned
+    template: win11-client
+    guest: windows
+    os_type: win11
+    cores: 2
+    memory: { dedicated: 4096, floating: 0 } # Windows needs blnsvr.exe to balloon; assume not
+    disk: { size: 60, interface: scsi0 }
+    nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:51" }
+    ipv4: { mode: dhcp, reservation: 10.10.10.51 }
+    agent: true
+    started: true
+    startup_order: 6
+    # Windows 11 requires UEFI + TPM 2.0. The EFI disk and TPM state come from the
+    # template and are deliberately NOT declared in OpenTofu - declaring them on a
+    # clone tries to create a second one.
+    firmware: { bios: ovmf, machine: q35 }
+    description: >-
+      Windows 11 Evaluation, domain-joined to mutaspace.local. Sysmon plus the
+      Wazuh agent. DHCP reservation 10.10.10.51. The source of the 4625 and 4720
+      events the two incident-scenario labs depend on.
+
+  # ---------------------------------------------------------------------------
+  # ubuntu-app-01 - a Linux server with a service on it worth attacking
+  # ---------------------------------------------------------------------------
+  ubuntu-app-01:
+    vm_id: 106
+    lifecycle: reprovisioned
+    template: ubuntu-server-2404
+    guest: linux
+    os_type: l26
+    cores: 2
+    memory: { dedicated: 4096, floating: 4096 }
+    disk: { size: 40, interface: scsi0 }
+    nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:30" }
+    ipv4: { mode: static, address: 10.10.10.30/24, gateway: 10.10.10.1 }
+    agent: true
+    started: true
+    startup_order: 7
+    description: >-
+      Ubuntu Server 24.04 LTS running OpenSSH and Nginx. Exists so that there is a
+      Linux service producing auth and web logs for the SIEM, and a target on the
+      SOC LAN for kali-01 to reach across the firewall.
+
+  # ---------------------------------------------------------------------------
+  # kali-01 - attack simulation, isolated plane
+  # ---------------------------------------------------------------------------
+  #
+  # NOTE: VMID 107 is deliberately unused. It was reserved for a standalone
+  # sensor-01 IDS VM. Suricata now runs inline on fw-01 instead, because a plain
+  # Linux bridge does not mirror traffic - a promiscuous NIC on vmbr1 will never
+  # see unicast flowing between two other VMs on that bridge, so the sensor would
+  # have quietly seen almost nothing. The gap is left in the numbering rather than
+  # closed up, so the decision stays visible.
+  #
+  # Linked clone: kali-01 is reset constantly and shares the template's base image
+  # instead of copying 40 GB every time.
+  kali-01:
+    vm_id: 108
+    lifecycle: linked
+    template: kali-rolling
+    guest: linux
+    os_type: l26
+    cores: 2
+    memory: { dedicated: 4096, floating: 4096 }
+    disk: { size: 40, interface: scsi0 }
+    nic: { bridge: vmbr2, model: virtio, mac: "BC:24:11:10:20:10" }
+    ipv4: { mode: static, address: 10.10.20.10/24, gateway: 10.10.20.1 }
+    agent: true
+    started: false # research plane is off unless a lesson needs it
+    startup_order: 20
+    description: >-
+      Kali Rolling on the isolated plane. Generates the attack traffic that inline
+      Suricata on fw-01 is supposed to catch on its way to the SOC LAN.
+
+  # ---------------------------------------------------------------------------
+  # untrusted-01 - deliberately the smallest machine in the lab
+  # ---------------------------------------------------------------------------
+  #
+  # It exists to BE a trust boundary, not to do work. 2 GB and 20 GB is the point.
+  untrusted-01:
+    vm_id: 109
+    lifecycle: linked
+    template: kali-rolling
+    guest: linux
+    os_type: l26
+    cores: 2
+    memory: { dedicated: 2048, floating: 2048 }
+    disk: { size: 20, interface: scsi0 }
+    nic: { bridge: vmbr2, model: virtio, mac: "BC:24:11:10:20:20" }
+    ipv4: { mode: static, address: 10.10.20.20/24, gateway: 10.10.20.1 }
+    agent: true
+    started: false
+    startup_order: 21
+    description: >-
+      Trust-boundary research host on the isolated plane. Default-deny toward
+      vmbr1. Small on purpose.
+
+  # ---------------------------------------------------------------------------
+  # nlp-01 - phishing / NLP corpus work
+  # ---------------------------------------------------------------------------
+  #
+  # On vmbr2 rather than vmbr1 because phishing corpora are untrusted input by
+  # definition, and untrusted input does not belong on the same segment as the
+  # domain controller.
+  nlp-01:
+    vm_id: 110
+    lifecycle: reprovisioned
+    template: ubuntu-server-2404
+    guest: linux
+    os_type: l26
+    cores: 4
+    memory: { dedicated: 8192, floating: 4096 }
+    disk: { size: 80, interface: scsi0 }
+    nic: { bridge: vmbr2, model: virtio, mac: "BC:24:11:10:20:30" }
+    ipv4: { mode: static, address: 10.10.20.30/24, gateway: 10.10.20.1 }
+    agent: true
+    started: false
+    startup_order: 22
+    description: >-
+      Ubuntu Server 24.04 LTS for phishing and NLP corpus work. 8 GB is for local
+      model and corpus work; it balloons down to 4 GB when idle.
+
+# -----------------------------------------------------------------------------
+# learner_endpoints - the catalogue of per-learner machine roles
+# -----------------------------------------------------------------------------
+#
+# A full per-learner stack (own firewall, own DC, own SIEM) is roughly 26 GB, which
+# caps a 64 GB host at two learners. That is not a classroom. The shape that
+# actually fits is SHARED INFRASTRUCTURE + PER-LEARNER ENDPOINTS: everyone shares
+# fw-01, dc-01 and wazuh-01, and each learner gets their own Windows client and
+# their own Kali box to break.
+#
+# VMID formula: 200 + (learner_index * 10) + vmid_offset, learner_index 0-based.
+# Learner 01 therefore gets 205 (win-client) and 206 (kali).
+#
+# Address formula: host_base + (learner_index * host_step) in the named network.
+# Learner 01 gets 10.10.10.60 and 10.10.20.60; learner 02 gets 10.10.10.62 and
+# 10.10.20.62; and so on.
+#
+# Why .60 and not .150: the DHCP pool is 10.10.10.100-.200, and a static mapping
+# inside the pool range is at best a warning and at worst refused. .60 upward is
+# below the pool, above the fixed infrastructure addresses, and still leaves the
+# MAC-from-IP convention readable (two decimal digits per octet).
+#
+learner_endpoints:
+  win-client:
+    vmid_offset: 5
+    lifecycle: reprovisioned
+    template: win11-client
+    guest: windows
+    os_type: win11
+    cores: 2
+    memory: { dedicated: 4096, floating: 0 }
+    disk: { size: 60, interface: scsi0 }
+    nic: { model: virtio }
+    network: lan
+    ipv4: { mode: dhcp, host_base: 60, host_step: 2 }
+    firmware: { bios: ovmf, machine: q35 }
+    agent: true
+    started: false
+    startup_order: 30
+    description: >-
+      Per-learner Windows 11 endpoint, domain-joined. Hostname comes from
+      cloud-init rather than DHCP so that the Wazuh agent name survives a snapshot
+      rollback and the saved detection queries keep working.
+
+  kali:
+    vmid_offset: 6
+    lifecycle: linked
+    template: kali-rolling
+    guest: linux
+    os_type: l26
+    cores: 2
+    memory: { dedicated: 4096, floating: 4096 }
+    disk: { size: 40, interface: scsi0 }
+    nic: { model: virtio }
+    network: isolated
+    ipv4: { mode: static, host_base: 60, host_step: 2 }
+    agent: true
+    started: false
+    startup_order: 31
+    description: >-
+      Per-learner Kali box on the isolated plane. Linked clone, so creating and
+      destroying one is cheap.
+
+# -----------------------------------------------------------------------------
+# learners - the class roster
+# -----------------------------------------------------------------------------
+#
+# Order matters: the position in this list is the learner_index that both the VMID
+# and the IP address are derived from. Appending a learner is safe. Inserting one
+# in the middle renumbers everyone below it, which destroys and recreates their
+# VMs, because vm_id is ForceNew.
+#
+# How many of these are actually built is capped by `var.learner_count` in
+# tofu/variables.tf, so an instructor can dial the classroom down to fit the RAM
+# available on the night without editing the roster.
+#
+learners:
+  - id: "01"
+    endpoints: [win-client, kali]
+  - id: "02"
+    endpoints: [win-client, kali]
+  - id: "03"
+    endpoints: [win-client, kali]

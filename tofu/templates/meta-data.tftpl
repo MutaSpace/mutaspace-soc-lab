@@ -1,0 +1,25 @@
+# =============================================================================
+# cloud-init meta-data (NoCloud) - Linux guests
+# =============================================================================
+# Proxmox generates a meta-data file of its own; supplying this one overrides it
+# with `cicustom meta=`.
+#
+# WHY BOTHER OVERRIDING IT
+#   For instance-id. cloud-init treats instance-id as the identity of the machine:
+#   if it changes between boots, cloud-init decides this is a new machine and
+#   re-runs its "per-instance" modules. Left to Proxmox, the value is derived in a
+#   way this repository does not control, which makes "will cloud-init run again
+#   after I rebuild this VM?" a question with no answer in the code.
+#
+#   Pinning it to the VM name plus its VMID makes the answer explicit and readable:
+#   the identity is the machine's identity in lab.yaml, and it changes only when the
+#   machine itself does.
+#
+# NOT USED ON WINDOWS. Cloudbase-Init reads a configdrive2 drive whose metadata
+# Proxmox generates, and Proxmox already fills the hostname in there correctly. An
+# override would be one more thing to keep in sync for no gain.
+#
+# Generated for: ${hostname}
+# ---------------------------------------------------------------------------
+instance-id: ${instance_id}
+local-hostname: ${hostname}

@@ -1,0 +1,22 @@
+# roles/common_linux/defaults/main.yml
+#
+# Defaults for the baseline Linux role. Everything here is overridable per host or per group,
+# because a Kali box and an Ubuntu server do not always want the same baseline.
+---
+# Packages every Linux host in the lab needs. Deliberately short: the templates are built by Packer
+# and should already be complete. Anything that appears in this list repeatedly over time is a
+# signal that the template is wrong, not that the list is too short.
+common_linux_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - chrony
+
+# The lab's authoritative time source. The domain controller is the right answer in an AD
+# environment: it holds the PDC emulator role, which is the forest's time root, and pointing Linux
+# hosts at anything else invites the five-minute Kerberos skew window to matter.
+common_linux_ntp_server: "{{ lab_dns_server }}"
+
+# Isolated-segment hosts cannot reach the domain controller through the firewall by default, so the
+# chrony configuration is skipped for them rather than left broken and noisy.
+common_linux_configure_ntp: true

@@ -1,0 +1,64 @@
+# packer/win11-client/win11-client.pkrvars.hcl.example
+#
+# WHAT THIS IS
+#   A worked example of the non-secret variables for the tpl-win11-client build.
+#   Copy it to `win11-client.pkrvars.hcl` and edit, then:
+#
+#     packer build -var-file=win11-client.pkrvars.hcl packer/win11-client/
+#
+# ⚠️ DO NOT PUT CREDENTIALS IN THE COPY YOU CREATE.
+#
+#   `*.auto.pkrvars.hcl` files are loaded automatically by design, which makes
+#   `git add -A` a one-keystroke credential leak. This file is deliberately named
+#   WITHOUT `.auto.` so that you have to pass it explicitly.
+#
+#   Every secret comes from the environment instead:
+#
+#     export PKR_VAR_proxmox_url='https://<LAB_MANAGEMENT_IP>:8006/api2/json'
+#     export PKR_VAR_proxmox_username='packer@pve!buildtoken'
+#     export PKR_VAR_proxmox_token='<the token UUID on its own>'
+#     export PKR_VAR_windows_admin_password='<a build-only Administrator password>'
+#
+#   Packer wants the token ID and secret as TWO values. OpenTofu's bpg/proxmox
+#   provider wants ONE concatenated string, `terraform@pve!provider=<uuid>`. Sharing
+#   a variable between the two tools produces a silent 401.
+
+proxmox_node = "mutaspace-soc-node01"
+
+# Must be local-lvm: linked clones cannot cross datastores. This pool also holds the
+# EFI vars disk and the TPM state volume.
+storage_pool = "local-lvm"
+
+# Where the generated Autounattend seed ISO is written. Required, not optional.
+iso_storage_pool = "local"
+
+# The build plane. vmbr9 is masqueraded by the Proxmox host and is the only bridge
+# with a route out before fw-01 exists.
+build_bridge = "vmbr9"
+
+# ---------------------------------------------------------------------------
+# Media you uploaded by hand. Neither of these can be downloaded by this repository.
+# ---------------------------------------------------------------------------
+
+# Registration-gated if you are using the Enterprise Evaluation.
+#
+# ⚠️ PREFER VOLUME LICENSING MEDIA IF YOU HAVE IT. Evaluation is 90 days, two rearms,
+# and CANNOT be converted in place - when it expires the only route is a rebuild.
+windows_iso_file = "local:iso/windows-11-enterprise-eval.iso"
+
+# Pin 0.1.271. Not `stable-virtio`, not `latest-virtio` - those are moving redirects.
+virtio_win_iso_file = "local:iso/virtio-win-0.1.271.iso"
+
+# Verify against YOUR ISO first:
+#   dism /Get-WimInfo /WimFile:D:\sources\install.wim
+#
+# Enterprise Evaluation media normally has one image at index 1. Retail multi-edition
+# media does not, and index 1 there is Home - which cannot join a domain, which makes
+# it useless for this lab.
+windows_image_index = 1
+
+# Empty for evaluation media.
+#
+# Set the Windows 11 Enterprise GVLK here if you are building from Volume Licensing
+# media. That removes the 90-day clock entirely and is the recommended path.
+product_key = ""

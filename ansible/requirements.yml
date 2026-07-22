@@ -1,0 +1,52 @@
+# requirements.yml
+#
+# The Ansible collections this lab depends on, with the two Windows collections pinned exactly.
+#
+# Install with:
+#   ansible-galaxy collection install -r requirements.yml
+#
+# Why the Windows collections are pinned and the others are not: `microsoft.ad` and
+# `ansible.windows` are doing the irreversible work in this lab - forest promotion, domain join,
+# DNS zone creation. A silent minor bump there changes behaviour on a domain controller that a
+# class depends on. The remaining collections are used for ordinary, easily-inspected tasks, so
+# they float on a minimum version instead.
+---
+collections:
+  # Active Directory objects: domain promotion, domain membership, OUs, users, groups.
+  # There is no Terraform/OpenTofu provider for AD objects - HashiCorp archived
+  # terraform-provider-ad on 2025-08-11 - so this collection is the only way the forest gets built.
+  - name: microsoft.ad
+    version: "1.12.0"
+
+  # Core Windows modules: WinRM connectivity, features, services, packages, DNS records, and the
+  # win_powershell escape hatch used wherever a module does not cover the operation.
+  - name: ansible.windows
+    version: "3.7.0"
+
+  # Provides the `yaml` stdout callback referenced in ansible.cfg, plus assorted general-purpose
+  # modules. The yaml callback used to ship in ansible-core; it does not any more.
+  - name: community.general
+    version: ">=10.0.0"
+
+  # Proxmox-side helpers (snapshots, pool membership) for the classroom reset workflow. The lab is
+  # provisioned by OpenTofu, not by this collection - it is here for lifecycle operations that are
+  # imperative by nature.
+  - name: community.proxmox
+    version: ">=1.0.0"
+
+  # POSIX helpers: the profile_tasks callback in ansible.cfg, plus sysctl/mount/firewalld modules.
+  - name: ansible.posix
+    version: ">=1.5.0"
+
+# NOTE - wazuh-ansible is deliberately NOT listed here.
+#
+# Wazuh publishes its official roles as a Git repository, not as a Galaxy collection, and the
+# branch you need is the one matching your Wazuh version. It is cloned into roles/ instead:
+#
+#   git clone --depth 1 --branch v4.14.6 \
+#     https://github.com/wazuh/wazuh-ansible.git roles/wazuh-ansible
+#
+# See roles/README.md. This lab installs the Wazuh server with the official all-in-one
+# installation assistant rather than the wazuh-ansible roles, so the clone is optional today - it
+# is documented because the moment the lab outgrows the all-in-one deployment, those roles are
+# where the distributed install comes from.

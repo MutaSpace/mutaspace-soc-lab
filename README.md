@@ -359,6 +359,42 @@ Each troubleshooting scenario should document:
 
 ---
 
+## Repository Layout
+
+The lab was first built by hand through the Proxmox web interface and documented step by step as it
+was built. That is the right way to learn a system. It is not a good way to reset it between
+classes, rebuild it after a mistake, or hand it to someone else — so the whole lab is now also
+expressed as code.
+
+Both halves are kept. The `docs/` half explains what the lab *is*; the code half is what actually
+builds it.
+
+| Path | What it is |
+|---|---|
+| `lab.yaml` | **Start here.** The single source of truth: every VM, VMID, IP address and MAC address, in one file a learner can read without knowing any of the tools |
+| `packer/` | Six golden-image builds (Ubuntu Server, Ubuntu Desktop, Windows Server 2022, Windows 11, OPNsense, Kali) producing templates 9000–9005 |
+| `tofu/` | OpenTofu, which reads `lab.yaml` and provisions the VMs on Proxmox. Includes an offline test suite that runs with no hypervisor in existence |
+| `ansible/` | Nine numbered playbooks and three roles — everything the hypervisor cannot express: the AD forest, DNS, Wazuh, endpoint telemetry, detection rules |
+| `scripts/` | Host bootstrap, a read-only preflight check, and the classroom snapshot/reset pair |
+| `Taskfile.yml` | Every operation in the repository, named once. `task` with no arguments lists them |
+| `docs/` | The written documentation, including [docs/iac/](docs/iac/) which records how and why the code above was designed |
+
+```bash
+task                    # list every available operation
+task validate           # OpenTofu + all six Packer templates, offline
+task test               # the OpenTofu test suite, offline
+task preflight          # check a real Proxmox host is ready to be built on
+```
+
+`task validate` and `task test` are worth trying on any machine. They deliberately require no
+Proxmox host, no credentials and no network — the whole stack was authored before the hardware
+existed, and being able to prove it is internally consistent without a hypervisor is the point.
+
+**Nothing in the code has been run against hardware yet.** Each area's README carries its own "what
+has not been verified" section, and those sections are honest.
+
+---
+
 ## Completed Milestones
 
 - Custom PC assembled

@@ -1,0 +1,103 @@
+# playbooks/20-dns-records.yml
+#
+# Create the forward and reverse DNS records for the statically-addressed lab servers.
+#
+# The lab's static servers do not register themselves. Domain-joined Windows machines and DHCP
+# clients get dynamic registration for free; wazuh-01 and ubuntu-app-01 are neither, so their
+# records are created here. Until they exist, `https://wazuh-01.mutaspace.local` - the URL both
+# incident scenarios tell learners to open - does not resolve.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY THIS PLAY RUNS AGAINST dc-01 AND NOT AGAINST THE CONTROL NODE
+# ---------------------------------------------------------------------------------------------
+# Every task here modifies an Active Directory-integrated DNS zone, which is an AD object
+# operation. If Ansible connects to some other Windows host and that host then tries to
+# authenticate onward to the domain controller, the credential does not survive the second hop -
+# NTLM cannot delegate, and even Kerberos will not without delegation explicitly configured. The
+# failure is not a clean "permission denied"; it is "Failed to contact the AD server", which sends
+# people looking for network problems that do not exist.
+#
+# Running the play ON the domain controller removes the second hop entirely. The operation is local.
+# This is the rule for every AD-object play in this repository, and 90-lab-seed.yml follows it too.
+# ---------------------------------------------------------------------------------------------
+#
+# Usage:
+#   ansible-playbook playbooks/20-dns-records.yml
+---
+- name: Create lab DNS records on dc-01
+  hosts: dc-01
+  gather_facts: false
+
+  vars:
+    # One list, used for both the A records and the PTR records, so the forward and reverse zones
+    # cannot drift apart. Adding a host to the lab means adding one entry here.
+    lab_dns_hosts:
+      - name: wazuh-01
+        ip: "{{ wazuh_manager_ip }}"
+        comment: "Wazuh manager, indexer and dashboard"
+      - name: ubuntu-app-01
+        ip: 10.10.10.30
+        comment: "Linux application server"
+
+  tasks:
+
+    - name: Create forward A records
+      ansible.windows.win_dns_record:
+        name: "{{ item.name }}"
+        type: A
+        value: "{{ item.ip }}"
+        zone: "{{ lab_domain }}"
+        state: present
+      loop: "{{ lab_dns_hosts }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ item.ip }}"
+
+    # The reverse zone was created in 10-dc-promote.yml. Populating it is what makes `nslookup
+    # 10.10.10.20` answer with a name, which matters more than it looks: reverse lookups are how an
+    # analyst turns an IP address in a firewall log into something they can reason about.
+    #
+    # In a reverse zone the record NAME is the last octet and the record VALUE is a fully-qualified
+    # name with a trailing dot. Getting either wrong produces a record that exists and never
+    # resolves.
+    - name: Create reverse PTR records
+      ansible.windows.win_dns_record:
+        name: "{{ item.ip.split('.')[3] }}"
+        type: PTR
+        value: "{{ item.name }}.{{ lab_domain }}."
+        zone: "{{ lab_reverse_zone }}"
+        state: present
+      loop: "{{ lab_dns_hosts }}"
+      loop_control:
+        label: "{{ item.ip }} -> {{ item.name }}.{{ lab_domain }}"
+
+    # -----------------------------------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------------------------------
+    # A record that exists in the zone file but does not answer a query has not actually done its
+    # job. Resolve-DnsName asks the DNS service the same way a client would.
+    - name: Resolve each new record the way a client would
+      ansible.windows.win_powershell:
+        parameters:
+          FQDN: "{{ item.name }}.{{ lab_domain }}"
+        script: |
+          param([String]$FQDN)
+          $Ansible.Changed = $false
+          $answer = Resolve-DnsName -Name $FQDN -Type A -Server 127.0.0.1 -ErrorAction Stop
+          $Ansible.Result = ($answer | Where-Object { $_.Type -eq 'A' } | Select-Object -First 1).IPAddress
+      loop: "{{ lab_dns_hosts }}"
+      loop_control:
+        label: "{{ item.name }}.{{ lab_domain }}"
+      register: dns_checks
+      changed_when: false
+
+    - name: Assert that each record resolves to the address it was given
+      ansible.builtin.assert:
+        that:
+          - item.0.result == item.1.ip
+        fail_msg: >-
+          {{ item.1.name }}.{{ lab_domain }} resolved to {{ item.0.result }},
+          but the inventory says it should be {{ item.1.ip }}.
+        success_msg: "{{ item.1.name }}.{{ lab_domain }} resolves to {{ item.1.ip }}"
+      loop: "{{ dns_checks.results | zip(lab_dns_hosts) | list }}"
+      loop_control:
+        label: "{{ item.1.name }}"

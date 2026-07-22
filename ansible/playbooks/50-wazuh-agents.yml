@@ -1,0 +1,113 @@
+# playbooks/50-wazuh-agents.yml
+#
+# Enroll every endpoint in the lab into Wazuh.
+#
+# ORDER MATTERS AND IT IS NOT OBVIOUS: agent groups are created on the manager FIRST, in their own
+# play, before a single agent is installed.
+#
+# Enrolling an agent into a group that does not exist does not create the group. The enrollment
+# succeeds, the agent appears in the dashboard, and it silently lands in `default` - so every piece
+# of group-specific configuration you later write never reaches it. There is no error to search
+# for. Creating the groups first costs one play and removes the failure mode entirely.
+#
+# The address the agents enroll against is the IP, 10.10.10.20, not the FQDN. See the comment block
+# in roles/wazuh_agent_linux/defaults/main.yml for why, and for what the roles do about it
+# afterwards.
+#
+# Usage:
+#   ansible-playbook playbooks/50-wazuh-agents.yml
+#   ansible-playbook playbooks/50-wazuh-agents.yml -l ubuntu-app-01
+---
+- name: Create the agent groups on the Wazuh manager
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+
+  vars:
+    # Derived from the inventory rather than written out again, so a new host in
+    # wazuh_agents_linux or wazuh_agents_windows automatically gets its group created here.
+    wazuh_required_groups: >-
+      {{
+        (groups['wazuh_agents_linux'] | default([]) + groups['wazuh_agents_windows'] | default([]))
+        | map('extract', hostvars, 'wazuh_agent_group')
+        | select('defined')
+        | unique | sort
+      }}
+
+  tasks:
+
+    - name: List the agent groups that already exist
+      ansible.builtin.command:
+        cmd: /var/ossec/bin/agent_groups -l
+      register: existing_groups
+      changed_when: false
+
+    - name: Show which groups the inventory asks for
+      ansible.builtin.debug:
+        msg: "Groups required by the inventory: {{ wazuh_required_groups | join(', ') }}"
+
+    # -q suppresses the interactive confirmation. Without it the command blocks forever waiting for
+    # a keypress that Ansible will never send, and the play times out with no useful output.
+    - name: Create any missing agent groups
+      ansible.builtin.command:
+        cmd: "/var/ossec/bin/agent_groups -a -g {{ item }} -q"
+      loop: "{{ wazuh_required_groups }}"
+      when: item not in existing_groups.stdout
+      changed_when: true
+
+- name: Install and enroll the Linux Wazuh agents
+  hosts: wazuh_agents_linux
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: common_linux
+      # Hosts on the isolated segment have no route to the domain controller for NTP until fw-01
+      # says so. Skipping the chrony configuration there keeps the run clean rather than leaving a
+      # permanently failing time source behind.
+      common_linux_configure_ntp: "{{ inventory_hostname in (groups['soc_lan'] | default([])) }}"
+    - role: wazuh_agent_linux
+
+- name: Install and enroll the Windows Wazuh agents
+  hosts: wazuh_agents_windows
+  gather_facts: false
+
+  roles:
+    - role: wazuh_agent_windows
+
+- name: Confirm the manager sees every agent it should
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+
+  vars:
+    expected_agents: >-
+      {{
+        (groups['wazuh_agents_linux'] | default([]) + groups['wazuh_agents_windows'] | default([]))
+        | sort
+      }}
+
+  tasks:
+
+    # An agent that is "Never connected" is enrolled but not communicating - usually a firewall rule
+    # on 1514/udp or 1514/tcp. Listing the agents is how you tell the two states apart, and it is
+    # the same check a learner performs in the dashboard during the incident scenarios.
+    - name: List the enrolled agents and their status
+      ansible.builtin.command:
+        cmd: /var/ossec/bin/agent_control -l
+      register: agent_list
+      changed_when: false
+
+    - name: Show the agent list
+      ansible.builtin.debug:
+        var: agent_list.stdout_lines
+
+    - name: Assert that every expected agent is registered
+      ansible.builtin.assert:
+        that:
+          - item in agent_list.stdout
+        fail_msg: >-
+          {{ item }} does not appear in the manager's agent list. Check client.keys on that host and
+          confirm TCP 1515 to {{ wazuh_manager_ip }} is permitted.
+        success_msg: "{{ item }} is registered with the manager"
+      loop: "{{ expected_agents }}"

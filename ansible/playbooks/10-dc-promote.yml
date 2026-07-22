@@ -1,0 +1,194 @@
+# playbooks/10-dc-promote.yml
+#
+# Turn a plain Windows Server 2022 VM into the mutaspace.local forest root, with DNS.
+#
+# This is the play that makes the lab's identity exist. Everything downstream - the domain join,
+# the Kerberos transport, the seeded lab accounts that two completed incident scenarios depend on -
+# is built on top of what happens here.
+#
+# It runs against `dc-01-bootstrap`, the pre-domain inventory identity: local Administrator over
+# NTLM. It is the LAST playbook that uses that identity. By the time it finishes, the machine
+# answers to MUTASPACE\Administrator and every later play targets the plain `dc-01` name.
+#
+# WHY THERE IS NO Install-ADDSForest HERE: microsoft.ad.domain is not a thin wrapper. It installs
+# the AD-Domain-Services and RSAT-ADDS features itself, calls Install-ADDSForest with
+# -NoRebootOnCompletion, and then performs the reboot through its own action plugin so that Ansible
+# reconnects cleanly afterwards. Adding a separate win_feature task for AD-Domain-Services is the
+# common mistake: it can leave reboot_required set and double-trigger the restart.
+#
+# Usage:
+#   ansible-playbook playbooks/10-dc-promote.yml
+---
+- name: Promote dc-01 to the mutaspace.local forest root
+  hosts: dc-01-bootstrap
+  gather_facts: true
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # Name the machine before it becomes a domain controller
+    # -----------------------------------------------------------------------------------------
+    # The computer name at promotion time becomes the domain controller's name forever - renaming a
+    # DC afterwards is possible but unpleasant. Cloudbase-Init should already have set this from the
+    # OpenTofu-supplied metadata; this task is the guard that says so out loud and fixes it if not.
+    - name: Ensure the computer name is dc-01
+      ansible.windows.win_hostname:
+        name: "{{ lab_target_hostname }}"
+      register: dc_rename
+
+    - name: Reboot if the rename requires it
+      ansible.windows.win_reboot:
+        reboot_timeout: 900
+      when: dc_rename.reboot_required
+
+    # -----------------------------------------------------------------------------------------
+    # Promotion
+    # -----------------------------------------------------------------------------------------
+    # forest_mode / domain_mode are capped at WinThreshold. Windows Server 2019 and 2022 introduced
+    # no new functional levels, so "Win2022" is not a value that exists - asking for it fails.
+    - name: Create the mutaspace.local forest
+      microsoft.ad.domain:
+        dns_domain_name: "{{ lab_domain }}"
+        domain_netbios_name: "{{ lab_netbios }}"
+        safe_mode_password: "{{ lab_safe_mode_password }}"
+        forest_mode: "{{ lab_forest_mode }}"
+        domain_mode: "{{ lab_domain_mode }}"
+        install_dns: true
+        # The module reboots through its own action plugin and waits for WinRM to come back. This
+        # takes several minutes and there is no output during it; that is expected, not a hang.
+        reboot: true
+        reboot_timeout: 1800
+      no_log: true
+
+    # -----------------------------------------------------------------------------------------
+    # Wait for Active Directory to actually be serving, not merely booted
+    # -----------------------------------------------------------------------------------------
+    # WinRM comes back before Active Directory Web Services does. Every microsoft.ad module and
+    # every Get-AD* cmdlet talks to ADWS on TCP 9389, so a play that starts the moment WinRM answers
+    # will fail with errors that look like permission problems and are really timing problems.
+    - name: Wait for Active Directory Web Services to accept connections
+      ansible.windows.win_wait_for:
+        port: 9389
+        host: 127.0.0.1
+        timeout: 600
+        delay: 10
+
+    - name: Wait for the DNS server service to be running
+      ansible.windows.win_service:
+        name: DNS
+        state: started
+        start_mode: auto
+
+    # -----------------------------------------------------------------------------------------
+    # The domain controller must resolve using itself
+    # -----------------------------------------------------------------------------------------
+    # A DC that points at an upstream resolver cannot find its own SRV records reliably, and that
+    # shows up later as a domain join that fails for no visible reason. Pointing it at its own
+    # address is the supported configuration for a single-DC forest.
+    - name: Point dc-01's resolver at itself
+      ansible.windows.win_dns_client:
+        adapter_names: "*"
+        dns_servers:
+          - "{{ lab_dns_server }}"
+
+    # -----------------------------------------------------------------------------------------
+    # RSAT-AD-PowerShell
+    # -----------------------------------------------------------------------------------------
+    # microsoft.ad.domain installs RSAT-ADDS, but the AD PowerShell module is a separate feature on
+    # some images. Without it, 90-lab-seed.yml fails with "Get-ADUser is not recognized", which
+    # reads like a broken playbook and is actually a missing feature.
+    - name: Ensure the Active Directory PowerShell module is installed
+      ansible.windows.win_feature:
+        name: RSAT-AD-PowerShell
+        state: present
+      register: rsat_ad_ps
+
+    - name: Reboot if the RSAT feature asked for it
+      ansible.windows.win_reboot:
+        reboot_timeout: 900
+      when: rsat_ad_ps.reboot_required
+
+    # -----------------------------------------------------------------------------------------
+    # Reverse lookup zone - the one place a module cannot help
+    # -----------------------------------------------------------------------------------------
+    # ansible.windows.win_dns_zone can create forward zones. It has no NetworkID or reverse-lookup
+    # parameter at all, so a reverse zone simply cannot be expressed with it. The supported way is
+    # Add-DnsServerPrimaryZone -NetworkId, which means dropping to raw PowerShell.
+    #
+    # win_powershell sets $Ansible.Changed to $true by DEFAULT. A script that does nothing will
+    # therefore report "changed" on every run unless it says otherwise, which quietly destroys the
+    # idempotence signal this whole repository is built on. Hence the explicit guard: set Changed to
+    # $false first, and set it back to $true only on the path that really modified something.
+    #
+    # WARNING about -NetworkId: it rounds an IPv4 prefix UP to the next multiple of 8. Our
+    # 10.10.10.0/24 is already on a byte boundary, so the zone created is exactly
+    # 10.10.10.in-addr.arpa. A lab on a /23 would silently receive a single /24 zone and half its
+    # reverse lookups would fail with no error anywhere. If this lab is ever re-addressed off a /24,
+    # this task has to be rewritten rather than re-run.
+    - name: Create the reverse lookup zone for the SOC LAN
+      ansible.windows.win_powershell:
+        parameters:
+          NetworkId: "{{ lab_soc_lan_cidr }}"
+          ZoneName: "{{ lab_reverse_zone }}"
+        script: |
+          param(
+              [String]$NetworkId,
+              [String]$ZoneName
+          )
+
+          $Ansible.Changed = $false
+
+          $existing = Get-DnsServerZone -Name $ZoneName -ErrorAction SilentlyContinue
+          if ($null -eq $existing) {
+              Add-DnsServerPrimaryZone `
+                  -NetworkId $NetworkId `
+                  -ReplicationScope 'Forest' `
+                  -DynamicUpdate 'Secure' `
+                  -ErrorAction Stop
+              $Ansible.Changed = $true
+              $Ansible.Result = "Created reverse zone $ZoneName from NetworkId $NetworkId"
+          }
+          else {
+              $Ansible.Result = "Reverse zone $ZoneName already exists"
+          }
+      register: reverse_zone
+
+    - name: Show the reverse zone result
+      ansible.builtin.debug:
+        var: reverse_zone.result
+
+    # -----------------------------------------------------------------------------------------
+    # Auditing that the incident scenarios depend on
+    # -----------------------------------------------------------------------------------------
+    # docs/incident-scenarios/account-creation-investigation.md is built entirely on Windows Event
+    # ID 4720 arriving from dc-01. That event only exists if User Account Management auditing is on.
+    # The Default Domain Controllers policy usually enables it, but "usually" is not a foundation to
+    # put a graded exercise on, so it is asserted here.
+    - name: Ensure account management auditing is enabled on the domain controller
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+
+          $subcategories = @('User Account Management', 'Security Group Management')
+          $changed = @()
+
+          foreach ($sub in $subcategories) {
+              $current = (auditpol /get /subcategory:"$sub" /r | ConvertFrom-Csv)
+              if ($current.'Inclusion Setting' -ne 'Success and Failure') {
+                  auditpol /set /subcategory:"$sub" /success:enable /failure:enable | Out-Null
+                  $changed += $sub
+              }
+          }
+
+          if ($changed.Count -gt 0) {
+              $Ansible.Changed = $true
+              $Ansible.Result = "Enabled auditing for: $($changed -join ', ')"
+          }
+          else {
+              $Ansible.Result = "Account management auditing already enabled"
+          }
+      register: dc_audit
+
+    - name: Show the audit policy result
+      ansible.builtin.debug:
+        var: dc_audit.result

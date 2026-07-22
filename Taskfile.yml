@@ -1,0 +1,605 @@
+# Taskfile.yml --- the single entrypoint for the MutaSpace SOC Lab
+#
+# WHAT THIS IS
+#   Every operation in this repository, named once, in one place. Run
+#   `task` with no arguments to list them.
+#
+# WHY IT EXISTS
+#   This lab is built with four different tools --- Packer, OpenTofu, Ansible
+#   and a handful of shell scripts --- and each has its own flags, its own
+#   working directory and its own idea of where variables come from. Written
+#   out longhand, "build the Ubuntu template" is a command nobody remembers
+#   correctly a month later, and a mistyped one can destroy a running
+#   classroom.
+#
+#   The Taskfile is therefore a teaching artefact as much as a convenience.
+#   Reading it top to bottom tells you the order the lab is built in and what
+#   each stage depends on.
+#
+# INSTALL
+#   go-task: https://taskfile.dev/installation/
+#   The tasks themselves shell out to tofu, packer, ansible-playbook and ssh.
+#
+# THE PRECONDITION RULE
+#   Any task that can reach the real Proxmox host asserts its environment
+#   variables FIRST and refuses to start if they are missing. A bare
+#   `task lab:up` with no credentials must fail in one second with a clear
+#   message, not fail halfway through creating VMs. Offline tasks (fmt,
+#   validate, test) deliberately have no such guard --- they are supposed to
+#   work on a laptop on a train.
+#
+# CREDENTIALS
+#   Nothing here reads a secret from a file. Copy .envrc.example to .envrc,
+#   fill it in, and run `direnv allow`. See .envrc.example for the one trap
+#   that catches everybody: Packer and the OpenTofu provider want the same
+#   Proxmox API token in two different shapes.
+
+version: '3'
+
+vars:
+  TOFU_DIR: '{{.ROOT_DIR}}/tofu'
+  PACKER_DIR: '{{.ROOT_DIR}}/packer'
+  ANSIBLE_DIR: '{{.ROOT_DIR}}/ansible'
+  SCRIPTS_DIR: '{{.ROOT_DIR}}/scripts'
+  INVENTORY: '{{.ROOT_DIR}}/ansible/inventory/hosts.yml'
+  # Non-secret Packer settings (node name, storage pools, build bridge).
+  # Copied from packer/common.pkrvars.hcl.example and gitignored, because it
+  # is the natural place for someone to paste an endpoint URL.
+  PKR_COMMON: '{{.ROOT_DIR}}/packer/common.pkrvars.hcl'
+
+tasks:
+
+  default:
+    desc: List every available task (this is what `task` with no arguments does)
+    silent: true
+    cmds:
+      - task --list
+
+  # =========================================================================
+  # Host preparation
+  # =========================================================================
+
+  preflight:
+    desc: >-
+      Check the Proxmox host is ready to be built on --- bridges, storage,
+      snippets content type, ISO shelf and template VMIDs. Read-only.
+    preconditions:
+      - sh: 'test -x {{.SCRIPTS_DIR}}/preflight.sh'
+        msg: 'scripts/preflight.sh is missing or not executable.'
+      - sh: 'test -n "$PROXMOX_VE_ENDPOINT"'
+        msg: 'PROXMOX_VE_ENDPOINT is not set. Copy .envrc.example to .envrc and run `direnv allow`.'
+      - sh: 'test -n "$PROXMOX_VE_API_TOKEN"'
+        msg: 'PROXMOX_VE_API_TOKEN is not set. See .envrc.example section 1.'
+    cmds:
+      - '{{.SCRIPTS_DIR}}/preflight.sh'
+
+  bootstrap:host:
+    desc: >-
+      Print the instructions for bootstrapping a brand-new Proxmox host.
+      This task deliberately does NOT run anything --- the script belongs on
+      the host, as root, and is run by a human who has read it.
+    silent: true
+    cmds:
+      - |
+        cat <<'INSTRUCTIONS'
+        ===========================================================================
+        BOOTSTRAPPING A NEW PROXMOX HOST
+        ===========================================================================
+
+        scripts/bootstrap-host.sh is NOT run from here, on purpose.
+
+        It runs as root, on the Proxmox node itself, and it does five things:
+
+          1. detects the PVE major version and forks on it (7.x is refused)
+          2. configures the no-subscription apt repository
+          3. creates the two API users, their minimum-privilege roles and the
+             terraform@pve / packer@pve API tokens --- each token secret is
+             displayed EXACTLY ONCE, at creation
+          4. enables the "snippets" content type on the snippet datastore
+          5. creates vmbr1, vmbr2 and vmbr9 in /etc/network/interfaces, with
+             vmbr9 carrying the ip_forward + MASQUERADE rules that let the
+             build plane reach the internet before fw-01 exists
+
+        Step 5 rewrites /etc/network/interfaces and step 3 prints secrets.
+        Running that over an SSH pipe from a Taskfile would scroll the token
+        secrets past you inside other output, and would apply a network change
+        nobody had read first. Do it deliberately instead:
+
+          1. Copy the script to the host:
+
+               scp scripts/bootstrap-host.sh root@<LAB_MANAGEMENT_IP>:/root/
+
+          2. SSH in and READ IT before running it. It supports --dry-run:
+
+               ssh root@<LAB_MANAGEMENT_IP>
+               less /root/bootstrap-host.sh
+               bash /root/bootstrap-host.sh --dry-run
+               bash /root/bootstrap-host.sh
+
+          3. Copy the two token secrets straight into your .envrc.
+             They differ in shape --- see .envrc.example section 1.
+
+          4. Stock the ISO shelf by hand. The Windows and OPNsense images
+             cannot be fetched by URL. Record every SHA256 in
+             docs/proxmox/iso-shelf.md.
+
+          5. Come back here and run:
+
+               task preflight
+
+        The build plane itself --- what vmbr9 is for and why 10.99.0.0/24 and
+        not the address in Proxmox's own masquerading example --- is explained
+        in docs/network/build-plane.md.
+
+        ===========================================================================
+        INSTRUCTIONS
+
+  # =========================================================================
+  # Packer --- golden templates
+  # =========================================================================
+  #
+  # Every template builds on vmbr9, the host-masqueraded build plane, because
+  # in a greenfield lab nothing on vmbr1 can reach the internet until fw-01
+  # routes --- and fw-01 is itself one of these templates. OpenTofu re-points
+  # the NIC to vmbr1 or vmbr2 at clone time; `bridge` is not a ForceNew
+  # attribute, so that switch is free.
+  #
+  # VMIDs 9000-9005 are a hard contract shared with tofu/. Changing one here
+  # without changing lab.yaml causes a plan-time assertion failure, which is
+  # the intended behaviour --- the alternative is silently cloning the wrong
+  # template.
+
+  packer:run:
+    internal: true
+    dir: '{{.PACKER_DIR}}/{{.TEMPLATE}}'
+    preconditions:
+      - sh: 'test -d {{.PACKER_DIR}}/{{.TEMPLATE}}'
+        msg: 'No such template directory: packer/{{.TEMPLATE}}'
+      - sh: 'test -f {{.PKR_COMMON}}'
+        msg: 'packer/common.pkrvars.hcl is missing. Copy packer/common.pkrvars.hcl.example and fill it in.'
+      - sh: 'test -n "$PKR_VAR_proxmox_url"'
+        msg: 'PKR_VAR_proxmox_url is not set. See .envrc.example section 1 --- Packer wants /api2/json on the end.'
+      - sh: 'test -n "$PKR_VAR_proxmox_username"'
+        msg: 'PKR_VAR_proxmox_username is not set. Packer wants "packer@pve!buildtoken" WITHOUT the secret.'
+      - sh: 'test -n "$PKR_VAR_proxmox_token"'
+        msg: 'PKR_VAR_proxmox_token is not set. Packer wants the bare UUID, NOT the concatenated bpg form.'
+    cmds:
+      - packer init .
+      - packer validate -var-file={{.PKR_COMMON}} .
+      - packer build -var-file={{.PKR_COMMON}} .
+
+  build:ubuntu:
+    desc: 'Build tpl-ubuntu-server-2404 (VMID 9000) --- wazuh-01, ubuntu-app-01, nlp-01'
+    cmds:
+      - task: packer:run
+        vars: {TEMPLATE: 'ubuntu-server-2404'}
+
+  build:ubuntu-desktop:
+    desc: 'Build tpl-ubuntu-desktop-2404 (VMID 9001) --- analyst-01'
+    cmds:
+      - task: packer:run
+        vars: {TEMPLATE: 'ubuntu-desktop-2404'}
+
+  build:win-server:
+    desc: >-
+      Build tpl-win-server-2022 (VMID 9002) --- dc-01. Needs the Windows Server
+      2022 evaluation ISO and virtio-win already uploaded to local:iso.
+    cmds:
+      - task: packer:run
+        vars: {TEMPLATE: 'win-server-2022'}
+
+  build:win11:
+    desc: >-
+      Build tpl-win11-client (VMID 9003) --- win-client-01. Needs the Windows 11
+      ISO and virtio-win already uploaded to local:iso.
+    cmds:
+      - task: packer:run
+        vars: {TEMPLATE: 'win11-client'}
+
+  build:opnsense:
+    desc: >-
+      Build tpl-opnsense-267 (VMID 9004) --- fw-01. Needs the OPNsense 26.7 DVD
+      image, DECOMPRESSED from .bz2, already uploaded to local:iso.
+    cmds:
+      - task: packer:run
+        vars: {TEMPLATE: 'opnsense-267'}
+
+  build:kali:
+    desc: 'Build tpl-kali-rolling (VMID 9005) --- kali-01, untrusted-01'
+    cmds:
+      - task: packer:run
+        vars: {TEMPLATE: 'kali-rolling'}
+
+  build:all:
+    desc: >-
+      Build the three Linux templates only (9000, 9001, 9005). The Windows and
+      OPNsense templates are excluded because their ISOs cannot be fetched by
+      URL --- run those three tasks by hand once the ISO shelf is stocked.
+    silent: true
+    cmds:
+      - |
+        echo "Building the Linux templates: 9000, 9001, 9005."
+        echo
+        echo "NOT building 9002 (Windows Server 2022), 9003 (Windows 11) or"
+        echo "9004 (OPNsense). Those three need media that cannot be pinned to"
+        echo "a URL: the Windows evaluation ISOs sit behind a registration"
+        echo "gate, and the OPNsense image ships bzip2-compressed and must be"
+        echo "decompressed before Packer can boot it."
+        echo
+        echo "Upload them by hand, record them in docs/proxmox/iso-shelf.md,"
+        echo "then run: task build:win-server build:win11 build:opnsense"
+        echo
+      - task: build:ubuntu
+      - task: build:ubuntu-desktop
+      - task: build:kali
+
+  # =========================================================================
+  # Offline checks --- no Proxmox host required
+  # =========================================================================
+  #
+  # These three are the reason the whole stack could be authored before the
+  # hardware existed. They have no preconditions because they must run
+  # anywhere.
+
+  fmt:
+    desc: 'Format every HCL file in place (tofu fmt + packer fmt)'
+    cmds:
+      - tofu fmt -recursive {{.ROOT_DIR}}
+      - packer fmt -recursive {{.ROOT_DIR}}
+
+  fmt:check:
+    desc: 'Check HCL formatting without changing anything (what pre-commit runs)'
+    cmds:
+      - tofu fmt -check -recursive {{.ROOT_DIR}}
+      - packer fmt -check -recursive {{.ROOT_DIR}}
+
+  validate:
+    desc: >-
+      Validate all OpenTofu and every Packer template. Offline --- `tofu init
+      -backend=false` resolves the provider without contacting Proxmox.
+    cmds:
+      - tofu -chdir={{.TOFU_DIR}} init -backend=false -input=false
+      - tofu -chdir={{.TOFU_DIR}} validate
+      # A FULL validate, from the repo root, with or without the var-file.
+      #
+      # There is deliberately no `-syntax-only` fallback any more. -syntax-only
+      # does not evaluate file() or templatefile(), so it happily passed three
+      # templates whose seed-file paths were wrong --- the check got WEAKER the
+      # moment an operator created common.pkrvars.hcl and the real validate
+      # started running. Every template now carries non-functional placeholder
+      # defaults for its credentials (decision D-05), so the full check runs
+      # with no var-file, no environment and no host.
+      - |
+        set -e
+        for dir in {{.PACKER_DIR}}/*/; do
+          [ -n "$(find "$dir" -maxdepth 1 -name '*.pkr.hcl' -print -quit)" ] || continue
+          echo "==> packer validate $dir"
+          packer init "$dir"
+          if [ -f "{{.PKR_COMMON}}" ]; then
+            packer validate -var-file="{{.PKR_COMMON}}" "$dir"
+          else
+            packer validate "$dir"
+          fi
+        done
+
+  test:
+    desc: >-
+      Run the OpenTofu test suite. Fully offline --- the tests use
+      mock_provider, so no Proxmox endpoint and no credentials are involved.
+    cmds:
+      - tofu -chdir={{.TOFU_DIR}} init -backend=false -input=false
+      - tofu -chdir={{.TOFU_DIR}} test
+
+  # =========================================================================
+  # OpenTofu --- the lab itself
+  # =========================================================================
+
+  lab:plan:
+    desc: 'Show what OpenTofu would change. This is the teaching artefact --- read it before lab:up.'
+    preconditions:
+      - sh: 'test -n "$PROXMOX_VE_ENDPOINT"'
+        msg: 'PROXMOX_VE_ENDPOINT is not set. Copy .envrc.example to .envrc and run `direnv allow`.'
+      - sh: 'test -n "$PROXMOX_VE_API_TOKEN"'
+        msg: 'PROXMOX_VE_API_TOKEN is not set. bpg wants ONE string: user@pve!id=<uuid>. See .envrc.example.'
+      - sh: 'test -n "$PROXMOX_VE_SSH_USERNAME"'
+        msg: 'PROXMOX_VE_SSH_USERNAME is not set. Snippets upload over SSH, not the API --- see .envrc.example.'
+      - sh: 'test -n "$TF_VAR_state_passphrase" || test -n "$TF_ENCRYPTION"'
+        msg: 'No state-encryption passphrase. Set TF_VAR_state_passphrase or TF_ENCRYPTION --- see .envrc.example.'
+      # fw-01's WAN leg defaults to DHCP, which is the right answer for a lab
+      # hanging off a home router and keeps the real subnet out of the repo
+      # entirely. Only a deliberate wan_ipv4_mode=static needs the two secret
+      # values, so only then are they asserted.
+      - sh: >-
+          [ "${TF_VAR_wan_ipv4_mode:-dhcp}" != "static" ]
+          || { [ -n "$TF_VAR_wan_ipv4_address" ] && [ -n "$TF_VAR_wan_ipv4_gateway" ]; }
+        msg: >-
+          wan_ipv4_mode is "static" but TF_VAR_wan_ipv4_address /
+          TF_VAR_wan_ipv4_gateway are not both set. Those are the two secret
+          values --- see .envrc.example section 3.
+    cmds:
+      - tofu -chdir={{.TOFU_DIR}} init -input=false
+      - tofu -chdir={{.TOFU_DIR}} plan -input=false
+
+  lab:up:
+    desc: >-
+      Create or update the lab. Runs with -parallelism=1 on purpose --- Proxmox
+      returns lock errors when several clones are created at once.
+    preconditions:
+      - sh: 'test -n "$PROXMOX_VE_ENDPOINT"'
+        msg: 'PROXMOX_VE_ENDPOINT is not set. Copy .envrc.example to .envrc and run `direnv allow`.'
+      - sh: 'test -n "$PROXMOX_VE_API_TOKEN"'
+        msg: 'PROXMOX_VE_API_TOKEN is not set. bpg wants ONE string: user@pve!id=<uuid>. See .envrc.example.'
+      - sh: 'test -n "$PROXMOX_VE_SSH_USERNAME"'
+        msg: 'PROXMOX_VE_SSH_USERNAME is not set. Snippets upload over SSH, not the API --- see .envrc.example.'
+      - sh: 'test -n "$TF_VAR_state_passphrase" || test -n "$TF_ENCRYPTION"'
+        msg: 'No state-encryption passphrase. State holds cloud-init passwords in plaintext without it.'
+      - sh: >-
+          [ "${TF_VAR_wan_ipv4_mode:-dhcp}" != "static" ]
+          || { [ -n "$TF_VAR_wan_ipv4_address" ] && [ -n "$TF_VAR_wan_ipv4_gateway" ]; }
+        msg: >-
+          wan_ipv4_mode is "static" but TF_VAR_wan_ipv4_address /
+          TF_VAR_wan_ipv4_gateway are not both set. See .envrc.example section 3.
+      # lab_ssh_authorized_keys is a list(string), so as an environment variable
+      # it has to be HCL: TF_VAR_lab_ssh_authorized_keys='["ssh-ed25519 AAAA..."]'.
+      # A committed-adjacent terraform.tfvars is the other legitimate source, so
+      # either satisfies this. With neither, cloud-init builds Linux guests that
+      # have no key and no password and that Ansible cannot reach at all.
+      - sh: 'test -n "$TF_VAR_lab_ssh_authorized_keys" || test -f {{.TOFU_DIR}}/terraform.tfvars'
+        msg: >-
+          Neither TF_VAR_lab_ssh_authorized_keys nor tofu/terraform.tfvars is
+          present. Without an SSH key cloud-init builds Linux guests you cannot
+          log into --- see .envrc.example section 4.
+    cmds:
+      - tofu -chdir={{.TOFU_DIR}} init -input=false
+      - tofu -chdir={{.TOFU_DIR}} apply -input=false -parallelism=1
+
+  lab:down:
+    desc: >-
+      Destroy the lab. Everything here is rebuildable from templates ---
+      but the AD forest and the Wazuh index are NOT, and Ansible has to run
+      again afterwards. Prompts before doing anything.
+    preconditions:
+      - sh: 'test -n "$PROXMOX_VE_ENDPOINT"'
+        msg: 'PROXMOX_VE_ENDPOINT is not set. Copy .envrc.example to .envrc and run `direnv allow`.'
+      - sh: 'test -n "$PROXMOX_VE_API_TOKEN"'
+        msg: 'PROXMOX_VE_API_TOKEN is not set. See .envrc.example section 1.'
+      - sh: 'test -n "$TF_VAR_state_passphrase" || test -n "$TF_ENCRYPTION"'
+        msg: 'No state-encryption passphrase --- OpenTofu cannot read its own state without it.'
+    prompt: >-
+      This destroys every VM OpenTofu manages, including dc-01 (the AD forest)
+      and wazuh-01 (the indexed alerts the incident scenarios use). Continue?
+    cmds:
+      - tofu -chdir={{.TOFU_DIR}} destroy -input=false -parallelism=1
+
+  # =========================================================================
+  # Ansible --- everything the hypervisor cannot express
+  # =========================================================================
+  #
+  # The playbooks are numbered because the order is load-bearing, not
+  # cosmetic. DNS records must exist before anything resolves by name; the
+  # domain must exist before anything joins it; Wazuh agent groups must exist
+  # before agents enrol into them (enrolling into a missing group does not
+  # create it).
+  #
+  # All Active Directory object plays target dc-01 itself. NTLM cannot
+  # delegate, so a microsoft.ad.user task run from anywhere else fails with
+  # "Failed to contact the AD server".
+
+  ansible:run:
+    internal: true
+    dir: '{{.ANSIBLE_DIR}}'
+    preconditions:
+      - sh: 'test -f {{.INVENTORY}}'
+        msg: 'ansible/inventory/hosts.yml is missing.'
+      - sh: 'test -f {{.ANSIBLE_DIR}}/playbooks/{{.PLAY}}'
+        msg: 'No such playbook: ansible/playbooks/{{.PLAY}}'
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/{{.PLAY}} {{.CLI_ARGS}}
+
+  ansible:deps:
+    desc: 'Install the pinned Ansible collections (microsoft.ad 1.12.0, ansible.windows 3.7.0)'
+    dir: '{{.ANSIBLE_DIR}}'
+    preconditions:
+      - sh: 'test -f {{.ANSIBLE_DIR}}/requirements.yml'
+        msg: 'ansible/requirements.yml is missing.'
+    cmds:
+      - ansible-galaxy collection install -r requirements.yml
+
+  ansible:preflight:
+    desc: >-
+      00 --- Check credentials, reachability and DNS. Changes nothing. Run this
+      first; it is the only playbook that is safe to run at any time.
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '00-preflight.yml'}
+
+  ansible:dc-promote:
+    desc: '10 --- Promote dc-01 to forest root for mutaspace.local (MUTASPACE)'
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_WIN_ADMIN_PASSWORD"'
+        msg: 'MUTASPACE_WIN_ADMIN_PASSWORD is not set. The bootstrap group logs in as the LOCAL Administrator.'
+      - sh: 'test -n "$MUTASPACE_SAFE_MODE_PASSWORD"'
+        msg: 'MUTASPACE_SAFE_MODE_PASSWORD is not set. microsoft.ad.domain requires a DSRM password.'
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '10-dc-promote.yml'}
+
+  ansible:dns-records:
+    desc: '20 --- A records plus the 10.10.10.in-addr.arpa reverse zone on dc-01'
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_DOMAIN_ADMIN_PASSWORD"'
+        msg: >-
+          MUTASPACE_DOMAIN_ADMIN_PASSWORD is not set. After promotion the
+          account is a DOMAIN account, not a local one.
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '20-dns-records.yml'}
+
+  ansible:domain-join:
+    desc: '30 --- Rename and join win-client-01 to mutaspace.local'
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_WIN_ADMIN_PASSWORD"'
+        msg: 'MUTASPACE_WIN_ADMIN_PASSWORD is not set. win-client-01 is still a workgroup member at this point.'
+      - sh: 'test -n "$MUTASPACE_DOMAIN_ADMIN_PASSWORD"'
+        msg: 'MUTASPACE_DOMAIN_ADMIN_PASSWORD is not set. See ansible/lab-credentials.env.example.'
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '30-domain-join.yml'}
+
+  ansible:wazuh-server:
+    desc: >-
+      40 --- Install the Wazuh 4.14.6 all-in-one deployment on wazuh-01. This is
+      the one play that needs the guest to reach the internet, so fw-01 has to
+      be routing before it will work.
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '40-wazuh-server.yml'}
+
+  ansible:wazuh-agents:
+    desc: '50 --- Create agent groups, then enrol every endpoint against 10.10.10.20'
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_WIN_ADMIN_PASSWORD"'
+        msg: 'MUTASPACE_WIN_ADMIN_PASSWORD is not set. The Windows agents are installed over WinRM.'
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '50-wazuh-agents.yml'}
+
+  ansible:endpoints:
+    desc: >-
+      60 --- Nginx and OpenSSH on ubuntu-app-01; Sysmon and logon auditing on
+      win-client-01. This is what makes the endpoints produce telemetry worth
+      detecting on.
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_DOMAIN_ADMIN_PASSWORD"'
+        msg: 'MUTASPACE_DOMAIN_ADMIN_PASSWORD is not set. win-client-01 is a domain member by this point.'
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '60-endpoints.yml'}
+
+  ansible:detections:
+    desc: >-
+      70 --- Push local_rules.xml and reload analysisd. This is the
+      detection-as-code seam; it reloads rules WITHOUT dropping agent
+      connections, which a manager restart would.
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_WAZUH_API_PASSWORD"'
+        msg: >-
+          MUTASPACE_WAZUH_API_PASSWORD is not set. The installer generates it ---
+          read it out of ansible/.secrets/wazuh-passwords.txt after
+          `task ansible:wazuh-server`.
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '70-detections.yml'}
+
+  ansible:lab-seed:
+    desc: >-
+      90 --- Create test.user and lab.user02 and the lab OUs. Not optional:
+      both completed incident scenarios in docs/incident-scenarios/ reference
+      these accounts by name, and without them that coursework stops working.
+    preconditions:
+      - sh: 'test -n "$MUTASPACE_DOMAIN_ADMIN_PASSWORD"'
+        msg: 'MUTASPACE_DOMAIN_ADMIN_PASSWORD is not set. See ansible/lab-credentials.env.example.'
+      - sh: 'test -n "$MUTASPACE_LAB_USER_PASSWORD"'
+        msg: 'MUTASPACE_LAB_USER_PASSWORD is not set. It is the password test.user and lab.user02 are created with.'
+    cmds:
+      - task: ansible:run
+        vars: {PLAY: '90-lab-seed.yml'}
+
+  ansible:all:
+    desc: 'Run every playbook in its numbered order (00 -> 10 -> 20 -> 30 -> 40 -> 50 -> 60 -> 70 -> 90)'
+    cmds:
+      - task: ansible:preflight
+      - task: ansible:dc-promote
+      - task: ansible:dns-records
+      - task: ansible:domain-join
+      - task: ansible:wazuh-server
+      - task: ansible:wazuh-agents
+      - task: ansible:endpoints
+      - task: ansible:detections
+      - task: ansible:lab-seed
+
+  # THERE IS NO `ansible:suricata` TASK, AND THAT IS NOT AN OMISSION.
+  #
+  # Decision D-04 puts Suricata inline on fw-01 as an OPNsense plugin. OPNsense
+  # is not in the Ansible inventory --- it is a FreeBSD appliance with no Python
+  # and no WinRM --- so there is nothing for a playbook to configure. The plugin
+  # is installed by the Packer build and enabled by the <IDS> block in the
+  # config.xml that build seeds. See packer/opnsense-267/.
+  #
+  # An earlier version of this file advertised a `60-suricata.yml` that never
+  # existed. A task that names a missing playbook is worse than no task: it
+  # implies a capability the repository does not have.
+
+  # =========================================================================
+  # Classroom lifecycle
+  # =========================================================================
+  #
+  # Reset is `qm rollback`, not a backup restore. A vzdump backup is always
+  # logically full, so restoring a linked clone silently converts it into an
+  # independent full VM and the storage saving disappears.
+  #
+  # Take the baseline ONCE, with the VM stopped and without --vmstate. A RAM
+  # snapshot of an 8 GB guest lands on the 96 GB root LV, and rolling it back
+  # resumes mid-flight instead of cold-booting --- the wrong semantics for a
+  # classroom.
+
+  # BOTH OF THESE RUN ON THE PROXMOX HOST, NOT HERE.
+  #
+  # `qm` is a host-local tool; there is no API call behind it and no way to run
+  # it from a workstation. Both scripts check for it and refuse to start
+  # otherwise (scripts/learner-snapshot.sh, "qm not found. This script must run
+  # ON the Proxmox VE host"), so invoking them locally could only ever fail.
+  #
+  # The tasks therefore copy the script to the node and run it there over SSH.
+  # `ssh -t` allocates a terminal on purpose: learner-reset.sh asks the operator
+  # to type the learner id before it throws away their work, and that prompt has
+  # to reach a real tty. Piping the script over stdin would silently eat the
+  # answer.
+  #
+  # LAB_HOST_SSH is the ssh destination of the node, e.g. root@<LAB_MANAGEMENT_IP>.
+  # It is separate from PROXMOX_VE_SSH_USERNAME: that account is the narrowly
+  # sudo-scoped `terraform` user the provider uploads snippets as, and it is
+  # deliberately not allowed to run `qm snapshot`.
+
+  learner:snapshot:
+    desc: >-
+      Take the "baseline" snapshot for a learner's VMs, on the Proxmox host over
+      SSH. Run once, at the start of a module. Usage:
+      task learner:snapshot LEARNER=01
+    preconditions:
+      - sh: 'test -n "{{.LEARNER}}"'
+        msg: 'LEARNER is not set. Usage: task learner:snapshot LEARNER=01'
+      - sh: 'test -f {{.SCRIPTS_DIR}}/learner-snapshot.sh'
+        msg: 'scripts/learner-snapshot.sh is missing.'
+      - sh: 'test -n "$LAB_HOST_SSH"'
+        msg: >-
+          LAB_HOST_SSH is not set. `qm` only exists on the Proxmox node, so this
+          runs there over SSH. Set it to root@<LAB_MANAGEMENT_IP> --- see
+          .envrc.example section 1.
+    cmds:
+      - scp {{.SCRIPTS_DIR}}/learner-snapshot.sh "$LAB_HOST_SSH":/tmp/learner-snapshot.sh
+      - >-
+        ssh -t "$LAB_HOST_SSH"
+        'sudo bash /tmp/learner-snapshot.sh {{.LEARNER}} {{.CLI_ARGS}}; rm -f /tmp/learner-snapshot.sh'
+
+  learner:reset:
+    desc: >-
+      Roll a learner's VMs back to "baseline" and start them, on the Proxmox host
+      over SSH. Usage: task learner:reset LEARNER=01. Afterwards the guest clock
+      is as old as the snapshot --- the script forces a resync, but Kerberos can
+      still reject the first logon attempt.
+    preconditions:
+      - sh: 'test -n "{{.LEARNER}}"'
+        msg: 'LEARNER is not set. Usage: task learner:reset LEARNER=01'
+      - sh: 'test -f {{.SCRIPTS_DIR}}/learner-reset.sh'
+        msg: 'scripts/learner-reset.sh is missing.'
+      - sh: 'test -n "$LAB_HOST_SSH"'
+        msg: >-
+          LAB_HOST_SSH is not set. `qm` only exists on the Proxmox node, so this
+          runs there over SSH. Set it to root@<LAB_MANAGEMENT_IP> --- see
+          .envrc.example section 1.
+    cmds:
+      - scp {{.SCRIPTS_DIR}}/learner-reset.sh "$LAB_HOST_SSH":/tmp/learner-reset.sh
+      - >-
+        ssh -t "$LAB_HOST_SSH"
+        'sudo bash /tmp/learner-reset.sh {{.LEARNER}} {{.CLI_ARGS}}; rm -f /tmp/learner-reset.sh'

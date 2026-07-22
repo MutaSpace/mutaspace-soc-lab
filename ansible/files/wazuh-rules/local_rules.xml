@@ -1,0 +1,139 @@
+<!--
+  local_rules.xml - MutaSpace SOC Lab custom detection rules
+
+  WHY THIS FILE EXISTS
+  ====================
+  Wazuh ships thousands of rules. This file holds the ones this lab wrote itself, and it is version
+  controlled for the same reason application code is: a detection is a piece of logic with a
+  lifecycle. It gets written, tuned, sometimes wrong, and occasionally reverted. A rule that only
+  exists inside a running manager cannot be reviewed, diffed, or rebuilt.
+
+  70-detections.yml pushes this file to the manager through the Wazuh API and then reloads
+  analysisd. It is never edited on the manager by hand - an edit there is lost on the next push.
+
+  RULE ID RANGE
+  =============
+  Every rule here uses an ID between 100000 and 120000. That range is reserved by Wazuh for user
+  rules and is guaranteed never to be used by a shipped ruleset. A custom rule outside it works
+  until the day a Wazuh update claims the same number, and then it stops working in a way that is
+  extremely hard to trace.
+
+  FIELD NAMES
+  ===========
+  Inside a rule, Windows fields are addressed as `win.system.eventID` and
+  `win.eventdata.targetUserName`. In the dashboard's search bar the same fields carry a `data.`
+  prefix - `data.win.system.eventID` - because that is the indexer's view of the document. The two
+  are the same data seen from two places, and mixing them up is the most common reason a rule that
+  "should obviously match" never fires.
+
+  LEVELS
+  ======
+  Wazuh levels are a 0-15 scale. A single failed logon in a teaching lab is not an incident, so it
+  sits at 5 - visible in Security Events, not worth alerting on. The correlated version of the same
+  activity is level 10, which is where an analyst should start paying attention.
+-->
+
+<!--
+  A SINGLE top-level <group> wraps every rule in this file.
+
+  Wazuh's parser tolerates several sibling <group> blocks in one file, but that is not well-formed
+  XML - a document has one root - and it means "xmllint" cannot be used to check this file
+  before pushing it to a live manager. One root keeps the file checkable with ordinary tools, and
+  each rule declares its own categories with its own inner <group> tag anyway.
+-->
+<group name="mutaspace,windows,">
+
+  <!--
+    100010 - a single Windows logon failure.
+
+    This is the event docs/incident-scenarios/failed-login-investigation.md is built on. The
+    scenario has the learner search for event ID 4625 on win-client-01; this rule gives that search
+    a named, described result instead of a raw event.
+
+    It matches on the event ID field rather than chaining off a built-in rule with <if_sid>,
+    because built-in rule IDs move between ruleset versions and a chained rule that silently stops
+    matching is worse than no rule at all.
+  -->
+  <rule id="100010" level="5">
+    <if_group>windows</if_group>
+    <field name="win.system.eventID">^4625$</field>
+    <description>MutaSpace: Windows logon failure for $(win.eventdata.targetUserName) on $(win.system.computer)</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failed,pci_dss_10.2.4,gdpr_IV_35.7.d,</group>
+  </rule>
+
+  <!--
+    100011 - the same failures, correlated.
+
+    One failed logon is a typo. Five for the same account inside two minutes is a pattern, and the
+    difference between those two statements is the entire job of a correlation rule.
+
+    <same_field> is what makes this specific: without it, five failures spread across five different
+    accounts would trigger the rule, which is a different behaviour (spraying) that deserves its own
+    rule rather than being confused with guessing a single password.
+
+    HONEST CAVEAT ON `frequency`: Wazuh counts matches within `timeframe`, and the exact threshold
+    at which the rule fires has differed between versions - some behave as "frequency" and some as
+    "frequency + 1". Before teaching a precise number to a class, generate failures on
+    win-client-01 and count what it actually takes to fire. Do not present the value below as
+    verified; it has not been tested against a running manager.
+  -->
+  <rule id="100011" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>100010</if_matched_sid>
+    <same_field>win.eventdata.targetUserName</same_field>
+    <description>MutaSpace: repeated logon failures for the same account - possible password guessing</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,pci_dss_11.4,</group>
+  </rule>
+
+  <!--
+    100020 - an Active Directory user account was created.
+
+    This is the event docs/incident-scenarios/account-creation-investigation.md is built on. The
+    scenario creates lab.user02 on dc-01 and has the learner find event ID 4720.
+
+    Level 8 rather than 5: account creation is not inherently suspicious, but it is always worth
+    explaining. The teaching point in that scenario is exactly this - "not every new account is
+    suspicious, but every unexpected account creation should be explainable" - and the alert level
+    is where that judgement gets encoded.
+
+    Event 4720 only exists if User Account Management auditing is enabled on the domain controller.
+    10-dc-promote.yml asserts that, which is what makes this rule reliable rather than occasional.
+  -->
+  <rule id="100020" level="8">
+    <if_group>windows</if_group>
+    <field name="win.system.eventID">^4720$</field>
+    <description>MutaSpace: Active Directory user account $(win.eventdata.targetUserName) created by $(win.eventdata.subjectUserName)</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>account_changed,pci_dss_10.2.5,gdpr_IV_35.7.d,</group>
+  </rule>
+
+  <!--
+    100021 - a newly created account was added to a privileged group.
+
+    4720 followed by 4728 (member added to a global security group) inside five minutes is a
+    recognisable persistence pattern: create an account, then give it rights. Neither event alone
+    justifies waking anyone; the sequence does.
+
+    This rule is included because it demonstrates something the two existing scenarios do not - that
+    detection value often lives in the relationship between events rather than in any single one.
+  -->
+  <rule id="100021" level="12" timeframe="300">
+    <if_group>windows</if_group>
+    <if_matched_sid>100020</if_matched_sid>
+    <field name="win.system.eventID">^4728$</field>
+    <description>MutaSpace: recently created account added to a privileged group - possible persistence</description>
+    <mitre>
+      <id>T1136.002</id>
+      <id>T1098</id>
+    </mitre>
+    <group>account_changed,privilege_escalation,</group>
+  </rule>
+
+</group>

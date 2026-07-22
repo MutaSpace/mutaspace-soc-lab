@@ -1,0 +1,327 @@
+# .envrc.example --- direnv template for the MutaSpace SOC Lab
+#
+# WHAT THIS IS
+#   Every credential and every secret network value the lab needs, in one
+#   place, as environment variables. Nothing in this repository reads a
+#   password from a file; the tools read them from the environment.
+#
+# WHY IT EXISTS
+#   OpenTofu's *.auto.tfvars and Packer's *.auto.pkrvars.hcl are loaded
+#   automatically, without being named on the command line. That makes them
+#   very convenient and very easy to commit by accident. Environment variables
+#   have no such trap: there is no file for "git add -A" to sweep up.
+#
+# HOW TO USE IT
+#   cp .envrc.example .envrc
+#   $EDITOR .envrc          # fill in the real values
+#   direnv allow            # direnv now loads these whenever you cd here
+#
+#   .envrc is in .gitignore. .envrc.example is committed. Keep it that way.
+#
+#   If you do not want direnv, this file is a plain shell script:
+#   `set -a; source .envrc; set +a` works too.
+#
+# ★ EVERY VARIABLE NAME BELOW IS LOAD-BEARING ★
+#
+#   A TF_VAR_* that does not match a `variable` block in tofu/variables.tf is
+#   SILENTLY IGNORED by OpenTofu --- no warning, no error, the value simply goes
+#   nowhere and the variable keeps its default. The same is true of PKR_VAR_*
+#   against a Packer template's variables. An earlier version of this file
+#   exported eight names that did not exist, and the visible symptom was Linux
+#   guests with no SSH key that Ansible could not reach.
+#
+#   The authoritative lists are:
+#     tofu/variables.tf                     TF_VAR_<name>
+#     packer/*/  (variable blocks)          PKR_VAR_<name>
+#     ansible/inventory/group_vars/all.yml  MUTASPACE_<NAME>
+#
+# THE ONE MISTAKE EVERYONE MAKES IS AT THE TOP OF THE NEXT SECTION. READ IT.
+
+# ===========================================================================
+# 1. PROXMOX API CREDENTIALS --- THE SAME SECRET, IN TWO DIFFERENT SHAPES
+# ===========================================================================
+#
+# This is the single most common silent failure in this stack, so it is the
+# first thing in the file.
+#
+# Packer and the bpg/proxmox OpenTofu provider both authenticate with a
+# Proxmox API token. A Proxmox API token has three parts:
+#
+#     user@realm  !  token-id  =  token-secret (a UUID)
+#     terraform@pve!provider=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#     \___________/ \______/ \__________________________________/
+#      user@realm   token-id            token-secret
+#
+# Packer wants those parts SPLIT ACROSS TWO FIELDS:
+#     username = "packer@pve!buildtoken"      <- user@realm + "!" + token-id
+#     token    = "<the UUID only>"            <- token-secret on its own
+#
+# bpg/proxmox wants them CONCATENATED INTO ONE STRING:
+#     api_token = "terraform@pve!provider=<the UUID>"
+#
+# If you define one variable and feed it to both tools, one of them gets a
+# malformed credential and Proxmox answers 401 with no explanation of which
+# half is wrong. Define them separately. That is why there are two blocks
+# below and why they deliberately use two different Proxmox users.
+#
+# Create the users and tokens with scripts/bootstrap-host.sh. The token
+# secret is displayed EXACTLY ONCE, at creation. If you lose it, delete the
+# token and make a new one.
+
+# --- bpg/proxmox provider (OpenTofu) ------------------------------------
+# Endpoint is the web UI URL. Keep the trailing slash; do NOT append
+# /api2/json here --- the provider adds its own path.
+export PROXMOX_VE_ENDPOINT="https://<LAB_MANAGEMENT_IP>:8006/"
+
+# ONE concatenated string. Note the "=" INSIDE the value.
+export PROXMOX_VE_API_TOKEN="terraform@pve!provider=<TOKEN-SECRET-UUID>"
+
+# --- bpg SSH access (needed for cloud-init snippets, NOT optional) -------
+# Snippets cannot be uploaded through the Proxmox API --- the upload endpoint
+# accepts only iso, vztmpl and import content types. The provider silently
+# falls back to SFTP over SSH, which needs a real PAM (Linux) account on the
+# node, not an API token.
+export PROXMOX_VE_SSH_USERNAME="terraform"
+export PROXMOX_VE_SSH_AGENT="true"
+# ...or point at a key file instead of using the agent:
+# export PROXMOX_VE_SSH_PRIVATE_KEY="$(cat ~/.ssh/mutaspace_lab_ed25519)"
+
+# --- Host shell access, for the two classroom scripts -------------------
+# `task learner:snapshot` and `task learner:reset` copy a script to the node
+# and run it there, because `qm` is a host-local tool with no API behind it.
+#
+# This is NOT the same account as PROXMOX_VE_SSH_USERNAME above. That account
+# is the `terraform` PAM user, whose sudoers entry is deliberately narrowed to
+# pvesm/qm/tee-into-snippets and which is not meant to be a general login.
+export LAB_HOST_SSH="root@<LAB_MANAGEMENT_IP>"
+
+# --- Packer (hashicorp/proxmox plugin) ----------------------------------
+# Endpoint DOES include /api2/json here. This is not a typo; the two tools
+# genuinely differ.
+export PKR_VAR_proxmox_url="https://<LAB_MANAGEMENT_IP>:8006/api2/json"
+
+# user@realm + "!" + token-id. NO token secret in this value.
+export PKR_VAR_proxmox_username="packer@pve!buildtoken"
+
+# The token secret ON ITS OWN. No user, no "!", no "=".
+export PKR_VAR_proxmox_token="<TOKEN-SECRET-UUID>"
+
+export PKR_VAR_proxmox_node="mutaspace-soc-node01"
+
+# The variable is `proxmox_insecure_tls` in all six templates. There is no
+# `proxmox_insecure_skip_tls_verify` variable --- that is the name of the
+# BUILDER FIELD the variable is assigned to, and exporting it does nothing.
+export PKR_VAR_proxmox_insecure_tls="true"
+
+# ===========================================================================
+# 2. OPENTOFU STATE ENCRYPTION
+# ===========================================================================
+#
+# State is a plaintext JSON file that records everything the provider read
+# back from Proxmox: cloud-init passwords, generated credentials, and the
+# firewall's real WAN address. OpenTofu encrypts state natively; Terraform
+# does not. That capability is one of the reasons this lab uses OpenTofu.
+#
+# There are two supported ways to supply the passphrase. Use whichever the
+# committed tofu/ code expects.
+#
+# (a) The encryption block lives in tofu/versions.tf and reads a variable.
+#     If this variable is unset, `tofu plan` fails with
+#     "encryption.key_provider.pbkdf2.<name> depends on var.<name> which is
+#     not available" --- it fails loudly rather than writing plaintext state,
+#     which is exactly what you want.
+export TF_VAR_state_passphrase="<AT-LEAST-16-CHARACTERS-CHANGE-ME>"
+
+# (b) No encryption block in the code at all; the whole configuration comes
+#     from this variable. Uncomment if tofu/versions.tf has no encryption{}
+#     block.
+#
+# export TF_ENCRYPTION='key_provider "pbkdf2" "lab" {
+#   passphrase = "<AT-LEAST-16-CHARACTERS-CHANGE-ME>"
+# }
+# method "aes_gcm" "lab" {
+#   keys = key_provider.pbkdf2.lab
+# }
+# state {
+#   method = method.aes_gcm.lab
+# }'
+#
+# Losing this passphrase means losing the ability to read your own state.
+# Back it up somewhere that is not this repository.
+
+# ===========================================================================
+# 3. THE MANAGEMENT / WAN PLANE --- VALUES THAT MUST NEVER BE COMMITTED
+# ===========================================================================
+#
+# The repository's placeholder policy (README.md, "Security Note") is that the
+# internal 10.10.10.0/24 and 10.10.20.0/24 planes are published in full --- the
+# whole point of the lab is that a reader can follow the addressing --- while
+# anything on vmbr0 is a real home or campus network and is variables only.
+#
+# WHAT IS *NOT* HERE, AND WHY
+#   There is no TF_VAR_management_uplink_nic, no TF_VAR_management_cidr and no
+#   TF_VAR_upstream_dns. OpenTofu does not configure any of those. The uplink
+#   NIC is written into /etc/network/interfaces by scripts/bootstrap-host.sh on
+#   the node itself; the upstream resolver is a PACKER variable, because it is
+#   baked into fw-01's seeded config.xml (see section 6 below).
+
+# How fw-01's WAN leg gets its address. "dhcp" is the default in
+# tofu/variables.tf and is the right answer for a lab hanging off a home
+# router: it keeps the real subnet out of this file entirely.
+export TF_VAR_wan_ipv4_mode="dhcp"
+
+# Only meaningful when wan_ipv4_mode = "static". Both are marked sensitive in
+# tofu/variables.tf, so they never appear in plan output.
+# export TF_VAR_wan_ipv4_address="<LAB_MANAGEMENT_IP>/24"
+# export TF_VAR_wan_ipv4_gateway="<LAB_GATEWAY_IP>"
+
+# ===========================================================================
+# 4. GUEST CREDENTIALS --- OPENTOFU
+# ===========================================================================
+
+# The SSH public keys cloud-init installs on every Linux guest.
+#
+# NOTE THE SHAPE. lab_ssh_authorized_keys is a list(string), so the value has to
+# be valid HCL, not a bare key. The square brackets and the inner double quotes
+# are both required. Paste the key in rather than substituting a `cat`: if the
+# file is missing, command substitution yields an empty string and you get the
+# list [""], which is a key that installs successfully and lets nobody in.
+#
+#   ssh-keygen -t ed25519 -f ~/.ssh/mutaspace_lab_ed25519 -C mutaspace-lab
+#   cat ~/.ssh/mutaspace_lab_ed25519.pub
+#
+# Public keys are not secret, but they identify a person.
+export TF_VAR_lab_ssh_authorized_keys='["ssh-ed25519 AAAA<PASTE-YOUR-PUBLIC-KEY> you@host"]'
+
+# Optional console password for the same cloud-init account. Prefer keys and
+# leave this unset. It lands in OpenTofu state, which is why section 2 exists.
+# export TF_VAR_lab_admin_password="changeme"
+
+# ===========================================================================
+# 5. OPENTOFU OPERATOR KNOBS (optional --- all have working defaults)
+# ===========================================================================
+#
+# These have the same effect as writing them into a gitignored
+# tofu/terraform.tfvars. Two mechanisms, one set of variable names; pick one.
+
+# A fresh Proxmox install serves a self-signed certificate. Defaults to false,
+# which is the secure choice and the opposite of most Proxmox tutorials.
+export TF_VAR_pve_insecure="true"
+
+# The provider requires TLS 1.3 by default. PVE 8.x hosts commonly offer only
+# 1.2, and the failure looks like an unreachable host rather than a TLS
+# mismatch. Leave commented on PVE 9.x.
+# export TF_VAR_pve_min_tls="1.2"
+
+# Falls back to PROXMOX_VE_SSH_USERNAME when unset, which is the normal case.
+# export TF_VAR_pve_ssh_username="terraform"
+
+# How many of the learners in lab.yaml actually get VMs built. MUST match
+# PKR_VAR_learner_count in section 6, or the firewall seeds DHCP reservations
+# for a different set of machines than OpenTofu builds.
+# export TF_VAR_learner_count="3"
+
+# ===========================================================================
+# 6. PACKER BUILD CREDENTIALS
+# ===========================================================================
+#
+# The three Linux templates (9000, 9001, 9005) create a build account and
+# authenticate to it with a key. The two Windows templates bake a local
+# Administrator password into their Autounattend. None of these values has a
+# working default --- the templates carry deliberately non-functional
+# placeholders so that `packer validate` runs offline, which means a forgotten
+# export fails at BUILD time rather than at validate time.
+
+# SHA-512 crypt hash for the build account on the Linux templates.
+#   PKR_VAR_build_password_hash="$(mkpasswd -m sha-512)"     # package: whois
+export PKR_VAR_build_password_hash="<sha-512-crypt-hash>"
+
+# The public half of the build key pair, and the path to the private half.
+# Packer authenticates with the key, so the plaintext password never has to
+# exist anywhere.
+#
+# This one IS a bare string rather than an HCL list, so a `cat` is safe here.
+export PKR_VAR_ssh_public_key="$(cat ~/.ssh/mutaspace_lab_ed25519.pub)"
+export PKR_VAR_ssh_private_key_file="$HOME/.ssh/mutaspace_lab_ed25519"
+
+# Local Administrator baked into the two Windows templates by Autounattend.
+# ⚠️ This is plaintext inside the answer file and survives in C:\Windows\Panther
+# until the cleanup script scrubs it. Rotate it after the templates are built.
+export PKR_VAR_windows_admin_password="changeme"
+
+# OPNsense root, typed at the installer console by the boot_command, plus the
+# same password crypt-hashed for config.xml. Two variables for one password
+# because HCL has no crypt() function.
+#   PKR_VAR_root_password_hash="$(openssl passwd -6 '<same password>')"
+export PKR_VAR_root_password="changeme"
+export PKR_VAR_root_password_hash="<openssl-passwd-6-hash>"
+
+# The resolver fw-01 uses during the build and afterwards. A public resolver,
+# so not a secret --- but it is a PACKER variable, not an OpenTofu one, because
+# it is baked into the seeded config.xml.
+export PKR_VAR_upstream_dns="1.1.1.1"
+
+# Must match TF_VAR_learner_count. It decides how many per-learner DHCP
+# reservations are seeded into fw-01's config.xml.
+# export PKR_VAR_learner_count="3"
+
+# ===========================================================================
+# 7. ANSIBLE CREDENTIALS
+# ===========================================================================
+#
+# Ansible reads these with `default=Undefined`, so a missing one is an
+# immediate named error rather than a blank password on a domain controller.
+#
+# THIS SECTION DUPLICATES ansible/lab-credentials.env.example ON PURPOSE.
+# Either source works --- keep the values in .envrc if you want one file for
+# everything, or use lab-credentials.env if you want the Ansible credentials to
+# live and die with a single shell session. Do not fill in both and let them
+# drift.
+
+# Local Administrator on a freshly-cloned Windows template. Same value as
+# PKR_VAR_windows_admin_password in section 6, until you rotate it.
+export MUTASPACE_WIN_ADMIN_PASSWORD="changeme"
+
+# MUTASPACE\Administrator after the forest exists. On a brand-new forest this
+# is the same secret as the one above, because promotion converts the local
+# account into the domain account.
+export MUTASPACE_DOMAIN_ADMIN_PASSWORD="changeme"
+
+# Directory Services Restore Mode password, set once at forest creation.
+# Not the domain administrator password and should not be the same string.
+export MUTASPACE_SAFE_MODE_PASSWORD="changeme-too"
+
+# Shared by test.user and lab.user02 --- the two accounts the completed
+# incident scenarios depend on by name.
+export MUTASPACE_LAB_USER_PASSWORD="changeme-lab"
+
+# The cloud-init account on the Linux templates, and the private key whose
+# public half was installed into it.
+export MUTASPACE_LINUX_USER="labadmin"
+export MUTASPACE_LINUX_SSH_KEY="$HOME/.ssh/mutaspace_lab_ed25519"
+
+# ===========================================================================
+# 8. WAZUH API
+# ===========================================================================
+#
+# The all-in-one installer generates these. 40-wazuh-server.yml captures them
+# into ansible/.secrets/wazuh-passwords.txt, which is gitignored and has a
+# gitleaks rule. Read them out of that file after the server is installed;
+# 70-detections.yml is the only playbook that needs them.
+#
+# There is no WAZUH_API_URL variable. Ansible builds the URL from
+# wazuh_manager_ip and wazuh_api_port in inventory/group_vars/all.yml, so an
+# exported URL would be ignored and could disagree with the real one.
+export MUTASPACE_WAZUH_API_USER="wazuh"
+export MUTASPACE_WAZUH_API_PASSWORD="read-this-out-of-ansible/.secrets/wazuh-passwords.txt"
+
+# ===========================================================================
+# 9. OPTIONAL --- DEBUGGING
+# ===========================================================================
+#
+# Both of these write credentials to the log. Turn them on to debug a
+# specific failure, then turn them off, and never redirect them into a file
+# inside this repository.
+#
+# export TF_LOG="DEBUG"
+# export PACKER_LOG="1"

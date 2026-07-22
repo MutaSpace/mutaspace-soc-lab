@@ -1,0 +1,174 @@
+# playbooks/70-detections.yml
+#
+# Detection as code: push files/wazuh-rules/local_rules.xml to the Wazuh manager through the API,
+# then reload the ruleset.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY RELOAD AND NOT RESTART
+# ---------------------------------------------------------------------------------------------
+# `systemctl restart wazuh-manager` would also load the new rules. It would also drop every agent
+# connection, re-queue the events those agents were mid-way through sending, and produce a gap in
+# the data at the exact moment a class is looking at it. `PUT /manager/analysisd/reload` reloads the
+# ruleset in place and leaves the agent connections alone.
+#
+# That difference is the whole reason this playbook uses the API instead of copying a file and
+# bouncing a service. It is also the difference between a detection change being a routine
+# operation and being something you only do out of hours.
+# ---------------------------------------------------------------------------------------------
+#
+# WHY THE API CALLS RUN ON wazuh-01 ITSELF
+# ---------------------------------------------------------------------------------------------
+# The tasks below target the manager over SSH and then call the API on 127.0.0.1. The alternative -
+# running the `uri` tasks from the control node against 10.10.10.20 - would require the control
+# node to have a route to the SOC LAN and to trust the manager's self-signed certificate. Keeping
+# the API conversation local to the manager makes this playbook work identically from a laptop, an
+# analyst workstation, or a CI runner.
+# ---------------------------------------------------------------------------------------------
+#
+# Usage:
+#   export MUTASPACE_WAZUH_API_USER=wazuh
+#   export MUTASPACE_WAZUH_API_PASSWORD='...'      # from .secrets/wazuh-passwords.txt
+#   ansible-playbook playbooks/70-detections.yml
+---
+- name: Deploy custom detection rules to the Wazuh manager
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+
+  vars:
+    wazuh_api_base: "https://127.0.0.1:{{ wazuh_api_port }}"
+    # The manager stores user rules under etc/rules, relative to /var/ossec.
+    wazuh_rules_relative_dir: "etc/rules"
+    wazuh_rules_staging_path: "/tmp/{{ wazuh_local_rules_file }}"
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # Authenticate
+    # -----------------------------------------------------------------------------------------
+    # `?raw=true` makes the endpoint return the bare JWT as the response body instead of wrapping it
+    # in a JSON envelope, which saves a parsing step. The token is short-lived by design - roughly
+    # fifteen minutes - which is ample for this playbook and is why it is never cached anywhere.
+    #
+    # validate_certs is false because the installation assistant generates its own certificate
+    # authority and this lab does not distribute that CA to the control node. That is a deliberate,
+    # scoped exception: the connection is to 127.0.0.1 on the manager itself, so there is no network
+    # path for anyone to interpose on.
+    - name: Obtain a Wazuh API token
+      ansible.builtin.uri:
+        url: "{{ wazuh_api_base }}/security/user/authenticate?raw=true"
+        method: POST
+        url_username: "{{ wazuh_api_user }}"
+        url_password: "{{ wazuh_api_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: wazuh_auth
+      no_log: true
+
+    - name: Confirm a token was issued
+      ansible.builtin.assert:
+        that:
+          - wazuh_auth.content | default('') | length > 0
+        fail_msg: >-
+          The Wazuh API did not return a token. Check MUTASPACE_WAZUH_API_USER and
+          MUTASPACE_WAZUH_API_PASSWORD against .secrets/wazuh-passwords.txt.
+        success_msg: "Authenticated to the Wazuh API"
+
+    # -----------------------------------------------------------------------------------------
+    # Push the rules
+    # -----------------------------------------------------------------------------------------
+    # The file is copied to the manager first and then uploaded from there, rather than being
+    # streamed from the control node, so that the byte content that reaches the API is unambiguous.
+    - name: Stage the rules file on the manager
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/wazuh-rules/{{ wazuh_local_rules_file }}"
+        dest: "{{ wazuh_rules_staging_path }}"
+        mode: "0640"
+
+    # The API validates the ruleset before accepting it. A rule with a malformed regex or a
+    # duplicate ID is rejected here with a specific error, which is far better than discovering it
+    # after analysisd has already restarted with a broken configuration.
+    - name: Upload local_rules.xml through the API
+      ansible.builtin.uri:
+        url: >-
+          {{ wazuh_api_base }}/rules/files/{{ wazuh_local_rules_file }}?overwrite=true&relative_dirname={{ wazuh_rules_relative_dir }}
+        method: PUT
+        src: "{{ wazuh_rules_staging_path }}"
+        remote_src: true
+        headers:
+          Authorization: "Bearer {{ wazuh_auth.content }}"
+          Content-Type: application/octet-stream
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: rules_upload
+      no_log: true
+
+    - name: Show the upload result
+      ansible.builtin.debug:
+        msg: "{{ rules_upload.json.message | default('Rules file uploaded') }}"
+
+    # -----------------------------------------------------------------------------------------
+    # Reload
+    # -----------------------------------------------------------------------------------------
+    - name: Reload analysisd so the new rules take effect
+      ansible.builtin.uri:
+        url: "{{ wazuh_api_base }}/manager/analysisd/reload"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ wazuh_auth.content }}"
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: analysisd_reload
+      no_log: true
+      changed_when: true
+
+    - name: Show the reload result
+      ansible.builtin.debug:
+        msg: "{{ analysisd_reload.json.message | default('analysisd reloaded') }}"
+
+    # -----------------------------------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------------------------------
+    # Uploading a file and reloading a daemon are two things that can both succeed while the rule
+    # you care about is still not loaded - for example if it was silently skipped for referencing a
+    # parent rule that does not exist. Asking the manager to describe the rule by ID is the check
+    # that closes that gap.
+    - name: Ask the manager to confirm each custom rule is loaded
+      ansible.builtin.uri:
+        url: "{{ wazuh_api_base }}/rules?rule_ids={{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ wazuh_auth.content }}"
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: rule_checks
+      loop:
+        - 100010
+        - 100011
+        - 100020
+        - 100021
+      loop_control:
+        label: "rule {{ item }}"
+      changed_when: false
+
+    - name: Assert that every custom rule is present in the loaded ruleset
+      ansible.builtin.assert:
+        that:
+          - item.json.data.total_affected_items | int == 1
+        fail_msg: >-
+          Rule {{ item.item }} is not loaded. Check
+          `/var/ossec/logs/ossec.log` on wazuh-01 for a ruleset parsing error.
+        success_msg: "Rule {{ item.item }} is loaded"
+      loop: "{{ rule_checks.results }}"
+      loop_control:
+        label: "rule {{ item.item }}"
+
+    - name: Remove the staged copy
+      ansible.builtin.file:
+        path: "{{ wazuh_rules_staging_path }}"
+        state: absent

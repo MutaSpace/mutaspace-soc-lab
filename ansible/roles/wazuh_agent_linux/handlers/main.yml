@@ -1,0 +1,9 @@
+# roles/wazuh_agent_linux/handlers/main.yml
+#
+# Handlers for the Linux Wazuh agent role.
+---
+- name: Restart wazuh-agent
+  ansible.builtin.systemd_service:
+    name: wazuh-agent
+    state: restarted
+    daemon_reload: true

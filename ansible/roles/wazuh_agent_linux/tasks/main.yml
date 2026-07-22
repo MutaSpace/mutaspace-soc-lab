@@ -1,0 +1,107 @@
+# roles/wazuh_agent_linux/tasks/main.yml
+#
+# Install and enroll the Wazuh agent on an Ubuntu or Kali host.
+#
+# The DEB path matters. The Wazuh dashboard's "Deploy new agent" screen defaults to an RPM command,
+# and running it on Ubuntu produces `rpm: command not found` - a failure already recorded in
+# docs/wazuh/agent-enrollment-linux.md. Automating the install removes the chance to pick the wrong
+# package family by hand.
+---
+- name: Install the packages needed to add an apt repository over HTTPS
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gnupg
+      - apt-transport-https
+      - ca-certificates
+    state: present
+
+# The Wazuh key is published in ASCII-armoured form. apt wants a binary keyring, so it is
+# dearmoured into /usr/share/keyrings and referenced with signed-by. This is the modern replacement
+# for `apt-key add`, which is deprecated and applies the key to every repository on the system
+# rather than just this one.
+- name: Download the Wazuh signing key
+  ansible.builtin.get_url:
+    url: "{{ wazuh_apt_key_url }}"
+    dest: /tmp/GPG-KEY-WAZUH
+    mode: "0644"
+
+- name: Convert the signing key into an apt keyring
+  ansible.builtin.command:
+    cmd: "gpg --batch --yes --dearmor -o {{ wazuh_apt_keyring }} /tmp/GPG-KEY-WAZUH"
+    creates: "{{ wazuh_apt_keyring }}"
+
+- name: Add the Wazuh apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ wazuh_apt_repo }}"
+    filename: wazuh
+    state: present
+    update_cache: true
+
+# ---------------------------------------------------------------------------------------------
+# Install and enroll in one step
+# ---------------------------------------------------------------------------------------------
+# WAZUH_MANAGER, WAZUH_AGENT_NAME and WAZUH_AGENT_GROUP are read by the package's postinst script.
+# They take effect ONLY on first installation - the postinst writes them into ossec.conf and then
+# never looks at them again. Changing the group of an already-installed agent is a manager-side
+# operation (`agent_groups -a -i <id> -g <group>`), not a re-run of this task.
+- name: Install the pinned Wazuh agent and enroll it
+  ansible.builtin.apt:
+    name: "{{ wazuh_agent_package }}"
+    state: present
+    allow_downgrade: true
+  environment:
+    WAZUH_MANAGER: "{{ wazuh_agent_enroll_address }}"
+    WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+    WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+  notify: Restart wazuh-agent
+
+# Without the hold, the next `apt upgrade` on a Kali rolling box quietly moves the agent to a newer
+# version than the manager.
+- name: Hold the wazuh-agent package at the pinned version
+  ansible.builtin.dpkg_selections:
+    name: wazuh-agent
+    selection: hold
+
+# ---------------------------------------------------------------------------------------------
+# Switch the running configuration from the enrollment IP to the FQDN
+# ---------------------------------------------------------------------------------------------
+# This is the "later task" the enrollment comment refers to. It rewrites only the text between
+# <address> and </address>, leaving the rest of ossec.conf untouched, and it is idempotent because
+# a second run finds the FQDN already in place and reports no change.
+- name: Point the agent at the manager's FQDN
+  ansible.builtin.replace:
+    path: /var/ossec/etc/ossec.conf
+    regexp: '(?<=<address>)[^<]*(?=</address>)'
+    replace: "{{ wazuh_agent_final_address }}"
+  when: wazuh_agent_use_fqdn | bool
+  notify: Restart wazuh-agent
+
+- name: Ensure the agent is enabled and running
+  ansible.builtin.systemd_service:
+    name: wazuh-agent
+    state: started
+    enabled: true
+    daemon_reload: true
+
+# ---------------------------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------------------------
+# A running service is not the same as a connected agent. client.keys holds the credential the
+# manager issued during enrollment; an empty file means the agent process is up and has never
+# successfully registered, which is exactly the failure this check exists to catch.
+- name: Confirm the agent holds an enrollment key
+  ansible.builtin.stat:
+    path: /var/ossec/etc/client.keys
+  register: wazuh_client_keys
+
+- name: Assert that enrollment produced a key
+  ansible.builtin.assert:
+    that:
+      - wazuh_client_keys.stat.exists
+      - wazuh_client_keys.stat.size > 0
+    fail_msg: >-
+      /var/ossec/etc/client.keys is missing or empty on {{ inventory_hostname }}. The agent service
+      is running but never registered. Check that {{ wazuh_agent_enroll_address }} is reachable on
+      TCP 1515 and that the agent name {{ wazuh_agent_name }} is not already taken on the manager.
+    success_msg: "{{ inventory_hostname }} is enrolled as {{ wazuh_agent_name }}"

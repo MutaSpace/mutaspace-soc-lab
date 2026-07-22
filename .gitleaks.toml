@@ -1,0 +1,335 @@
+# .gitleaks.toml --- secret scanning configuration for the MutaSpace SOC Lab
+#
+# WHAT THIS IS
+#   Configuration for gitleaks, run as a pre-commit hook (see
+#   .pre-commit-config.yaml) and available manually via `task` or
+#   `gitleaks dir .`.
+#
+# WHY IT EXISTS
+#   gitleaks ships an excellent default ruleset for the secrets everyone has:
+#   AWS keys, GitHub tokens, private keys. This repository has a second class
+#   of secret that no generic scanner knows about --- its own publication
+#   policy.
+#
+#   README.md ("Security Note") commits this project to publishing the
+#   internal 10.10.10.0/24 and 10.10.20.0/24 planes in full, while treating
+#   anything on vmbr0 --- the real management network the Proxmox host and
+#   fw-01's WAN leg live on --- as a value that never gets committed. A public
+#   IP address or a home LAN subnet is not a "secret" by any generic
+#   definition, but for a portfolio repository that maps a real person's home
+#   lab it is exactly the thing that must not leak.
+#
+#   The rules below encode that policy so it is enforced mechanically rather
+#   than remembered.
+#
+# HONEST LIMITATION, STATED UP FRONT
+#   The stated policy is "no non-RFC1918 IPv4 literal outside a fenced code
+#   block". gitleaks matches regular expressions against a text fragment and
+#   has no notion of Markdown structure, and Go's RE2 engine has no lookbehind
+#   or backreferences, so "outside a fenced code block" cannot be expressed.
+#
+#   What is implemented instead: every IPv4 literal is matched, and the
+#   allowlist below permits the private ranges plus the small set of public
+#   addresses that legitimately appear in teaching material (public
+#   resolvers, the RFC 5737 documentation ranges, broadcast and netmask
+#   forms). That is a coarser rule than the policy describes. It errs toward
+#   false positives, which for a scanner guarding a public repository is the
+#   correct direction to err. When a genuine documentation example trips it,
+#   add the literal to the allowlist below with a comment saying why --- do
+#   not disable the rule.
+#
+# HOW TO RUN IT
+#   gitleaks dir .              # scan the working tree
+#   gitleaks git .              # scan all of history
+#   pre-commit run gitleaks -a  # what CI and the hook do
+#
+# WHEN A FINDING IS WRONG
+#   Add a narrow allowlist entry to the specific rule. Do not add
+#   "gitleaks:allow" comments scattered through documentation --- they are
+#   invisible to a reader and become permanent.
+
+title = "MutaSpace SOC Lab"
+
+# Keep every default rule (AWS, GitHub, GCP, private keys, JWTs, ...) and add
+# the repository-specific ones below. Without this the custom rules would be
+# the ONLY rules, which would be a large downgrade.
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Repository-wide allowlist
+# ---------------------------------------------------------------------------
+[allowlist]
+description = "Paths that are templates, fixtures or the scanner's own config"
+paths = [
+  # This file quotes the very patterns it is looking for.
+  '''(^|/)\.gitleaks\.toml$''',
+  # The pre-commit config names the gitleaks version and hook.
+  '''(^|/)\.pre-commit-config\.yaml$''',
+  # Lock files are checksums, not secrets, and are full of hex.
+  '''(^|/)\.terraform\.lock\.hcl$''',
+  # Binary and image assets --- scanning them produces noise, not findings.
+  '''(^|/)docs/.*\.(png|jpg|jpeg|gif|svg|pdf)$''',
+  # Vendored provider payloads. `tofu init` unpacks the bpg/proxmox provider
+  # here, changelogs and all, and its version strings ("7.0.7.1") look exactly
+  # like IPv4 literals to Rule 1. The directory is gitignored so nothing here
+  # can ever be committed --- but `gitleaks dir` walks it anyway, and a scanner
+  # that reports fifteen findings on a clean tree teaches people to ignore it.
+  '''(^|/)\.terraform/''',
+]
+
+# ---------------------------------------------------------------------------
+# Rule 1 --- public IPv4 literals
+# ---------------------------------------------------------------------------
+# A committed public IP address in this repository is almost always one of:
+#   * the operator's home WAN address,
+#   * a campus or employer subnet,
+#   * a real upstream resolver that identifies the ISP.
+# None of those belong in a portfolio repository.
+#
+# The leading character class stands in for a word boundary that also rejects
+# a preceding digit, dot, hyphen or slash, so version strings and CIDR tails
+# do not produce phantom matches. RE2 has no lookbehind, hence the capture
+# group plus secretGroup.
+[[rules]]
+id = "mutaspace-public-ipv4"
+description = "Public (non-RFC1918) IPv4 literal --- the repo publishes internal ranges only"
+regex = '''(?:^|[^0-9A-Za-z.:/-])((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9]))'''
+secretGroup = 1
+tags = ["policy", "network", "mutaspace"]
+
+  [rules.allowlist]
+  description = "Private ranges, reserved ranges, and documentation-safe public addresses"
+  regexTarget = "secret"
+  regexes = [
+    # RFC 1918 --- the lab's own planes and anything else private.
+    '''^10\.''',
+    '''^172\.(?:1[6-9]|2[0-9]|3[01])\.''',
+    '''^192\.168\.''',
+    # Loopback, link-local, CGNAT, multicast, broadcast/netmask forms.
+    '''^127\.''',
+    '''^169\.254\.''',
+    '''^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.''',
+    '''^(?:22[4-9]|23[0-9])\.''',
+    '''^0\.0\.0\.0$''',
+    '''^255\.''',
+    # RFC 5737 documentation ranges --- these exist to be published.
+    '''^192\.0\.2\.''',
+    '''^198\.51\.100\.''',
+    '''^203\.0\.113\.''',
+    # Public resolvers named in the docs as example DNS values. These are
+    # global anycast addresses and identify nobody.
+    '''^(?:1\.1\.1\.1|1\.0\.0\.1|8\.8\.8\.8|8\.8\.4\.4|9\.9\.9\.9)$''',
+    '''^208\.67\.22[02]\.22[02]$''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Rule 2 --- the documented example management subnet
+# ---------------------------------------------------------------------------
+# README.md publishes 10.0.0.50/24 and 10.0.0.1 as the EXAMPLE management IP
+# and gateway. Because they are RFC 1918, rule 1 will never catch them.
+#
+# That matters, because 10.0.0.0/24 is also one of the most common real home
+# router subnets. A 10.0.0.x literal appearing anywhere other than the
+# documentation placeholder tables is either (a) someone copying the example
+# into live configuration, where it is wrong, or (b) someone typing their
+# actual management address, where it is a leak. Both are worth stopping.
+[[rules]]
+id = "mutaspace-example-management-subnet"
+description = "10.0.0.x literal outside the documentation placeholder tables"
+regex = '''(?:^|[^0-9A-Za-z.:/-])(10\.0\.0\.[0-9]{1,3})'''
+secretGroup = 1
+tags = ["policy", "network", "mutaspace"]
+
+  [rules.allowlist]
+  description = "Prose documentation, and lines that explicitly label the address as an example"
+  # Two independent escapes, OR'd together (gitleaks' default condition):
+  #
+  #   paths   --- the published placeholder tables in README.md and docs/.
+  #   regexes --- a line that says "e.g." or "example" next to the address.
+  #               This matters because OpenTofu variable descriptions are
+  #               documentation that happens to live in a .tf file, and
+  #               `description = "... e.g. 10.0.0.50/24 ..."` is exactly the
+  #               right place to show the shape of a value you must not
+  #               commit. A bare `default = "10.0.0.7"` still fails, which is
+  #               the case worth catching.
+  paths = [
+    '''(^|/)README\.md$''',
+    '''^docs/''',
+    '''(^|/)docs/''',
+    # `.example` files exist to show the SHAPE of a value the operator must
+    # supply. The management subnet 10.0.0.0/24 is the example the repository
+    # already publishes in README.md, so seeing it in terraform.tfvars.example
+    # is the file doing its job. Note this allowlist is scoped to THIS rule
+    # only --- an API token or a password in an `.example` file still fails,
+    # because an example file is precisely where someone pastes a real
+    # credential by accident.
+    '''\.example$''',
+  ]
+  regexTarget = "line"
+  regexes = [
+    '''(?i)(?:e\.g\.|for example|example[: ]|placeholder|sample value)''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Rule 3 --- MAC addresses that are not the lab's pinned OUI
+# ---------------------------------------------------------------------------
+# Every MAC this lab assigns is pinned by hand from the Proxmox OUI
+# BC:24:11, with the last three octets derived from the guest's IP. Those are
+# design data and are published deliberately.
+#
+# Any OTHER MAC in the repository is, by elimination, hardware --- the
+# Proxmox host's physical NIC, a switch, a laptop --- which the documentation
+# standard lists alongside credentials as something that is never published.
+[[rules]]
+id = "mutaspace-hardware-mac-address"
+description = "MAC address outside the lab's pinned BC:24:11 OUI --- likely real hardware"
+regex = '''(?:^|[^0-9A-Fa-f:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})'''
+secretGroup = 1
+tags = ["policy", "network", "mutaspace"]
+
+  [rules.allowlist]
+  description = "The lab's own pinned OUI plus null/broadcast/QEMU placeholders"
+  regexTarget = "secret"
+  regexes = [
+    # BC:24:11 --- Proxmox Server Solutions GmbH. Every lab VM uses it.
+    '''(?i)^bc[:-]24[:-]11[:-]''',
+    # QEMU/KVM default OUI, used in generic examples.
+    '''(?i)^52[:-]54[:-]00[:-]''',
+    # Null and broadcast.
+    '''(?i)^(?:00[:-]){5}00$''',
+    '''(?i)^(?:ff[:-]){5}ff$''',
+    # Obvious placeholders.
+    '''(?i)^(?:xx[:-]){5}xx$''',
+    '''(?i)^(?:aa[:-]bb[:-]cc[:-]dd[:-]ee[:-]ff)$''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Rule 4 --- Proxmox API tokens, fully assembled
+# ---------------------------------------------------------------------------
+# This is the bpg/proxmox shape: user@realm!token-id=<uuid> as ONE string.
+# It is the highest-value secret in the repository --- the token created by
+# scripts/bootstrap-host.sh can create, clone and destroy every VM on the
+# host, and Proxmox displays its secret exactly once, so a leaked token is
+# usually a token nobody has written down and nobody notices is loose.
+[[rules]]
+id = "mutaspace-proxmox-api-token"
+description = "Proxmox API token in bpg concatenated form (user@realm!id=uuid)"
+regex = '''\b[A-Za-z0-9._-]{1,64}@(?:pve|pam)![A-Za-z0-9_-]{1,64}\s*=\s*['"]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'''
+secretGroup = 1
+tags = ["proxmox", "token", "mutaspace"]
+
+  [rules.allowlist]
+  description = "Nil and single-repeated-character placeholder UUIDs"
+  regexTarget = "secret"
+  regexes = [
+    '''^0{8}-0{4}-0{4}-0{4}-0{12}$''',
+    '''(?i)^1{8}-2{4}-3{4}-4{4}-5{12}$''',
+    '''(?i)^(?:dead|beef|cafe|0123)''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Rule 5 --- a bare Proxmox token secret assigned to a known variable
+# ---------------------------------------------------------------------------
+# Packer takes the same credential SPLIT: username = "packer@pve!buildtoken"
+# and token = "<uuid>". Rule 4 cannot see that shape, because the UUID sits
+# alone. Anchor on the variable names the two tools actually use.
+[[rules]]
+id = "mutaspace-proxmox-token-secret"
+description = "Bare Proxmox API token secret assigned to a Packer or OpenTofu variable"
+regex = '''(?i)\b(?:PKR_VAR_proxmox_token|proxmox_token|PROXMOX_VE_API_TOKEN|api_token|token_secret)\s*[:=]{1,2}\s*['"]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'''
+secretGroup = 1
+tags = ["proxmox", "token", "mutaspace"]
+
+  [rules.allowlist]
+  description = "Nil and single-repeated-character placeholder UUIDs"
+  regexTarget = "secret"
+  regexes = [
+    '''^0{8}-0{4}-0{4}-0{4}-0{12}$''',
+    '''(?i)^1{8}-2{4}-3{4}-4{4}-5{12}$''',
+    '''(?i)^(?:dead|beef|cafe|0123)''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Rule 6 --- Wazuh installer output, verbatim
+# ---------------------------------------------------------------------------
+# The Wazuh all-in-one installer prints its generated credentials in exactly
+# this form and writes the same values into wazuh-install-files.tar. That
+# tarball is gitignored; this rule catches the far more likely accident,
+# which is pasting the installer's console output into a build document
+# because it looked like useful evidence.
+[[rules]]
+id = "mutaspace-wazuh-installer-password"
+description = "Wazuh installer generated-password output line"
+regex = '''(?i)(?:the\s+)?password\s+for\s+(?:user\s+)?[A-Za-z0-9._-]+\s+is\s+['"]?([A-Za-z0-9.*+?_-]{8,64})'''
+secretGroup = 1
+tags = ["wazuh", "password", "mutaspace"]
+
+# ---------------------------------------------------------------------------
+# Rule 7 --- generic password assignment with real entropy
+# ---------------------------------------------------------------------------
+# The Wazuh password tool generates 32-character strings from the alphabet
+# [A-Za-z0-9.*+?_-]. This rule looks for a password-shaped assignment whose
+# value is long enough and random enough to be a generated secret, which is
+# what separates it from "password: changeme".
+#
+# The entropy floor is what makes this usable. Placeholders like "changeme",
+# "your-password-here" and "<REDACTED>" score well below 3.5 and pass.
+[[rules]]
+id = "mutaspace-generated-password-assignment"
+description = "High-entropy password/passphrase assignment (Wazuh, AD, cloud-init)"
+# No leading \b: the keys in practice are wazuh_api_password,
+# domain_admin_password, TF_VAR_ci_password --- an underscore before
+# "password" is not a word boundary, so \b would miss every real case.
+regex = '''(?i)(?:password|passwd|passphrase)[A-Za-z0-9_]{0,16}\s*[:=]{1,2}\s*['"]?([A-Za-z0-9.*+?_/-]{16,64})['"]?'''
+secretGroup = 1
+entropy = 3.5
+tags = ["password", "mutaspace"]
+
+  [rules.allowlist]
+  description = "Obvious placeholders and template interpolation"
+  regexTarget = "secret"
+  regexes = [
+    '''(?i)^(?:changeme|change-me|placeholder|example|redacted|secret|password)''',
+    '''(?i)^(?:your|my|lab|test|demo|sample|dummy|fake|insert)[-_]''',
+    '''(?i)^x{4,}$''',
+    # Template and variable interpolation --- the value is not the secret.
+    '''^\$\{''',
+    '''^\{\{''',
+    '''^\$[A-Za-z_]''',
+    '''(?i)^(?:AT-LEAST|CHANGE)''',
+    # HCL, Ansible and Jinja references. "password_hash = var.build_password_hash"
+    # and "password = user_account.value.password" are wiring statements, not
+    # credentials --- the real value never appears on these lines.
+    #
+    # The second pattern is the general form: a lower_snake_case dotted
+    # reference. It cannot match a generated password, because every
+    # generator this lab uses (Wazuh's password tool, OpenTofu's random
+    # provider, Windows' own) produces mixed case.
+    '''(?i)^(?:var|local|locals|each|self|data|module|path|vars|item|hostvars|env|lookup)[.(]''',
+    '''^[a-z_][a-z0-9_]*(?:\.[a-z0-9_]+)+$''',
+    # Instructions that occupy the slot where a password would go. The example
+    # files deliberately say "read-this-out-of-ansible/.secrets/..." rather
+    # than carrying a value, which is the behaviour we want to encourage ---
+    # so flagging it would punish the right answer.
+    '''(?i)^read-this-out-of''',
+    # The offline test fixtures. `tofu test` needs a state-encryption
+    # passphrase to run at all, and these tests never touch a real host, so
+    # the literal names itself as non-secret. If this string ever protects
+    # anything real, the name is the bug.
+    '''^offline-test-passphrase-not-a-secret$''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Rule 8 --- credential artefacts by filename
+# ---------------------------------------------------------------------------
+# These files are gitignored. This rule is the second layer, for the case
+# where someone uses `git add -f` or the ignore rule is edited away. A
+# path-only rule matches on the filename regardless of content, which is
+# correct here --- wazuh-install-files.tar is a tarball and its contents are
+# not scannable as text.
+[[rules]]
+id = "mutaspace-credential-artifact-file"
+description = "Generated-credential artefact committed (Wazuh install files, password dumps)"
+path = '''(?i)(^|/)(wazuh-install-files\.tar|wazuh-passwords\.txt|[A-Za-z0-9._-]*-credentials\.txt|\.envrc)$'''
+tags = ["wazuh", "credentials", "mutaspace"]

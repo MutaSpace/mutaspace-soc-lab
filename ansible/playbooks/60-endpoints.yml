@@ -1,0 +1,262 @@
+# playbooks/60-endpoints.yml
+#
+# Give the endpoints something worth monitoring.
+#
+# An agent with nothing to report is not telemetry. This playbook installs the services and sensors
+# that actually generate the events the lab investigates:
+#
+#   ubuntu-app-01  OpenSSH and Nginx - SSH authentication logs and web access logs, matching what
+#                  docs/vms/ubuntu-app-01-build.md records as the as-built state
+#   win-client-01  Sysmon, plus the audit policy that makes Event ID 4625 exist at all
+#
+# Sysmon is new to this lab. Windows produces good authentication logging out of the box and almost
+# no process, network or image-load visibility. Sysmon is the standard way to close that gap, and
+# its absence is the single largest blind spot in the current build.
+#
+# Usage:
+#   ansible-playbook playbooks/60-endpoints.yml
+---
+- name: Configure the Linux application server
+  hosts: ubuntu-app-01
+  gather_facts: true
+  become: true
+
+  tasks:
+
+    - name: Install OpenSSH server and Nginx
+      ansible.builtin.apt:
+        name:
+          - openssh-server
+          - nginx
+        state: present
+
+    # `systemctl enable --now ssh` is exactly what the build documentation records being run by
+    # hand. This is the same operation, expressed so it can be re-run and proven.
+    - name: Ensure SSH and Nginx are enabled and running
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - ssh
+        - nginx
+
+    # A page that names the host is more useful than the stock Nginx welcome page: when a learner
+    # browses to http://ubuntu-app-01.mutaspace.local from analyst-01, this confirms DNS, routing
+    # and the web server in one look, and it gives the access log something identifiable to record.
+    - name: Publish a lab landing page
+      ansible.builtin.copy:
+        dest: /var/www/html/index.html
+        mode: "0644"
+        owner: root
+        group: root
+        content: |
+          <!doctype html>
+          <html lang="en">
+            <head><meta charset="utf-8"><title>ubuntu-app-01 - MutaSpace SOC Lab</title></head>
+            <body>
+              <h1>ubuntu-app-01</h1>
+              <p>Linux application server, MutaSpace SOC Lab.</p>
+              <p>If you can read this from analyst-01, DNS, routing and Nginx are all working.</p>
+            </body>
+          </html>
+
+    - name: Confirm Nginx answers on the loopback interface
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: false
+        status_code: 200
+      changed_when: false
+
+- name: Configure the Windows workstation
+  hosts: win-client-01
+  gather_facts: false
+
+  vars:
+    # These are the official upstream sources. On an air-gapped rebuild, stage both files onto the
+    # host by another route and set these to file:// paths - the tasks below do not care where the
+    # bytes came from.
+    sysmon_zip_url: "https://download.sysinternals.com/files/Sysmon.zip"
+    sysmon_config_url: "https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml"
+    sysmon_dir: 'C:\Program Files\Sysmon'
+    sysmon_zip_path: 'C:\Windows\Temp\Sysmon.zip'
+    sysmon_config_path: 'C:\Program Files\Sysmon\sysmonconfig.xml'
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # The audit policy that docs/incident-scenarios/failed-login-investigation.md depends on
+    # -----------------------------------------------------------------------------------------
+    # That scenario is built entirely on Windows Event ID 4625 arriving from win-client-01. 4625 is
+    # only written if failure auditing is enabled for the Logon subcategory. Modern Windows usually
+    # enables it by default - but a graded exercise should not rest on "usually", and asserting it
+    # here costs one task.
+    - name: Ensure logon auditing records both successes and failures
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+
+          $subcategories = @('Logon', 'Account Lockout')
+          $changed = @()
+
+          foreach ($sub in $subcategories) {
+              $current = (auditpol /get /subcategory:"$sub" /r | ConvertFrom-Csv)
+              if ($current.'Inclusion Setting' -ne 'Success and Failure') {
+                  auditpol /set /subcategory:"$sub" /success:enable /failure:enable | Out-Null
+                  $changed += $sub
+              }
+          }
+
+          if ($changed.Count -gt 0) {
+              $Ansible.Changed = $true
+              $Ansible.Result = "Enabled auditing for: $($changed -join ', ')"
+          }
+          else {
+              $Ansible.Result = "Logon auditing already enabled"
+          }
+      register: client_audit
+
+    - name: Show the audit policy result
+      ansible.builtin.debug:
+        var: client_audit.result
+
+    # -----------------------------------------------------------------------------------------
+    # Sysmon
+    # -----------------------------------------------------------------------------------------
+    - name: Create the Sysmon directory
+      ansible.windows.win_file:
+        path: "{{ sysmon_dir }}"
+        state: directory
+
+    - name: Download Sysmon
+      ansible.windows.win_get_url:
+        url: "{{ sysmon_zip_url }}"
+        dest: "{{ sysmon_zip_path }}"
+
+    # Expand-Archive rather than a win_unzip module, so this playbook needs no collection beyond the
+    # five in requirements.yml. The `creates`-style guard is written by hand because raw PowerShell
+    # has no such parameter.
+    - name: Unpack Sysmon
+      ansible.windows.win_powershell:
+        parameters:
+          ZipPath: "{{ sysmon_zip_path }}"
+          DestDir: "{{ sysmon_dir }}"
+        script: |
+          param(
+              [String]$ZipPath,
+              [String]$DestDir
+          )
+
+          $Ansible.Changed = $false
+
+          $exe = Join-Path $DestDir 'Sysmon64.exe'
+          if (-not (Test-Path -LiteralPath $exe)) {
+              Expand-Archive -LiteralPath $ZipPath -DestinationPath $DestDir -Force
+              $Ansible.Changed = $true
+              $Ansible.Result = "Extracted Sysmon to $DestDir"
+          }
+          else {
+              $Ansible.Result = "Sysmon64.exe is already present in $DestDir"
+          }
+
+    # SwiftOnSecurity's configuration is the community reference baseline. It is opinionated about
+    # what NOT to log, which is the harder half of the problem: an unfiltered Sysmon fills a lab
+    # indexer with noise in a day.
+    - name: Download the Sysmon configuration
+      ansible.windows.win_get_url:
+        url: "{{ sysmon_config_url }}"
+        dest: "{{ sysmon_config_path }}"
+
+    # Sysmon is idempotent in a slightly awkward way: `-i` installs, `-c` reconfigures an existing
+    # installation, and running `-i` twice is an error. The guard checks for the service first.
+    - name: Install or reconfigure Sysmon
+      ansible.windows.win_powershell:
+        parameters:
+          SysmonExe: "{{ sysmon_dir }}\\Sysmon64.exe"
+          ConfigPath: "{{ sysmon_config_path }}"
+        script: |
+          param(
+              [String]$SysmonExe,
+              [String]$ConfigPath
+          )
+
+          $Ansible.Changed = $false
+
+          $service = Get-Service -Name 'Sysmon64' -ErrorAction SilentlyContinue
+          if ($null -eq $service) {
+              & $SysmonExe -accepteula -i $ConfigPath | Out-Null
+              $Ansible.Changed = $true
+              $Ansible.Result = "Sysmon installed"
+          }
+          else {
+              # -c reloads the rule set in place. It does not restart the service and does not
+              # interrupt collection.
+              & $SysmonExe -c $ConfigPath | Out-Null
+              $Ansible.Result = "Sysmon already installed; configuration reapplied"
+          }
+      register: sysmon_state
+
+    - name: Show the Sysmon result
+      ansible.builtin.debug:
+        var: sysmon_state.result
+
+    - name: Ensure the Sysmon service is running
+      ansible.windows.win_service:
+        name: Sysmon64
+        state: started
+        start_mode: auto
+
+    # -----------------------------------------------------------------------------------------
+    # Tell the Wazuh agent to actually read the Sysmon channel
+    # -----------------------------------------------------------------------------------------
+    # Installing Sysmon creates a new event log channel. The Wazuh agent does not monitor it unless
+    # ossec.conf says so - so without this block, Sysmon runs perfectly and the SIEM never sees a
+    # single event from it. This is the most common way a Sysmon deployment ends up invisible.
+    - name: Add the Sysmon channel to the Wazuh agent configuration
+      ansible.windows.win_powershell:
+        parameters:
+          ConfigPath: "{{ wazuh_agent_config_path | default('C:\\Program Files (x86)\\ossec-agent\\ossec.conf') }}"
+        script: |
+          param([String]$ConfigPath)
+
+          $Ansible.Changed = $false
+
+          $channel = 'Microsoft-Windows-Sysmon/Operational'
+          $content = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop
+
+          if ($content -notlike "*$channel*") {
+              # Built as an array of lines rather than a here-string on purpose: a PowerShell
+              # here-string terminator must sit at the very start of a line, which cannot survive
+              # being embedded in an indented YAML block.
+              #
+              # ossec.conf legitimately contains more than one <ossec_config> root, so appending a
+              # second block is the documented way to add configuration without editing the first.
+              $block = @(
+                  '<ossec_config>',
+                  '  <localfile>',
+                  "    <location>$channel</location>",
+                  '    <log_format>eventchannel</log_format>',
+                  '  </localfile>',
+                  '</ossec_config>'
+              ) -join "`r`n"
+
+              Add-Content -LiteralPath $ConfigPath -Value $block -Encoding UTF8
+              $Ansible.Changed = $true
+              $Ansible.Result = "Added $channel to the agent configuration"
+          }
+          else {
+              $Ansible.Result = "$channel is already monitored"
+          }
+      register: sysmon_channel
+      notify: Restart the Wazuh agent service
+
+    - name: Show the channel result
+      ansible.builtin.debug:
+        var: sysmon_channel.result
+
+  handlers:
+
+    - name: Restart the Wazuh agent service
+      ansible.windows.win_service:
+        name: WazuhSvc
+        state: restarted
