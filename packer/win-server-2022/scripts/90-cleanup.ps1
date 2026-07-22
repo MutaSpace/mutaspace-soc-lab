@@ -66,7 +66,23 @@ foreach ($logName in (Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
 }
 
 Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -Path 'C:\Windows\Temp\*' -Recurse -Force -ErrorAction SilentlyContinue
+# EXCLUDE packer-* HERE. Packer stages its own helper scripts in C:\Windows\Temp -
+# notably packer-ps-env-vars-<guid>.ps1, which it dot-sources at the start of EVERY
+# remaining provisioner to set environment variables. Deleting it mid-build produces:
+#
+#   . : The term 'c:/Windows/Temp/packer-ps-env-vars-<guid>.ps1' is not recognized as
+#   the name of a cmdlet, function, script file, or operable program.
+#
+# It is non-fatal today - Packer carries on and the build completes - which is exactly
+# why it is worth fixing rather than tolerating: it is loud red output that means
+# nothing, printed immediately after "Cleanup complete", and it trains whoever is
+# watching to ignore red text from this template. The next error will be a real one.
+#
+# Packer removes its own files when the build ends, so nothing is left behind by
+# skipping them here.
+Get-ChildItem -Path 'C:\Windows\Temp' -Force -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -notlike 'packer-*' } |
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path 'C:\Windows\SoftwareDistribution\Download\*' -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host '--- Disk hygiene ---'

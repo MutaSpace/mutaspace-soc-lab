@@ -72,21 +72,40 @@ iso_storage_pool = "local"
 # Networking
 # ---------------------------------------------------------------------------------------
 
-# The build plane.
+# The bridge Packer builds on. THIS IS A PER-HOST DECISION - read before copying.
 #
-# vmbr9 (10.99.0.0/24) has no physical port. It exists because this lab is greenfield:
-# nothing on vmbr1 can reach the internet until fw-01 is routing, and fw-01 is itself a VM
-# that has to be built first. The Proxmox host is the gateway at 10.99.0.1 and masquerades
-# the subnet out through its own NIC, so template builds can reach archive.ubuntu.com and
-# http.kali.org before any lab network exists.
+# Two correct answers depending on YOUR host:
 #
-# The templates are built here and nothing runs here afterwards. OpenTofu re-points each
-# clone's NIC to vmbr1 or vmbr2 at clone time - `bridge` is a normal, non-ForceNew attribute
-# on the bpg provider, so moving the interface costs nothing.
+#   vmbr0  - if your management bridge already serves DHCP and has a route to the
+#            internet (the usual home/lab case). Simplest: no extra services, and
+#            the build VM is reachable from your workstation for the SSH/WinRM step.
+#            This is what the reference host uses. START HERE.
 #
-# DO NOT set this to vmbr1. A build on vmbr1 has no route out and will hang fetching
-# packages, in a way that looks like an installer problem rather than a network one.
-build_bridge = "vmbr9"
+#   vmbr9  - only if vmbr0 is a bare WAN uplink with no DHCP, or you refuse to put an
+#            installing VM on the management network. vmbr9 is a host-masqueraded
+#            build plane with no physical port. It needs its own DHCP: run
+#            scripts/bootstrap-host.sh with --build-plane-dhcp, and make sure the
+#            workstation running Packer has a route to 10.99.0.0/24.
+#
+# NEVER vmbr1: it has no route out until fw-01 exists, so a build there hangs
+# fetching packages in a way that looks like an installer problem and is not.
+build_bridge = "vmbr0"
+
+# The address Packer advertises its autoinstall/seed HTTP server on, and what
+# {{ .HTTPIP }} expands to in the boot command.
+#
+# PIN THIS if your workstation has more than one network interface - and a laptop
+# running Docker, a VPN, or libvirt easily has ten. Packer auto-detects a SINGLE
+# address and has no idea which of your interfaces the lab can actually reach. If it
+# guesses a docker0 or a VPN-internal address, the guest requests the seed from an
+# address that does not exist on its network, cloud-init/subiquity times out, and the
+# installer silently drops to its interactive menu - which looks exactly like a broken
+# boot command and is not.
+#
+# Set it to the workstation address ON the network the build VM can route back to.
+# Leave it empty ONLY if the workstation has a single interface.
+#   the reference host reaches the lab over WireGuard, so this is a WireGuard address
+http_bind_address = ""
 
 # ---------------------------------------------------------------------------------------
 # Timeouts
@@ -98,3 +117,23 @@ build_bridge = "vmbr9"
 # a template conversion. When this is too low the failure reads as an API timeout and gives
 # no hint that the operation itself was fine and merely slow.
 task_timeout = "10m"
+
+# ---------------------------------------------------------------------------------------
+# Media (optional but recommended)
+# ---------------------------------------------------------------------------------------
+
+# Pre-staged ISOs on the host. Set these to skip re-uploading gigabytes on every build,
+# and REQUIRED for anything that cannot be fetched by URL.
+#
+#   iso_file            = "local:iso/ubuntu-24.04.4-live-server-amd64.iso"
+#   virtio_win_iso_file = "local:iso/virtio-win-0.1.271.iso"
+#
+# The Windows and OPNsense ISOs are registration-gated or compressed, so they MUST be
+# uploaded to the host by hand - see docs/proxmox/iso-shelf.md. The two Windows templates
+# take their media as PER-TEMPLATE var-files (packer/win-*/*.pkrvars.hcl), NOT here,
+# because both use the variable name `windows_iso_file` for different ISOs and a shared
+# value would silently build the wrong OS.
+#
+# Left commented so a fresh clone still validates. Uncomment and point at real files.
+# iso_file            = "local:iso/ubuntu-24.04.4-live-server-amd64.iso"
+# virtio_win_iso_file = "local:iso/virtio-win-0.1.271.iso"
