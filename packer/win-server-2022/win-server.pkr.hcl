@@ -14,12 +14,28 @@
 #        Bisection confirmed the component: removing only it lets Setup proceed.
 #
 #   Microsoft-Windows-Setup/RunSynchronous calling drvload
-#     -> The bootstrap error goes away and Setup reaches disk selection, but
-#        storage has already been enumerated by then, so it still stops at
+#     -> The bootstrap error goes away, Setup reaches disk selection, and still:
 #        "Windows needs the driver for device
 #         [Red Hat VirtIO SCSI pass-through controller]".
-#        A letter-searching variant made no difference; the problem is WHEN it
-#        runs, not WHERE it looks.
+#
+#        The first reading of this was "RunSynchronous runs too late". That is
+#        WRONG, and the disk-selection page itself disproves it: Setup NAMES the
+#        controller, which it can only do because vioscsi had already loaded and
+#        the disk had been enumerated. The timing was fine.
+#
+#        The actual reason is that drvload and driver staging are different
+#        operations. Microsoft KB2686316 puts it plainly: drvload "loads driver
+#        into memory and starts the device. Doesn't propagate the driver to the
+#        installed OS", whereas $WinPEDriver$ and unattend DriverPaths "will
+#        attempt to load all drivers into memory, and ALSO will schedule them for
+#        injection into the installing OS."
+#
+#        So Setup could see the disk and still refused it: a boot-critical
+#        controller whose driver is not staged for injection would produce an
+#        installed OS that cannot boot itself. No RunSynchronous command can fix
+#        that, because nothing runnable from a command line registers a package
+#        with Setup's injection list. Only the GUI "Load Driver" button,
+#        DriverPaths, and $WinPEDriver$ feed it.
 #
 # None of that was a driver or path problem. From a Shift+F10 shell inside the
 # failing WinPE: E: really was the virtio CD, the .inf really existed, drvload
@@ -28,10 +44,15 @@
 #
 # WHAT ACTUALLY WORKS: $WinPEDriver$
 #   Windows Setup scans the ROOT of every attached volume for a folder named
-#   exactly $WinPEDriver$ and loads the drivers inside it before drawing the disk
-#   list. No answer file to reject it, no drive letter to guess, and it runs early
-#   enough to matter. scripts/build-winpe-driver-iso.sh builds that volume from
-#   the pinned virtio-win ISO; it is attached below as sata3.
+#   exactly $WinPEDriver$ - by drive letter, CD-ROMs included, not USB-only. It
+#   loads what it finds AND schedules those packages for injection into the
+#   installed OS, which is the half that drvload could not do. No answer file to
+#   reject it and no drive letter to guess.
+#
+#   scripts/build-winpe-driver-iso.sh builds that volume from the pinned
+#   virtio-win ISO; it is attached below as sata3.
+#
+#   Ref: https://learn.microsoft.com/en-us/troubleshoot/windows-client/setup-upgrade-and-drivers/limitations-dollar-sign-winpedriver-dollar-sign
 #
 #   RESULT: Windows installs onto scsi0 / virtio-scsi-single with a virtio NIC,
 #   which is what the rest of the lab uses. The tempting fallback - SATA disk and

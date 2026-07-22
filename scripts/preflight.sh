@@ -266,6 +266,31 @@ load_lab_yaml() {
   return 0
 }
 
+# -----------------------------------------------------------------------------
+# Windows build credential
+# -----------------------------------------------------------------------------
+# PKR_VAR_windows_admin_password defaults to "" so that `packer validate` stays
+# green with no environment set. That is deliberate, and it has a sharp edge: an
+# empty password reaches a REAL build, the answer file sets a blank Administrator
+# password, and Packer then retries WinRM against it until winrm_timeout - two
+# hours of "Waiting for WinRM to become available..." with the port open and
+# nothing wrong that any log will tell you about.
+#
+# It cost exactly that once. Checked here instead.
+check_windows_password() {
+  section "Windows build credential"
+
+  if [[ -z "${PKR_VAR_windows_admin_password:-}" ]]; then
+    fail "PKR_VAR_windows_admin_password is not set"
+    hint "The Windows templates will appear to build and then hang on WinRM for two hours."
+    hint "Set it in .envrc; it must be at least 12 characters and meet Windows complexity rules."
+  elif (( ${#PKR_VAR_windows_admin_password} < 12 )); then
+    fail "PKR_VAR_windows_admin_password is shorter than 12 characters"
+  else
+    pass "PKR_VAR_windows_admin_password is set (${#PKR_VAR_windows_admin_password} characters)"
+  fi
+}
+
 # =============================================================================
 # 1. binaries
 # =============================================================================
@@ -711,6 +736,7 @@ main() {
   printf '  mode    : %s\n' "$( (( OFFLINE )) && echo 'OFFLINE (host checks skipped)' || echo 'full' )"
 
   check_binaries
+  check_windows_password
 
   local lab_ok=1
   load_lab_yaml || lab_ok=0
