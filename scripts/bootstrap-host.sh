@@ -403,6 +403,22 @@ build_privs() {
     privs+=(VM.Monitor)          # removed in PVE 9.0
   else
     privs+=(Sys.AccessNetwork)   # needed if a builder uses the download-url path
+
+    # SDN.Use and SDN.Audit - VERIFIED EMPIRICALLY on PVE 9.2.2, 2026-07-22.
+    #
+    # Attaching a NIC to a bridge is an SDN-permissioned operation on PVE 9, even
+    # when the bridge is a plain Linux bridge in /etc/network/interfaces and no SDN
+    # zone was ever configured. Proxmox synthesises a zone called "localnetwork"
+    # for exactly this check.
+    #
+    # Without these, the FIRST Packer build fails at "Creating VM" with:
+    #   403 Permission check failed (/sdn/zones/localnetwork/vmbr9, SDN.Use)
+    #
+    # That error is precise and points straight at the fix, which is why the
+    # design deliberately started this list narrow rather than guessing wide:
+    # an over-broad role that works is much harder to audit than a narrow one
+    # that tells you what it is missing.
+    privs+=(SDN.Use SDN.Audit)
   fi
   printf '%s\n' "${privs[@]}" | sort
 }

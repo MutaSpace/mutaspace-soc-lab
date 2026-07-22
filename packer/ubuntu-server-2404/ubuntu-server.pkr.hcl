@@ -138,19 +138,29 @@ variable "iso_url" {
 }
 
 variable "iso_checksum" {
-  type    = string
-  default = "none"
+  type = string
 
-  # DELIBERATELY "none", and that is not laziness.
+  # Pinned 2026-07-22, fetched from https://releases.ubuntu.com/24.04/SHA256SUMS
+  # for ubuntu-24.04.4-live-server-amd64.iso.
   #
-  # A checksum written from memory is worse than no checksum: it looks like verification and
-  # is not. Pin it before the first real build. The authoritative value is published at
-  #   https://releases.ubuntu.com/24.04/SHA256SUMS
-  # and the file is signed - verify the signature with SHA256SUMS.gpg, then set:
-  #   iso_checksum = "sha256:<value from SHA256SUMS>"
+  # This was deliberately "none" while the templates were written offline, on the
+  # principle that a checksum written from memory is worse than no checksum: it
+  # looks like verification and is not. It is now a real value read from Ubuntu's
+  # published sums file.
   #
-  # Until then Packer will warn on every build, which is the correct amount of nagging.
-  description = "Set to sha256:<hash> from https://releases.ubuntu.com/24.04/SHA256SUMS before building. 'none' skips verification."
+  # If you bump iso_url to a new point release you MUST bump this too. A stale
+  # checksum fails the download with a mismatch, which is the correct and safe
+  # failure - far better than the silent one where a truncated ISO produces a
+  # template that boots strangely three weeks later.
+  #
+  # The sums file is signed. To verify it properly rather than trusting HTTPS alone:
+  #   curl -O https://releases.ubuntu.com/24.04/SHA256SUMS
+  #   curl -O https://releases.ubuntu.com/24.04/SHA256SUMS.gpg
+  #   gpg --keyserver keyserver.ubuntu.com --recv-keys d94aa3f0efe21092
+  #   gpg --verify SHA256SUMS.gpg SHA256SUMS
+  default = "sha256:e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433"
+
+  description = "SHA256 of the Ubuntu Server ISO, from https://releases.ubuntu.com/24.04/SHA256SUMS. Bump alongside iso_url."
 }
 
 # ---------------------------------------------------------------------------------------
