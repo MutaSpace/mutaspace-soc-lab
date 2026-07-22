@@ -341,8 +341,37 @@ source "proxmox-iso" "ubuntu-server-2404" {
     # below refers to.
   }
 
-  boot      = "order=scsi0;ide2"
-  boot_wait = "5s"
+  boot = "order=scsi0;ide2"
+
+  # 10s, not 5s. VERIFIED THE HARD WAY on PVE 9.2.2, 2026-07-22.
+  #
+  # The GRUB menu has to be fully drawn and accepting input before the `c` that
+  # drops to the command line is sent. If `c` lands too early it is swallowed, the
+  # rest of the boot command is typed into a menu that ignores it, and the ISO
+  # boots its default entry instead - which looks like the boot command "not
+  # working" rather than a timing problem.
+  boot_wait = "10s"
+
+  # Type slowly. This is the fix for the kernel panic described below.
+  #
+  # Packer drives the console through QEMU's `sendkey`, one keystroke at a time
+  # over the API. At full speed keystrokes are DROPPED - it is a known flakiness
+  # in the Proxmox plugin (issues #237 and #220 report `sendkey: EOF` and lost
+  # characters). A dropped character in a 130-character kernel line is usually
+  # survivable; a dropped character in `initrd /casper/initrd` is not.
+  #
+  # THE SYMPTOM, so nobody has to diagnose it twice:
+  #
+  #   Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)
+  #
+  # That message means the kernel loaded and booted with NO initrd. Both
+  # /casper/vmlinuz and /casper/initrd exist on the ISO and the paths below are
+  # correct - the `initrd` line simply never arrived intact. The panic looks like
+  # a broken image or a storage-driver problem, and is neither.
+  #
+  # 100ms per key group is slow enough to be reliable and still types the whole
+  # command in a few seconds.
+  boot_keygroup_interval = "100ms"
 
   # THE INSTALLER LOOP, AND WHY THIS LINE PREVENTS IT.
   # Subiquity reboots the VM when the install finishes, and Packer does not unmount the ISO
@@ -361,7 +390,7 @@ source "proxmox-iso" "ubuntu-server-2404" {
     # Do NOT copy the 22.04-era recipe (<esc><esc>e to edit the highlighted entry, or <f6>
     # for a boot-options prompt). The 24.04 menu layout changed and those keystrokes land
     # somewhere else entirely.
-    "<wait5>c<wait>",
+    "<wait5>c<wait2>",
 
     # Three things in this line are load-bearing:
     #
@@ -379,8 +408,12 @@ source "proxmox-iso" "ubuntu-server-2404" {
     #
     # `---` separates arguments meant for the installed system's kernel command line from
     # arguments meant for the live environment.
-    "linux /casper/vmlinuz autoinstall 'ds=nocloud-net;s=http://{{ .HTTPIP }}:{{ .HTTPPort }}/' ---<enter><wait>",
-    "initrd /casper/initrd<enter><wait>",
+    "linux /casper/vmlinuz autoinstall 'ds=nocloud-net;s=http://{{ .HTTPIP }}:{{ .HTTPPort }}/' ---<enter><wait2>",
+
+    # If this line is dropped or mangled, the VM panics with
+    # "VFS: Unable to mount root fs on unknown-block(0,0)". See boot_keygroup_interval.
+    "initrd /casper/initrd<enter><wait2>",
+
     "boot<enter>",
   ]
 

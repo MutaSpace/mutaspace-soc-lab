@@ -685,6 +685,45 @@ detect_uplink() {
     # Fallback: the interface the default route leaves by.
     ifname="$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || true)"
   fi
+
+  # ---------------------------------------------------------------------------
+  # If that interface is enslaved to a bridge, MASQUERADE on the BRIDGE.
+  #
+  # VERIFIED THE HARD WAY on PVE 9.2.2, 2026-07-22. This is the single most
+  # confusing bug in the whole bootstrap, because everything *looks* correct.
+  #
+  # vmbr0's bridge-ports says `nic0`, so "the uplink is nic0" is the physically
+  # correct answer. It is the routing-WRONG answer. Once a NIC is enslaved to a
+  # bridge it stops taking part in IP routing decisions - the bridge holds the
+  # address and owns the route. Traffic from the build plane therefore leaves
+  # via `dev vmbr0`, and a rule matching `-o nic0` never fires:
+  #
+  #   ip route get 10.200.2.2 from 10.99.0.5 iif vmbr9
+  #     -> via 10.1.1.1 dev vmbr0
+  #
+  #   iptables -t nat -L POSTROUTING -v -n
+  #     pkts bytes target      out    source
+  #        0     0 MASQUERADE  nic0   10.99.0.0/24     <-- never matched
+  #
+  # The symptom is NOT "no network". The VM boots, ARPs fine, and its packets
+  # leave the host - just with an un-NATted 10.99.0.x source address that
+  # nothing upstream can reply to. So it presents as a silent timeout: the
+  # Ubuntu autoinstall seed never downloads and subiquity drops to its
+  # interactive menu, which looks like a broken boot command.
+  #
+  # A zero packet counter on the MASQUERADE rule is the diagnostic. Check it
+  # first, before suspecting the installer.
+  # ---------------------------------------------------------------------------
+  if [[ -n "$ifname" ]]; then
+    local master
+    master="$(ip -o link show "$ifname" 2>/dev/null | grep -oP 'master \K[^ ]+' || true)"
+    if [[ -n "$master" ]]; then
+      warn "uplink ${ifname} is enslaved to ${master}; masquerading on ${master} instead"
+      warn "  (a rule on an enslaved port never matches - the bridge owns the route)"
+      ifname="$master"
+    fi
+  fi
+
   printf '%s' "$ifname"
 }
 
