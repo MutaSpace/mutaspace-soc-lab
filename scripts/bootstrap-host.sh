@@ -457,6 +457,22 @@ build_privs() {
     # failed loudly with an exact message; this one fails silently. Both were
     # found by running the thing, which is the only way this list gets verified.
     privs+=(VM.GuestAgent.Audit)
+
+    # Datastore.Allocate - VERIFIED THE HARD WAY on PVE 9.2.2, 2026-07-22.
+    #
+    # Packer uploads its own ISOs (the Autounattend seed built by cd_files, and
+    # any additional_iso_files it stages) and DELETES them when the build ends.
+    # Deleting a volume needs Datastore.Allocate; Datastore.AllocateSpace only
+    # covers creating one. Without it the build runs to completion and then dies
+    # in teardown with:
+    #
+    #   403 Permission check failed (/storage/local, Datastore.Allocate)
+    #
+    # This is the cruellest of the three missing privileges found so far, because
+    # it fails LAST. The Windows Server template installed, provisioned, ran
+    # cleanup and completed sysprep - 35 minutes - and then threw away the result
+    # because it could not delete a 390 KB scratch ISO.
+    privs+=(Datastore.Allocate)
   fi
   printf '%s\n' "${privs[@]}" | sort
 }
