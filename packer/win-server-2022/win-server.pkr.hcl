@@ -1,42 +1,42 @@
 # =============================================================================
-# STATUS: THIS TEMPLATE DOES NOT BUILD YET
+# HOW THE VIRTIO DRIVERS GET INTO WinPE - read before changing anything here
 # =============================================================================
 #
-# Windows Setup cannot see the virtio-scsi disk, and neither documented mechanism
-# for injecting the driver has worked on this media
-# (SERVER_EVAL_x64FRE_en-us.iso, March 2022, on PVE 9.2.2).
+# Windows Setup cannot see a virtio-scsi disk until the storage driver is loaded
+# in WinPE. Two answer-file mechanisms were tried on this media (Windows Server
+# 2022 Evaluation, March 2022, on PVE 9.2.2) and NEITHER works:
 #
-# WHAT WAS PROVEN GOOD, from a Shift+F10 shell inside the failing WinPE:
-#   * E: really is the virtio CD              dir E:  -> vioscsi, NetKVM, vioserial, viostor
-#   * the driver path really exists           E:\vioscsi\2k22\amd64\vioscsi.inf
-#   * the driver really loads                 drvload -> "Successfully loaded"
-#   * the disk really appears once it has     wmic diskdrive get size -> 64420392960 (60 GB)
-# So the media, the drivers, the paths and the drive letter are all correct.
+#   Microsoft-Windows-PnpCustomizationsWinPE
+#     -> Setup aborts at "Setup is starting" with
+#        "Windows could not apply the Windows PE bootstrap setting specified in
+#         the unattend answer file"
+#        This happens even with exactly four paths, every one verified to exist.
+#        Bisection confirmed the component: removing only it lets Setup proceed.
 #
-# WHAT FAILED, in order:
-#   1. Microsoft-Windows-PnpCustomizationsWinPE with 16 speculative driver paths
-#        -> "Windows could not apply the Windows PE bootstrap setting"
-#   2. The same component narrowed to 4 correct, verified paths
-#        -> identical error. So it is not path correctness.
-#      Bisection: removing the component entirely let Setup proceed, which
-#      identifies it conclusively but does not explain it.
-#   3. RunSynchronous calling the drvload that works by hand, fixed letter
-#        -> bootstrap error gone, Setup reaches disk selection, but:
-#           "Windows needs the driver for device [Red Hat VirtIO SCSI pass-through controller]"
-#   4. RunSynchronous searching D-I with `if exist` so a wrong letter is a no-op
-#        -> identical. RunSynchronous appears to run after disk enumeration.
+#   Microsoft-Windows-Setup/RunSynchronous calling drvload
+#     -> The bootstrap error goes away and Setup reaches disk selection, but
+#        storage has already been enumerated by then, so it still stops at
+#        "Windows needs the driver for device
+#         [Red Hat VirtIO SCSI pass-through controller]".
+#        A letter-searching variant made no difference; the problem is WHEN it
+#        runs, not WHERE it looks.
 #
-# THE LIKELY FIX, NOT YET ATTEMPTED:
-#   Inject the drivers into boot.wim with DISM and build a modified install ISO.
-#   That puts the storage driver in WinPE before Setup starts and removes the
-#   answer file from the problem entirely. It is the deterministic approach and
-#   is what to try next.
+# None of that was a driver or path problem. From a Shift+F10 shell inside the
+# failing WinPE: E: really was the virtio CD, the .inf really existed, drvload
+# loaded it successfully, and `wmic diskdrive get size` then reported the 60 GB
+# disk. The drivers were always fine; the delivery mechanism was not.
 #
-#   The tempting shortcut - fall back to a SATA disk and an E1000 NIC - is what
-#   the original hand-built dc-01 did. It works, and it carries emulated 1990s
-#   hardware forward forever. Prefer fixing the image.
+# WHAT ACTUALLY WORKS: $WinPEDriver$
+#   Windows Setup scans the ROOT of every attached volume for a folder named
+#   exactly $WinPEDriver$ and loads the drivers inside it before drawing the disk
+#   list. No answer file to reject it, no drive letter to guess, and it runs early
+#   enough to matter. scripts/build-winpe-driver-iso.sh builds that volume from
+#   the pinned virtio-win ISO; it is attached below as sata3.
 #
-# Until then dc-01 stays enabled:false in lab.yaml.
+#   RESULT: Windows installs onto scsi0 / virtio-scsi-single with a virtio NIC,
+#   which is what the rest of the lab uses. The tempting fallback - SATA disk and
+#   E1000 NIC, which is what the original hand-built dc-01 did - was deliberately
+#   not taken. It works and it carries emulated 1990s hardware forward forever.
 # =============================================================================
 
 # packer/win-server-2022/win-server.pkr.hcl
@@ -256,6 +256,20 @@ variable "windows_image_index" {
     Ansible did to the directory.
   EOT
   default     = 2
+}
+
+variable "winpe_driver_iso_file" {
+  type    = string
+  default = "local:iso/virtio-winpe-drivers.iso"
+
+  # A small ISO whose root contains a $WinPEDriver$ folder. Windows Setup scans
+  # attached volumes for that folder by name and loads the drivers inside it before
+  # the disk list is drawn - no answer file, no drive letter to guess.
+  #
+  # Build it on the Proxmox host with scripts/build-winpe-driver-iso.sh. It is
+  # derived from the pinned virtio-win ISO, so it is a build artifact rather than
+  # something to acquire.
+  description = "ISO containing a root $WinPEDriver$ folder. Built from virtio-win by scripts/build-winpe-driver-iso.sh."
 }
 
 variable "virtio_cd_letter" {
@@ -585,6 +599,21 @@ source "proxmox-iso" "win-server-2022" {
     # `unmount`; `unmount_iso` was the deprecated top-level field. Getting this wrong
     # is an "Unsupported argument" error, which at least fails loudly.
     unmount = true
+  }
+
+  # The $WinPEDriver$ volume. Windows Setup scans the root of every attached volume
+  # for a folder with this exact name and drvloads whatever it finds, BEFORE it
+  # enumerates storage for the disk list. That timing is the whole point: it is
+  # earlier than RunSynchronous and it does not go through the answer file, which is
+  # what rejected PnpCustomizationsWinPE.
+  #
+  # Built on the Proxmox host by scripts/build-winpe-driver-iso.sh - about 29 MB of
+  # the four drivers WinPE actually needs, rather than the full 693 MB virtio ISO.
+  additional_iso_files {
+    type     = "sata"
+    index    = 3
+    iso_file = var.winpe_driver_iso_file
+    unmount  = true
   }
 
   additional_iso_files {

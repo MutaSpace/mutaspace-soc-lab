@@ -126,33 +126,24 @@
         WillWipeDisk = true is safe here and only here: this is a fresh Packer VM
         with one empty disk.
       -->
-      <!--
-        Load the VirtIO drivers before anything needs a disk.
+    <!--
+      NO DRIVER INJECTION IN THIS ANSWER FILE AT ALL. Both answer-file mechanisms
+      were tried and neither works on this media:
 
-        Order matters: RunSynchronous executes at the start of windowsPE, so the
-        storage driver is present by the time DiskConfiguration below looks for
-        DiskID 0. Without it WinPE sees no disks and the install dead-ends - which
-        is exactly why the old hand-built dc-01 fell back to SATA and E1000.
+        PnpCustomizationsWinPE  -> "Windows could not apply the Windows PE bootstrap
+                                    setting specified in the unattend answer file",
+                                    even with four paths verified to exist.
+        RunSynchronous drvload  -> runs too late. Setup has already enumerated
+                                    storage by then, so it still stops at
+                                    "Windows needs the driver for device
+                                    [Red Hat VirtIO SCSI pass-through controller]".
 
-        The command SEARCHES for the driver rather than assuming a drive letter.
-        A first attempt hardcoded E:, which is where the virtio CD genuinely ends
-        up once Setup is running - verified from a shell in WinPE. It still did
-        not work, because RunSynchronous executes before optical drives are
-        reliably lettered, so E: did not resolve yet at that moment.
-
-        `if exist` makes a non-matching letter a no-op rather than an error, which
-        is safe here in a way that listing many paths in PnpCustomizationsWinPE
-        was NOT - there, one path that failed to resolve failed the entire pass.
-      -->
-      <RunSynchronous>
-%{ for i, d in driver_dirs ~}
-        <RunSynchronousCommand wcm:action="add">
-          <Order>${i + 1}</Order>
-          <Path>cmd /c for %d in (D E F G H I) do @if exist %d:\${d}\${inf_names[i]} drvload %d:\${d}\${inf_names[i]}</Path>
-          <Description>Load VirtIO ${d}</Description>
-        </RunSynchronousCommand>
-%{ endfor ~}
-      </RunSynchronous>
+      The drivers now arrive via $WinPEDriver$ instead - a folder at the ROOT of an
+      attached volume, which Windows Setup itself scans and drvloads before it draws
+      the disk list. No answer-file involvement, so nothing here can reject it.
+      That volume is built on the Proxmox host by scripts/build-winpe-driver-iso.sh
+      and attached as an extra CD by this template.
+    -->
 
       <DiskConfiguration>
         <WillShowUI>OnError</WillShowUI>
