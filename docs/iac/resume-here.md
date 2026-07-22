@@ -1,92 +1,122 @@
 # Resume Here
 
-A running note for picking the build back up. Newest state at the top. This is the
-scratchpad; docs/iac/session-handoff.md is the durable overview.
+A running note for picking the build back up. This is the scratchpad;
+docs/iac/session-handoff.md is the durable overview and getting-started.md is the
+operator walkthrough.
 
-Last updated: 2026-07-22, mid-build pause.
+**Last updated: 2026-07-22 — session stopped, moving to a dev VM to continue.**
 
 ---
 
-## Where the templates stand
+## Stop state (read this first)
+
+Everything is committed and pushed. Nothing is mid-flight. Host is clean.
 
 | VMID | Template | State |
 |---|---|---|
-| 9000 | `tpl-ubuntu-server-2404` | **BUILT** |
-| 9001 | `tpl-ubuntu-desktop-2404` | **BUILT**, clone-verified |
-| 9002 | `tpl-win-server-2022` | **IN FLIGHT** at pause - see below |
-| 9003 | `win11-client` | not started. ISO on host; needs the w11 driver ISO |
+| 9000 | `tpl-ubuntu-server-2404` | **BUILT** — on the host, intact |
+| 9001 | `tpl-ubuntu-desktop-2404` | **BUILT** — on the host, clone-verified |
+| 9002 | `tpl-win-server-2022` | **NOT built.** Was mid-sysprep when stopped; the build was killed and the half-built VM destroyed. Rebuild from scratch. Everything up to and including sysprep-start was proven to work, so expect it to complete on a clean run. |
+| 9003 | `win11-client` | not started. ISO on host; needs a w11 driver ISO |
 | 9004 | `opnsense-267` | not started. Needs the OPNsense ISO (decompress the .bz2) |
 | 9005 | `kali-rolling` | not started. Public ISO, no blockers |
 
-Check the truth on the host, never from memory:
+Confirm on the host, don't trust this table:
 ```
 ssh swc2026 'for f in /etc/pve/qemu-server/*.conf; do grep -q "^template: 1" "$f" && echo "$(basename $f .conf) $(grep ^name: $f)"; done'
 ```
 
-## The Windows Server 2022 build (9002) was RUNNING when we paused
+The host is **swc2026** at 10.1.1.2, reached over SSH (alias in ~/.ssh/config) and over
+WireGuard from this workstation.
 
-It was on `99-sysprep.ps1`, ~26 minutes in, console black (normal for sysprep's final
-shutdown). It runs DETACHED (`setsid nohup`), so it kept going after the session ended.
-On resume, the FIRST thing to check is whether it finished:
+---
 
+## Moving to a dev VM — what travels and what does not
+
+The git repo travels. **Three things are gitignored and machine-local — they do NOT come
+with a `git clone`** and must be handled on the dev VM:
+
+| File | What it holds | On the dev VM |
+|---|---|---|
+| `.envrc` | API tokens, build password, SSH key path | Recreate. Either `scp` it from this workstation, or re-run `scripts/bootstrap-host.sh --rotate-tokens` on the host to reissue tokens and rebuild it from the printed output. |
+| `packer/common.pkrvars.hcl` | endpoint, node, build_bridge, http_bind_address | Recreate from `.example`. **http_bind_address will likely be DIFFERENT** — it is the address the build VM can reach the workstation on, and the dev VM's network path to swc2026 is not this laptop's. Re-derive it (see below). |
+| `~/.ssh/id_ed25519_mutaspace_lab` | the build SSH key Packer/cloud-init use | `scp` it over, or generate a new one and update `.envrc` + the tofu `ssh_public_keys`. Simplest to copy the existing pair. |
+
+Fastest move: `scp` `.envrc`, `packer/common.pkrvars.hcl`, and `~/.ssh/id_ed25519_mutaspace_lab*`
+from this workstation to the dev VM, then fix `http_bind_address` for the dev VM's network.
+
+### Re-deriving http_bind_address on the dev VM
+It must be the dev VM's address ON the network swc2026 can route back to:
 ```
-tail -20 /tmp/claude-*/scratchpad/packer-winsrv7.log    # or wherever the log went
-ssh swc2026 'qm list | grep 9002; grep "^template: 1" /etc/pve/qemu-server/9002.conf'
+ip route get 10.1.1.2        # the src address here is your http_bind_address
 ```
+If the dev VM reaches swc2026 over the same WireGuard, it may be a 10.200.x address; if it
+is on the 10.1.1.0/24 LAN directly, it is a 10.1.1.x address. Getting this wrong makes the
+installer silently hang at its menu — set it, then `task preflight`.
 
-Three outcomes:
-- **`A template was created: 9002`** in the log and `template: 1` on the host -> DONE.
-  Flip dc-01 back to `enabled: true` in lab.yaml (it is currently disabled).
-- **Errored / no artifacts** -> read the tail, fix, and rebuild:
-  ```
-  ssh swc2026 'qm stop 9002; sleep 2; qm destroy 9002'
-  set -a; . ./.envrc; set +a
-  setsid nohup packer build -var-file=packer/common.pkrvars.hcl \
-    -var-file=packer/win-server-2022/win-server.pkrvars.hcl packer/win-server-2022/ \
-    > /tmp/winsrv.log 2>&1 & echo $! > /tmp/winsrv.pid
-  ```
-- **Still `running` and log unchanged for >15 min** -> likely hung. Screenshot the
-  console (see below) before killing. If dead, destroy 9002 and rebuild.
+### The API tokens still work
+bootstrap-host.sh was already run on swc2026; the tokens exist. If you copied `.envrc`, they
+just work from the dev VM. Only rotate if you did not preserve the secrets.
 
-The install itself is fully solved; the only thing 9002 has never done is finish sysprep
-and convert. If it fails, it fails at the very end.
+---
 
-## The one hazard that bit us repeatedly
+## Rebuilding the Windows Server template (9002) — the known-good path
 
-NEVER kill a build by process name. `pkill -x packer` and even
-`pgrep -f 'packer build.*<name>'` match the wrong things and killed a concurrent build
-and their own shell respectively. ALWAYS capture the PID:
+The install is fully solved. On a clean run it should go all the way. Sequence:
 ```
-setsid nohup packer build ... > LOG 2>&1 & echo $! > PIDFILE
-kill "$(cat PIDFILE)"   # only ever this
+cd <repo>; set -a; . ./.envrc; set +a
+ssh swc2026 '/root/build-winpe-driver-iso.sh'      # rebuilds local:iso/virtio-winpe-drivers.iso
+setsid nohup packer build -var-file=packer/common.pkrvars.hcl \
+  -var-file=packer/win-server-2022/win-server.pkrvars.hcl packer/win-server-2022/ \
+  > /tmp/winsrv.log 2>&1 & echo $! > /tmp/winsrv.pid
 ```
+Watch it: install (~10 min) -> WinRM connects -> guest tools -> Cloudbase-Init -> cleanup ->
+sysprep (~15-20 min, console goes black, normal) -> template. ~35-40 min total.
 
-## Next templates, in order of least friction
+If it stalls at "Waiting for WinRM": check PKR_VAR_windows_admin_password is set (preflight
+does). If a NEW `403 Permission check failed (<path>, <Priv>)` appears: add the priv to
+build_privs() in scripts/bootstrap-host.sh, scp up, re-run
+`bootstrap-host.sh --yes --skip-repos --skip-snippets --skip-network`.
 
-1. **9005 kali-rolling** - public ISO, nothing gated. Good confidence-builder.
-2. **9003 win11-client** - Windows path is now solved. Needs its own $WinPEDriver$ ISO:
+---
+
+## Then, in order of least friction
+
+1. **9005 kali-rolling** — public ISO, nothing gated. Easy.
+2. **9003 win11-client** — Windows path solved. First build its own driver ISO:
    `ssh swc2026 '/root/build-winpe-driver-iso.sh --variant w11 --out /var/lib/vz/template/iso/virtio-winpe-drivers-w11.iso'`
-   and point the win11 template's winpe_driver_iso_file at it. Watch for the same
-   windows_iso_file / password / sysprep steps 9002 went through.
-3. **9004 opnsense-267** - hardest and most fragile (timing-sensitive boot_command).
-   Do it last.
+   then point the win11 template's `winpe_driver_iso_file` at it. Same
+   windows_iso_file / password / sysprep steps as 9002.
+3. **9004 opnsense-267** — hardest, timing-sensitive boot_command. Do it last.
 
-Then: set the built machines `enabled: true` in lab.yaml and `tofu apply`.
+Then flip the built machines to `enabled: true` in lab.yaml and `task lab:up`. See
+getting-started.md Part 4 for the OpenTofu + Ansible deployment sequence.
 
-## Debugging a guest (the single most useful tool)
-```
-ssh swc2026 'echo "screendump /tmp/x.ppm" | qm monitor <vmid> >/dev/null 2>&1'
-scp swc2026:/tmp/x.ppm /tmp/ && python3 -c "from PIL import Image; Image.open('/tmp/x.ppm').save('/tmp/x.png')"
-# then Read /tmp/x.png
-ssh swc2026 'qm guest cmd <vmid> network-get-interfaces'   # once the agent is up
-```
+---
 
-## Credentials live only on this workstation
-`.envrc` and `packer/common.pkrvars.hcl` are gitignored and hold the API tokens, the
-build SSH key and the Windows build password. They do NOT travel with the repo. On a
-different machine, recreate them (bootstrap-host.sh --rotate-tokens to reissue tokens).
+## The rules that bit us (keep them)
 
-## Privileges found the hard way (all now in bootstrap-host.sh)
-SDN.Use, VM.GuestAgent.Audit, Datastore.Allocate. If a NEW `403 Permission check failed
-(<path>, <Priv>)` appears, add the named priv to build_privs(), scp the script up, and
-re-run `bootstrap-host.sh --yes --skip-repos --skip-snippets --skip-network`.
+- **Kill a build ONLY by captured PID.** `pkill -x packer` killed a concurrent build;
+  `pgrep -f 'packer build.*name'` matched its own shell. Always
+  `setsid nohup packer build ... & echo $! > pidfile` then `kill "$(cat pidfile)"`.
+- **Verify on the host, never assume.** `qm list`, `qm config <vmid>`, the console
+  screendump. This repo does not claim results it did not observe.
+- **Read the console when a build stalls** (getting-started.md "When something goes wrong").
+- **Fix the script, not just the host** — three missing privileges (SDN.Use,
+  VM.GuestAgent.Audit, Datastore.Allocate) are now in bootstrap-host.sh because of this.
+
+---
+
+## What this session accomplished
+
+- Whole pipeline proven end to end: host bootstrap -> API auth -> Packer build -> OpenTofu
+  discovery. `tofu plan` against swc2026 succeeds; `tofu test` is 14 passing offline.
+- Two templates built (9000, 9001). Windows install fully solved via `$WinPEDriver$`.
+- Found and fixed in CODE (so nobody re-hits them): 3 missing PVE privileges, the
+  sendkey kernel panic, the masquerade-on-enslaved-port bug, missing build-plane DHCP,
+  the http_bind_address multi-NIC trap, the Windows virtio injection, the Desktop
+  NetworkManager-match trap, cleanup deleting Packer's own files.
+- The repo is now self-guiding: CLAUDE.md + getting-started.md mean an operator can
+  check it out, open Claude Code, and be walked through the whole setup.
+- Windows licensing recorded: eval media cannot be redistributed as built images, so
+  each operator builds Windows locally (iso-shelf.md, CLAUDE.md).

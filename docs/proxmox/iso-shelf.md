@@ -12,6 +12,16 @@ their own installer over HTTPS. Three of them cannot:
 
 - **Windows Server 2022 Evaluation** and **Windows 11 Enterprise Evaluation** sit behind a
   Microsoft registration form. There is no stable, unauthenticated URL to pin.
+
+  > **Licensing — this decides what you can share.** These are *evaluation* editions. The
+  > license permits evaluation use, but it does **not** grant redistributing a built image.
+  > That means the Ubuntu, Kali and OPNsense templates can be copied between hosts freely,
+  > and the Windows ones **cannot** — every operator downloads their own eval ISO here and
+  > builds the Windows templates on their own host. This is a license constraint, not a
+  > technical one; the reproducible Packer recipe is exactly what makes it painless. The
+  > evaluation clock (180 days for Server, 90 for the client) is a separate matter tracked
+  > in [../iac/decisions.md](../iac/decisions.md) D-03.
+
 - **OPNsense** publishes its DVD image bzip2-compressed. Proxmox cannot boot a compressed image, so
   the file has to be decompressed on the host before Packer ever sees it — which means the artifact
   Packer boots is not the artifact upstream published a checksum for.

@@ -53,7 +53,8 @@ which VM sits on which network, instead of clicking through a hypervisor UI and 
 
 | Document | Purpose |
 |---|---|
-| [prerequisites.md](prerequisites.md) | **Start here.** Every tool, version and manually-acquired ISO needed before any of this runs |
+| [getting-started.md](getting-started.md) | **The walkthrough.** Fresh checkout to running lab — open the repo in Claude Code and say "help me set up the lab" |
+| [prerequisites.md](prerequisites.md) | Every tool, version and manually-acquired ISO needed before any of this runs |
 | [session-handoff.md](session-handoff.md) | Current state, what is verified, what is not, and the next steps |
 | [decisions.md](decisions.md) | **Read this second.** The five decisions taken after the research, which SUPERSEDE `design.md` wherever the two disagree |
 | [design.md](design.md) | The full IaC design: target architecture, tooling decisions, repo layout, bootstrap order, and implementation waves. Partly superseded — see the banner at the top of it |
