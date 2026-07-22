@@ -837,8 +837,14 @@ BANNER
   fi
   log "  uplink for MASQUERADE: ${uplink}"
   if [[ "$uplink" == vmbr* ]]; then
-    warn "the detected uplink '${uplink}' is a bridge, not a physical port."
-    warn "That usually still works, but --uplink <physical-ifname> is more correct."
+    # This is the CORRECT outcome on a standard Proxmox host, not a warning sign.
+    #
+    # An earlier version of this script warned here that a bridge was "not a
+    # physical port" and suggested passing --uplink with the physical interface.
+    # That advice was exactly backwards and cost an afternoon: masquerading on a
+    # bridge-enslaved port produces a rule that never matches, because the bridge
+    # owns the route. See the long comment in detect_uplink().
+    info "masquerading on '${uplink}' (the bridge holds the address and the route)"
   fi
 
   # --- Compose only the stanzas that are missing ----------------------------
@@ -1044,6 +1050,140 @@ EOF
 # =============================================================================
 # main
 # =============================================================================
+# =============================================================================
+# DHCP on the build plane
+# =============================================================================
+#
+# WHY THIS EXISTS - it was missed entirely on the first pass, and the failure it
+# causes is genuinely misleading.
+#
+# vmbr9 had an address (10.99.0.1/24), a working MASQUERADE rule and ip_forward
+# enabled. Everything about the build plane looked finished. It had nothing to
+# hand out leases.
+#
+# A Packer build VM boots the Ubuntu live installer, requests DHCP, gets no
+# answer, and comes up with NO IP ADDRESS. It therefore cannot fetch the
+# autoinstall seed, cloud-init eventually gives up, and subiquity falls back to
+# its interactive language menu. That looks exactly like a broken boot command,
+# and it is not - the boot command is fine and the machine simply has no network.
+#
+# The diagnostic that separates the two: check the MASQUERADE packet counter.
+# A VM retrying an HTTP fetch generates a steady stream of packets. A VM with no
+# lease generates almost none.
+#
+#   ss -ulnp | grep ':67 '                      <- nothing listening = this bug
+#   iptables -t nat -L POSTROUTING -v -n        <- near-zero counter = no traffic
+#
+# A static IP on the kernel command line would also work, but DHCP is worth
+# having anyway: every template build needs one, and the templates should not
+# each carry a hard-coded build-time address.
+#
+# dnsmasq is bound to vmbr9 ONLY. `bind-interfaces` matters - without it dnsmasq
+# binds the wildcard address and will answer DHCP and DNS on every interface on
+# the host, including the management network. That would be a genuinely bad day.
+# =============================================================================
+
+configure_build_dhcp() {
+  section "DHCP for the build plane (${BR_BUILD})"
+
+  local conf="/etc/dnsmasq.d/mutaspace-build-plane.conf"
+
+  if ! command -v dnsmasq >/dev/null 2>&1; then
+    info "dnsmasq is not installed; installing (build VMs cannot get an address without it)"
+    # apt-get update FIRST. On a freshly-installed host the only configured
+    # repositories are the enterprise ones, which 401 without a subscription -
+    # so the package lists are empty and the install fails with the misleading
+    # "Package 'dnsmasq' has no installation candidate". configure_repos() has
+    # already fixed the sources by this point; the lists just need refreshing.
+    run "refresh package lists" env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    run "install dnsmasq" env DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq
+    # Proxmox has no DHCP server of its own, and a stock dnsmasq install enables a
+    # system-wide resolver. Disable the default instance; only our scoped drop-in
+    # should be active.
+    run "disable stock dnsmasq resolver behaviour" systemctl disable --now dnsmasq 2>/dev/null || true
+    changed "installed dnsmasq"
+  else
+    skipped "dnsmasq already installed"
+  fi
+
+  local desired
+  desired="$(cat <<EOF
+# MutaSpace SOC Lab - DHCP for the Packer build plane.
+# Managed by ${SCRIPT_NAME}. Scoped to ${BR_BUILD} only.
+interface=${BR_BUILD}
+bind-interfaces
+except-interface=lo
+no-hosts
+dhcp-authoritative
+dhcp-range=10.99.0.100,10.99.0.200,12h
+dhcp-option=option:router,10.99.0.1
+dhcp-option=option:dns-server,10.99.0.1
+# Upstream resolvers for build VMs. They need working DNS to reach
+# archive.ubuntu.com; the lab's own DNS (dc-01) does not exist yet at build time.
+server=1.1.1.1
+server=9.9.9.9
+EOF
+)"
+
+  if [[ -f "$conf" ]] && [[ "$(cat "$conf")" == "$desired" ]]; then
+    skipped "${conf} already correct"
+  else
+    if (( DRY_RUN )); then
+      info "[ dry ] write ${conf}"
+    else
+      printf '%s\n' "$desired" > "$conf"
+    fi
+    changed "wrote ${conf}"
+  fi
+
+  # A systemd unit scoped to this config, so the stock dnsmasq service stays off.
+  local unit="/etc/systemd/system/dnsmasq-build-plane.service"
+  local desired_unit
+  desired_unit="$(cat <<EOF
+[Unit]
+Description=MutaSpace SOC Lab - DHCP/DNS for the Packer build plane (${BR_BUILD})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=${conf}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+
+  if [[ -f "$unit" ]] && [[ "$(cat "$unit")" == "$desired_unit" ]]; then
+    skipped "${unit} already correct"
+  else
+    if (( DRY_RUN )); then
+      info "[ dry ] write ${unit}"
+    else
+      printf '%s\n' "$desired_unit" > "$unit"
+      systemctl daemon-reload
+    fi
+    changed "wrote ${unit}"
+  fi
+
+  if (( DRY_RUN )); then
+    info "[ dry ] enable and start dnsmasq-build-plane"
+  else
+    systemctl enable --now dnsmasq-build-plane >/dev/null 2>&1 || true
+    systemctl restart dnsmasq-build-plane >/dev/null 2>&1 || true
+    if systemctl is-active --quiet dnsmasq-build-plane; then
+      changed "dnsmasq-build-plane is active on ${BR_BUILD}"
+      log "  Verification - listening sockets:"
+      ss -ulnp 2>/dev/null | grep -E ':67 ' | sed 's/^/    /' || log "    (none - investigate)"
+    else
+      warn "dnsmasq-build-plane failed to start. Build VMs will get no address."
+      warn "  journalctl -u dnsmasq-build-plane -n 30"
+    fi
+  fi
+}
+
 main() {
   parse_args "$@"
 
@@ -1065,6 +1205,8 @@ main() {
   if (( DO_USERS ));    then configure_users;    else skipped "users/roles/tokens (--skip-users)"; fi
   if (( DO_SNIPPETS )); then configure_snippets; else skipped "snippets content type (--skip-snippets)"; fi
   if (( DO_NETWORK ));  then create_bridges;     else skipped "bridges (--skip-network)"; fi
+  # Must follow create_bridges: dnsmasq binds vmbr9, so the bridge has to exist.
+  if (( DO_NETWORK ));  then configure_build_dhcp; else skipped "build-plane DHCP (--skip-network)"; fi
 
   if (( DO_USERS )); then print_credentials; fi
   print_next_steps
