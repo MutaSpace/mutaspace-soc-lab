@@ -20,11 +20,18 @@ autoinstall:
   #
   # THIS IS THE KEY DIFFERENCE FROM THE SERVER TEMPLATE.
   #
-  # The Ubuntu Desktop ISO carries more than one install source, and `id: ubuntu-desktop`
-  # selects the full desktop session rather than a minimal or server-flavoured install.
-  # It is stated explicitly rather than left to the ISO's default so that this file says
-  # what it means, and so it cannot change meaning underneath us if Canonical reorders the
-  # sources in a later point release.
+  # The Ubuntu Desktop ISO carries more than one install source, and the one marked
+  # `default: true` is NOT the one you want. Read off the 24.04.4 media itself
+  # (/casper/install-sources.yaml), verified 2026-07-22:
+  #
+  #     id: ubuntu-desktop-minimal   default: true    path: minimal.squashfs
+  #     id: ubuntu-desktop           default: false   path: minimal.standard.squashfs
+  #
+  # So `id: ubuntu-desktop` is what selects the FULL desktop. Delete this block and the
+  # build silently produces the minimized flavour: no LibreOffice, no Thunderbird, a
+  # different seeded snap set. It installs cleanly and boots to a normal-looking GNOME, so
+  # the difference only shows up much later, when someone goes looking for an application
+  # that a real Ubuntu Desktop has and this template does not.
   #
   # search_drivers: false keeps the build deterministic. Driver search reaches out to
   # Canonical's servers and can install different third-party packages depending on when the
@@ -42,25 +49,66 @@ autoinstall:
   # ---------------------------------------------------------------------------------
   # Network
   #
-  # DHCP on the build plane (vmbr9, 10.99.0.0/24, masqueraded by the Proxmox host). This is
-  # build-time only: scripts/cleanup.sh deletes the generated netplan so that cloud-init
-  # regenerates it on the clone's first boot.
+  # DHCP wherever the build runs. On this host that is vmbr0, the management LAN, which
+  # already serves DHCP and has a real gateway; the design's original vmbr9 build plane
+  # (10.99.0.0/24, masqueraded by the Proxmox host) works too. Either way DHCP is the only
+  # thing this file needs to say, which is exactly why it says DHCP and not an address.
+  #
+  # This is build-time only: scripts/cleanup.sh deletes the generated netplan so that
+  # cloud-init regenerates it on the clone's first boot.
   #
   # analyst-01 does not get a static address at all - it gets a DHCP RESERVATION at
   # 10.10.10.50, pinned by MAC on fw-01. That is why the MAC address is an input to the
   # design rather than something Proxmox invents: the reservation and the NIC are templated
   # from the same map, which is what keeps .50 stable across rebuilds.
   #
-  # Matched by driver rather than by interface name: the NIC is ens18 during the build, and
-  # predictable names depend on PCI topology that can differ after OpenTofu re-points the
-  # adapter to vmbr1.
+  # MATCHED BY NAME, NOT BY DRIVER. THIS IS THE DESKTOP-ONLY LANDMINE. READ THIS BEFORE
+  # "TIDYING" IT BACK TO match: driver:.
+  #
+  # The server template (packer/ubuntu-server-2404) matches `driver: virtio_net`, and that
+  # is correct THERE. It is fatal here, and the reason is the renderer:
+  #
+  #   * Ubuntu SERVER renders netplan through systemd-networkd, which can match on driver.
+  #   * Ubuntu DESKTOP ships /etc/netplan/01-network-manager-all.yaml, which sets
+  #     `renderer: NetworkManager` GLOBALLY. netplan merges every file in /etc/netplan, so
+  #     that renderer also governs the file this section produces - and NetworkManager's
+  #     netplan backend cannot match on driver.
+  #
+  # WHAT IT LOOKS LIKE WHEN YOU GET IT WRONG, observed on a real build 2026-07-22:
+  #
+  #   The install runs to completion. The machine reboots. GDM comes up and offers
+  #   `labadmin`, so everything looks finished and correct. But there is no network icon in
+  #   the top bar, `ip -br addr` shows `ens18  DOWN`, nmcli says `ens18:ethernet:unmanaged`,
+  #   and Packer sits at "Waiting for SSH to become available..." until ssh_timeout and then
+  #   fails with nothing useful in the log. The whole build is lost 25 minutes in.
+  #
+  #   The actual error is only visible from inside the guest:
+  #
+  #     # netplan generate
+  #     ERROR: buildnic: NetworkManager definitions do not support matching by driver
+  #
+  #   And note HOW BAD that failure is: `netplan generate` fails for the ENTIRE merged
+  #   configuration, not just for the offending stanza. One unsupported key means no backend
+  #   configuration is written for ANY interface, so the machine has no network at all.
+  #   cloud-init records it too - `cloud-init status --long` reports the failed netplan
+  #   generate - but you have to already have a way in to read that.
+  #
+  # WHY `name: "en*"` IS THE RIGHT FIX RATHER THAN A HARD-CODED `ens18`.
+  #   NetworkManager supports interface-name matching including globs, and netplan renders
+  #   it to `[match] interface-name=en*` in the generated .nmconnection - verified on this
+  #   image with `netplan generate --root-dir`, which exits 0 and writes a DHCP connection.
+  #   The glob keeps the original intent: no dependence on a specific predictable name, so
+  #   the file survives the NIC moving to a different bridge or PCI slot.
+  #
+  #   `macaddress` also works under NetworkManager, but a golden image must not contain the
+  #   build VM's MAC.
   # ---------------------------------------------------------------------------------
   network:
     version: 2
     ethernets:
       buildnic:
         match:
-          driver: virtio_net
+          name: "en*"
         dhcp4: true
 
   # ---------------------------------------------------------------------------------

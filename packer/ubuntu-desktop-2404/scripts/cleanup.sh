@@ -158,20 +158,63 @@ rm -f /home/*/.local/share/recently-used.xbel
 
 echo "==> [11/11] keeping the desktop's network under NetworkManager"
 #
-# A desktop-specific trap, stated honestly because it has NOT been verified against a real
-# build yet.
+# WHAT THIS RESTORES
+#   A stock Ubuntu Desktop install ships /etc/netplan/01-network-manager-all.yaml, whose
+#   entire content is `renderer: NetworkManager`. Step 3 above deletes it along with the
+#   installer's other netplan files, so this step puts the same statement back under a name
+#   that cannot collide with anything the installer or cloud-init writes later.
 #
-# cloud-init writes /etc/netplan/50-cloud-init.yaml without a `renderer:` key, and netplan's
-# default renderer is systemd-networkd. On a server that is exactly right. On a DESKTOP it
-# means GNOME's network applet shows no connections at all, because NetworkManager is not
-# the thing managing the interface - the machine is online but the UI insists it is not,
-# which is a genuinely bad first impression for an analyst workstation.
+# WHY IT MATTERS
+#   cloud-init writes /etc/netplan/50-cloud-init.yaml with no `renderer:` key, and netplan's
+#   default renderer is systemd-networkd. On a server that is exactly right. On a DESKTOP,
+#   systemd-networkd is not even enabled - `systemctl is-active systemd-networkd` returns
+#   `inactive` on a fresh 24.04 desktop install, verified 2026-07-22 - so handing it the
+#   interface means nothing brings the interface up at all, and GNOME's network applet has
+#   nothing to show either.
 #
-# netplan merges every file in /etc/netplan in lexical order, and `renderer` is a global
-# key, so a 99- file wins over cloud-init's 50- file without having to modify it.
+#   netplan merges every file in /etc/netplan in lexical order and `renderer` is a global
+#   key, so a 99- file governs cloud-init's 50- file without having to modify it.
 #
-# If this turns out to fight with cloud-init on a real build, the fallback is to delete this
-# file and let networkd own the interface - the machine still works, the applet just lies.
+# THE CONSTRAINT THIS IMPOSES ON EVERY CLONE - THIS IS THE PART TO REMEMBER
+#   Choosing NetworkManager as the renderer means the merged netplan must only use keys the
+#   NetworkManager backend supports. It does NOT support `match: driver:`, and it does not
+#   support `set-name:`. Worse, an unsupported key does not degrade gracefully:
+#
+#     # netplan generate
+#     ERROR: buildnic: NetworkManager definitions do not support matching by driver
+#
+#   `netplan generate` then fails for the WHOLE merged configuration and writes no backend
+#   config for ANY interface, so the machine ends up with no network whatsoever. That is
+#   precisely how the first real build of this template failed - see the long comment in
+#   http/user-data.pkrtpl.hcl, which is why the autoinstall now matches `name: "en*"`.
+#
+#   VERIFIED ON A REAL CLONE, 2026-07-22. This was the open question when the template was
+#   written, so here is the answer. Cloning 9001 and booting it produced
+#
+#     /etc/netplan/50-cloud-init.yaml
+#       network:
+#         version: 2
+#         ethernets:
+#           eth0:
+#             match:
+#               macaddress: "bc:24:11:ef:db:f6"
+#             dhcp4: true
+#             set-name: "eth0"
+#
+#   `netplan generate` exits 0 on that, `nmcli device status` reports
+#   `eth0:ethernet:connected:netplan-eth0`, and the clone picked up a DHCP lease. So
+#   Proxmox's cloud-init emits `macaddress` matching, which NetworkManager supports, and
+#   `set-name` is fine too - netplan implements renaming with a udev rule rather than a
+#   backend key, so it is renderer-independent. The combination in this file is safe.
+#
+#   The check, if you ever need to repeat it on a clone:
+#     netplan generate            # must exit 0
+#     nmcli device status         # the NIC must not say `unmanaged`
+#
+#   If a future cloud-init ever does emit something the NM backend rejects, the fallback is
+#   to delete this file and let systemd-networkd own the interface
+#   (`systemctl enable --now systemd-networkd`). The machine then works and only the GNOME
+#   applet lies, which is much the lesser evil.
 cat > /etc/netplan/99-renderer-networkmanager.yaml <<'EOF'
 # Written by packer/ubuntu-desktop-2404/scripts/cleanup.sh.
 # Netplan defaults to systemd-networkd. On a desktop that leaves GNOME's network applet
