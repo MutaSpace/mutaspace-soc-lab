@@ -425,6 +425,38 @@ build_privs() {
     # an over-broad role that works is much harder to audit than a narrow one
     # that tells you what it is missing.
     privs+=(SDN.Use SDN.Audit)
+
+    # VM.GuestAgent.Audit - VERIFIED THE HARD WAY on PVE 9.2.2, 2026-07-22.
+    #
+    # Packer asks the Proxmox API for the guest agent's network interfaces to
+    # learn which IP to SSH to. Without this privilege that call is denied - and
+    # on PVE 9 the denial HANGS instead of returning 403.
+    #
+    # The symptom is the worst kind: nothing. Packer prints
+    #
+    #   ==> Waiting for SSH to become available...
+    #
+    # and then sits there. Not retrying, not timing out, not erroring: 0% CPU,
+    # blocked in futex_do_wait, with zero network connections. It will stay that
+    # way past ssh_timeout because it never gets far enough to start the timer.
+    #
+    # Meanwhile the VM is completely fine - installed, booted, holding a DHCP
+    # lease and accepting SSH on the very credentials Packer is configured with.
+    # Everything points at a network or credential problem and the fault is a
+    # missing read privilege on the hypervisor.
+    #
+    # HOW TO TELL THIS APART from a real SSH problem, quickly:
+    #   qm guest cmd <vmid> network-get-interfaces   <- agent works, VM has an IP
+    #   ssh -i <key> <user>@<that ip> hostname       <- SSH works by hand
+    #   ps -o stat,%cpu,wchan -p $(pgrep -x packer)  <- packer idle in futex_do_wait
+    #   ss -tnp | grep packer                        <- no connection attempts at all
+    # A Packer that is genuinely failing to connect RETRIES, and you see the SYNs.
+    # A Packer that is hung on this makes no attempt whatsoever.
+    #
+    # This is the second privilege the synthesised list was missing. SDN.Use
+    # failed loudly with an exact message; this one fails silently. Both were
+    # found by running the thing, which is the only way this list gets verified.
+    privs+=(VM.GuestAgent.Audit)
   fi
   printf '%s\n' "${privs[@]}" | sort
 }
