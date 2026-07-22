@@ -56,6 +56,7 @@
       <UILanguage>en-US</UILanguage>
       <UserLocale>en-US</UserLocale>
     </component>
+-->
 
     <!--
       THE POINT OF THIS WHOLE TEMPLATE.
@@ -75,19 +76,35 @@
       lookup script this early. Paths that do not exist are noted in setupact.log and
       skipped, so the redundancy is free.
     -->
-    <component name="Microsoft-Windows-PnpCustomizationsWinPE"
-               processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35"
-               language="neutral"
-               versionScope="nonSxS">
-      <DriverPaths>
-%{ for i, p in driver_paths ~}
-        <PathAndCredentials wcm:action="add" wcm:keyValue="${i + 1}">
-          <Path>${p}</Path>
-        </PathAndCredentials>
-%{ endfor ~}
-      </DriverPaths>
-    </component>
+    <!--
+      NO PnpCustomizationsWinPE COMPONENT. This is deliberate and was expensive to
+      learn, so the reasoning is recorded rather than the code.
+
+      The obvious way to get VirtIO drivers into WinPE is
+      Microsoft-Windows-PnpCustomizationsWinPE with a DriverPaths list. On this
+      media (Windows Server 2022, SERVER_EVAL_x64FRE_en-us, March 2022) that
+      component causes Setup to abort at "Setup is starting" with:
+
+        Windows could not apply the Windows PE bootstrap setting specified in the
+        unattend answer file.
+
+      Everything the component needs was verified GOOD from a Shift+F10 shell in
+      the failing WinPE itself:
+
+        E: really is the virtio CD                         (dir E: -> vioscsi, NetKVM, ...)
+        the paths really exist                             (E:\vioscsi\2k22\amd64)
+        the driver really loads                            (drvload -> "Successfully loaded")
+        the disk really appears once it has                (wmic diskdrive get size -> 64420392960)
+
+      So the drivers, the path and the drive letter were all correct and the
+      component still refused to apply. Narrowing DriverPaths from sixteen
+      speculative entries to four correct ones did not help either; removing the
+      component was what let Setup proceed.
+
+      RunSynchronous below does the same job by calling the drvload that was
+      proven to work by hand. It runs at the start of windowsPE, before
+      DiskConfiguration needs a disk to partition.
+    -->
 
     <component name="Microsoft-Windows-Setup"
                processorArchitecture="amd64"
@@ -109,6 +126,34 @@
         WillWipeDisk = true is safe here and only here: this is a fresh Packer VM
         with one empty disk.
       -->
+      <!--
+        Load the VirtIO drivers before anything needs a disk.
+
+        Order matters: RunSynchronous executes at the start of windowsPE, so the
+        storage driver is present by the time DiskConfiguration below looks for
+        DiskID 0. Without it WinPE sees no disks and the install dead-ends - which
+        is exactly why the old hand-built dc-01 fell back to SATA and E1000.
+
+        The command SEARCHES for the driver rather than assuming a drive letter.
+        A first attempt hardcoded E:, which is where the virtio CD genuinely ends
+        up once Setup is running - verified from a shell in WinPE. It still did
+        not work, because RunSynchronous executes before optical drives are
+        reliably lettered, so E: did not resolve yet at that moment.
+
+        `if exist` makes a non-matching letter a no-op rather than an error, which
+        is safe here in a way that listing many paths in PnpCustomizationsWinPE
+        was NOT - there, one path that failed to resolve failed the entire pass.
+      -->
+      <RunSynchronous>
+%{ for i, d in driver_dirs ~}
+        <RunSynchronousCommand wcm:action="add">
+          <Order>${i + 1}</Order>
+          <Path>cmd /c for %d in (D E F G H I) do @if exist %d:\${d}\${inf_names[i]} drvload %d:\${d}\${inf_names[i]}</Path>
+          <Description>Load VirtIO ${d}</Description>
+        </RunSynchronousCommand>
+%{ endfor ~}
+      </RunSynchronous>
+
       <DiskConfiguration>
         <WillShowUI>OnError</WillShowUI>
         <Disk wcm:action="add">

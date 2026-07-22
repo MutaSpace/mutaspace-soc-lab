@@ -1,3 +1,44 @@
+# =============================================================================
+# STATUS: THIS TEMPLATE DOES NOT BUILD YET
+# =============================================================================
+#
+# Windows Setup cannot see the virtio-scsi disk, and neither documented mechanism
+# for injecting the driver has worked on this media
+# (SERVER_EVAL_x64FRE_en-us.iso, March 2022, on PVE 9.2.2).
+#
+# WHAT WAS PROVEN GOOD, from a Shift+F10 shell inside the failing WinPE:
+#   * E: really is the virtio CD              dir E:  -> vioscsi, NetKVM, vioserial, viostor
+#   * the driver path really exists           E:\vioscsi\2k22\amd64\vioscsi.inf
+#   * the driver really loads                 drvload -> "Successfully loaded"
+#   * the disk really appears once it has     wmic diskdrive get size -> 64420392960 (60 GB)
+# So the media, the drivers, the paths and the drive letter are all correct.
+#
+# WHAT FAILED, in order:
+#   1. Microsoft-Windows-PnpCustomizationsWinPE with 16 speculative driver paths
+#        -> "Windows could not apply the Windows PE bootstrap setting"
+#   2. The same component narrowed to 4 correct, verified paths
+#        -> identical error. So it is not path correctness.
+#      Bisection: removing the component entirely let Setup proceed, which
+#      identifies it conclusively but does not explain it.
+#   3. RunSynchronous calling the drvload that works by hand, fixed letter
+#        -> bootstrap error gone, Setup reaches disk selection, but:
+#           "Windows needs the driver for device [Red Hat VirtIO SCSI pass-through controller]"
+#   4. RunSynchronous searching D-I with `if exist` so a wrong letter is a no-op
+#        -> identical. RunSynchronous appears to run after disk enumeration.
+#
+# THE LIKELY FIX, NOT YET ATTEMPTED:
+#   Inject the drivers into boot.wim with DISM and build a modified install ISO.
+#   That puts the storage driver in WinPE before Setup starts and removes the
+#   answer file from the problem entirely. It is the deterministic approach and
+#   is what to try next.
+#
+#   The tempting shortcut - fall back to a SATA disk and an E1000 NIC - is what
+#   the original hand-built dc-01 did. It works, and it carries emulated 1990s
+#   hardware forward forever. Prefer fixing the image.
+#
+# Until then dc-01 stays enabled:false in lab.yaml.
+# =============================================================================
+
 # packer/win-server-2022/win-server.pkr.hcl
 #
 # WHAT THIS IS
@@ -217,6 +258,22 @@ variable "windows_image_index" {
   default     = 2
 }
 
+variable "virtio_cd_letter" {
+  type    = string
+  default = "E"
+
+  # Drive letter WinPE assigns to the virtio-win CD.
+  #
+  # X: is WinPE's own ramdisk and optical drives start at D:. This template
+  # attaches three CDs in a fixed order - sata0 install media, sata1 virtio-win,
+  # sata2 the answer-file seed - so virtio is E:.
+  #
+  # Do NOT "make this safer" by listing several letters. Every path listed in
+  # PnpCustomizationsWinPE must resolve; a single bad one fails the entire
+  # windowsPE pass with a message that names none of them.
+  description = "Drive letter of the virtio-win CD inside WinPE. Determined by CD attach order, not guessed."
+}
+
 variable "product_key" {
   type        = string
   description = <<-EOT
@@ -338,9 +395,32 @@ locals {
     "vioserial\\2k22\\amd64" # virtio-serial, the transport the QEMU guest agent uses
   ]
 
-  # WinPE hands X: to its own ramdisk and starts optical drives at D:. Three CDs are
-  # attached, so the virtio ISO is realistically E:. G: is included as slack.
-  candidate_cd_letters = ["D", "E", "F", "G"]
+  # WinPE hands X: to its own ramdisk and starts optical drives at D:. The three
+  # CDs are attached in a DETERMINISTIC order by this template - sata0 the install
+  # media, sata1 virtio-win, sata2 the answer-file seed - so virtio lands on E:.
+  #
+  # NARROWED FROM ["D","E","F","G"] on 2026-07-22, after Windows Setup failed with
+  #
+  #   Windows could not apply the Windows PE bootstrap setting specified in the
+  #   unattend answer file.
+  #
+  # The previous comment here asserted that driver paths which do not exist are
+  # "noted in setupact.log and skipped, so the redundancy is free". That is not
+  # true: 4 letters x 4 driver directories produced 16 PathAndCredentials entries
+  # of which at most 4 could resolve, and windowsPE refused the whole component.
+  # Guessing wide is not free - it is the failure.
+  #
+  # If the CD order ever changes, change this letter rather than adding more.
+  candidate_cd_letters = [var.virtio_cd_letter]
+
+  # The .inf inside each directory above, in the same order. drvload takes a file,
+  # not a directory, so these are paired positionally with virtio_driver_dirs.
+  virtio_inf_names = [
+    "vioscsi.inf",
+    "netkvm.inf",
+    "balloon.inf",
+    "vioser.inf",
+  ]
 
   virtio_driver_paths = flatten([
     for letter in local.candidate_cd_letters : [
@@ -359,9 +439,13 @@ locals {
     admin_password = local.admin_password_xml
     image_index    = var.windows_image_index
     product_key    = var.product_key
-    driver_paths   = local.virtio_driver_paths
-    seed_cd_label  = local.seed_cd_label
-    computer_name  = "PKR-WS22-TPL"
+    # PnpCustomizationsWinPE is not used - see the long comment in the template.
+    # These drive the RunSynchronous drvload commands instead.
+    driver_dirs   = local.virtio_driver_dirs
+    inf_names     = local.virtio_inf_names
+    virtio_cd     = var.virtio_cd_letter
+    seed_cd_label = local.seed_cd_label
+    computer_name = "PKR-WS22-TPL"
   })
 }
 
