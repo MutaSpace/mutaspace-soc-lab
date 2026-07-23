@@ -116,7 +116,13 @@ networks:
     bridge: vmbr2
     cidr: 10.10.20.0/24
     gateway: 10.10.20.1 # fw-01's OPT leg
-    dns: [10.10.20.1] # resolve through the firewall, NOT through the DC
+    # This plane resolves via a public resolver directly, NOT through the firewall.
+    # (Reverses the earlier "resolve through the firewall" note.) Standing up Unbound
+    # on fw-01 hit a genuine OPNsense bug: its DNSBL python module fails to init in the
+    # chroot ("Failed to import encodings module"), so the resolver never comes up. The
+    # isolated plane already has NAT egress and is unmonitored, so pointing it straight
+    # at 1.1.1.1 is acceptable and avoids depending on the broken on-box resolver.
+    dns: [1.1.1.1]
 
   # The build plane.
   #

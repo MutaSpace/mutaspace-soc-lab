@@ -299,6 +299,47 @@
     </rule>
 
     <!--
+      Scenario-runner standing allow rules. These are the ONE narrow, permanent
+      exception to the isolation below: they let kali-01 (10.10.20.10) reach
+      ubuntu-app-01 (10.10.10.30) on tcp/22 and tcp/80 so the ssh-bruteforce and
+      web-sqli scenarios can cross fw-01 to the monitored target. They MUST sit
+      before the block rule underneath, or the block eats them and no scenario
+      traffic ever reaches the SOC LAN. Nothing else on opt1->lan is opened.
+      These mirror the live fw-01 rules exactly, so a template rebuild stays
+      consistent with the running gateway.
+    -->
+    <rule>
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <interface>opt1</interface>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>scenario: kali-01 -> ubuntu-app-01 tcp/22 (SSH)</descr>
+      <source>
+        <address>10.10.20.10</address>
+      </source>
+      <destination>
+        <address>10.10.10.30</address>
+        <port>22</port>
+      </destination>
+    </rule>
+    <rule>
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <interface>opt1</interface>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>scenario: kali-01 -> ubuntu-app-01 tcp/80 (HTTP)</descr>
+      <source>
+        <address>10.10.20.10</address>
+      </source>
+      <destination>
+        <address>10.10.10.30</address>
+        <port>80</port>
+      </destination>
+    </rule>
+
+    <!--
       This block is what makes vmbr2 "isolated". It must come BEFORE the
       permissive rule underneath it, or kali-01 can walk straight onto the
       SOC LAN and the segmentation is decorative.

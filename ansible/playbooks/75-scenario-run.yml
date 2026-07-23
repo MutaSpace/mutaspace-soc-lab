@@ -162,6 +162,49 @@
 
   tasks:
 
+    # DNS FIRST, or nothing below can resolve a mirror. The isolated plane resolves via a public
+    # resolver directly (lab.yaml sets the isolated dns to 1.1.1.1): fw-01's Unbound is a dead end
+    # here - its DNSBL python module fails to init in the OPNsense chroot - and kali-01 already has
+    # NAT egress, so 1.1.1.1 is reachable. kali-01 runs dhcpcd, which starts /etc/resolv.conf empty
+    # of any nameserver. dhcpcd appends the contents of /etc/resolv.conf.tail to every resolv.conf it
+    # writes, so that file is the durable fix; we also repair the live resolv.conf so this run can
+    # resolve immediately without waiting for a lease renewal.
+    - name: Pin a public nameserver for dhcpcd to append (durable)
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf.tail
+        content: "nameserver 1.1.1.1\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # dhcpcd ships resolvconf; if it is present, `resolvconf -u` rebuilds /etc/resolv.conf from the
+    # current leases plus the .tail we just wrote, which is the clean way to apply it now.
+    - name: Check whether resolvconf is available
+      ansible.builtin.command:
+        cmd: command -v resolvconf
+      register: kali_resolvconf
+      changed_when: false
+      failed_when: false
+
+    - name: Rebuild resolv.conf via resolvconf when it is present
+      ansible.builtin.command:
+        cmd: resolvconf -u
+      register: kali_resolvconf_update
+      changed_when: false
+      failed_when: false
+      when: kali_resolvconf.rc == 0
+
+    # Fallback for the case where resolvconf is absent (or a no-op): make sure the live resolv.conf
+    # actually carries the nameserver right now, so the apt refresh below can resolve.
+    - name: Ensure the live resolv.conf carries the public nameserver
+      ansible.builtin.lineinfile:
+        path: /etc/resolv.conf
+        line: "nameserver 1.1.1.1"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+
     # A Kali rolling host can fail a cache refresh for reasons unrelated to this lab (a mirror
     # mid-sync), so surface it without stopping the play - the same stance common_linux takes.
     - name: Refresh the apt cache
