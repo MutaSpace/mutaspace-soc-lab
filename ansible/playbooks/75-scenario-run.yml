@@ -5,10 +5,16 @@
 #
 #   ansible-playbook playbooks/75-scenario-run.yml --tags verify -e scenario_id=ssh-bruteforce
 #
-# In this wave the playbook carries ONLY the `verify` play. Later waves add the attack plays (they
-# start kali-01 and drive hydra/sqlmap against the target); the run path sets a `scenario_run_started_at`
-# fact and then chains into this same verify play, so the contract that proves a scenario worked lives
-# in exactly one place.
+# The playbook is tag-driven, so an operator runs one concern at a time:
+#
+#   --tags verify       the detection contract - did the expected alert reach the indexer
+#   --tags setup        prepare the ground: attack tooling on kali-01, and a manager-health gate
+#   --tags healthcheck  just the manager-health gate (a subset of setup)
+#   --tags tooling      just the kali-01 attack tooling (a subset of setup)
+#
+# Later waves add the attack plays (they drive hydra/sqlmap against the target); the run path sets a
+# `scenario_run_started_at` fact and then chains into the verify play, so the contract that proves a
+# scenario worked lives in exactly one place.
 #
 # ---------------------------------------------------------------------------------------------
 # WHY VERIFY RUNS ON wazuh-01 AND QUERIES THE INDEXER, NOT THE API
@@ -135,3 +141,134 @@
       loop: "{{ _alert_hits.results }}"
       loop_control:
         label: "rule {{ item.item.rule_id }}"
+
+# ---------------------------------------------------------------------------------------------
+# SETUP - make the scenarios physically runnable (not part of the verify contract)
+# ---------------------------------------------------------------------------------------------
+# These plays are tagged `setup` so they never run under `--tags verify`. They prepare the ground a
+# scenario needs before it can be trusted: the attacker's tools, and proof the manager is healthy.
+#
+# POWERING kali-01 ON is deliberately NOT done here. kali-01 is `started: false` in lab.yaml, and
+# starting a VM is a `qm start 108` operation on the Proxmox host - Ansible runs from the jumpbox
+# and has no route to the host's API. The operator (or the scenario:run Taskfile target, in a later
+# wave) starts it on the host first; this play then reaches it across fw-01 over SSH and only
+# installs tools. If kali-01 is off, this play fails fast at the connection, which is the honest
+# signal to go start it.
+- name: Ensure kali-01 carries the scenario attack tooling
+  hosts: kali-01
+  gather_facts: false
+  become: true
+  tags: [setup, tooling]
+
+  tasks:
+
+    # A Kali rolling host can fail a cache refresh for reasons unrelated to this lab (a mirror
+    # mid-sync), so surface it without stopping the play - the same stance common_linux takes.
+    - name: Refresh the apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      register: kali_apt_cache
+      failed_when: false
+
+    # hydra drives the ssh-bruteforce scenario, sqlmap the web-sqli scenario. Both are in Kali's
+    # standard repositories; installing them by name keeps this reproducible rather than relying on
+    # whatever the template happened to ship with.
+    - name: Install the scenario attack tooling
+      ansible.builtin.apt:
+        name:
+          - hydra
+          - sqlmap
+        state: present
+
+    - name: Confirm each attack tool is on PATH
+      ansible.builtin.shell:
+        cmd: "command -v {{ item }}"
+      register: kali_tool_check
+      changed_when: false
+      failed_when: false
+      loop:
+        - hydra
+        - sqlmap
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Assert both attack tools are installed and resolvable
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout | length > 0
+        fail_msg: >-
+          {{ item.item }} is not on PATH on {{ inventory_hostname }} after install. The scenario
+          that depends on it cannot run. Check the apt install output above.
+        success_msg: "{{ item.item }} is present at {{ item.stdout }}"
+      loop: "{{ kali_tool_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+# The rule-collision / manager-health gate. Before any scenario is declared runnable, prove the
+# manager is actually up and analysisd is loaded - a scenario that fires perfectly is worthless if
+# the daemon that would correlate it is down. This reuses the 70-detections auth pattern (POST
+# authenticate?raw=true, then a read against the 55000 API on 127.0.0.1) and asserts on the daemon
+# status. It touches no rules and reloads nothing, so it carries no collision risk of its own.
+- name: Gate - confirm the Wazuh manager is healthy before scenarios run
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+  tags: [setup, healthcheck]
+
+  vars:
+    wazuh_api_base: "https://127.0.0.1:{{ wazuh_api_port }}"
+
+  tasks:
+
+    - name: Obtain a Wazuh API token
+      ansible.builtin.uri:
+        url: "{{ wazuh_api_base }}/security/user/authenticate?raw=true"
+        method: POST
+        url_username: "{{ wazuh_api_user }}"
+        url_password: "{{ wazuh_api_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: wazuh_auth
+      no_log: true
+
+    - name: Confirm a token was issued
+      ansible.builtin.assert:
+        that:
+          - wazuh_auth.content | default('') | length > 0
+        fail_msg: >-
+          The Wazuh API did not return a token. Check MUTASPACE_WAZUH_API_USER and
+          MUTASPACE_WAZUH_API_PASSWORD against .secrets/wazuh-passwords.txt.
+        success_msg: "Authenticated to the Wazuh API"
+
+    # /manager/status returns one object of daemon -> state. analysisd is the correlation engine
+    # (no analysisd, no alerts) and remoted is the agent-ingest listener (no remoted, no events from
+    # kali's target). Both must be running for a scenario to have any chance of proving itself.
+    - name: Ask the manager for its daemon status
+      ansible.builtin.uri:
+        url: "{{ wazuh_api_base }}/manager/status"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ wazuh_auth.content }}"
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: manager_status
+      no_log: true
+
+    - name: Assert analysisd and remoted are running
+      ansible.builtin.assert:
+        that:
+          - _daemons['wazuh-analysisd'] | default('unknown') == 'running'
+          - _daemons['wazuh-remoted'] | default('unknown') == 'running'
+        fail_msg: >-
+          The Wazuh manager is not healthy: wazuh-analysisd is
+          '{{ _daemons['wazuh-analysisd'] | default('unknown') }}' and wazuh-remoted is
+          '{{ _daemons['wazuh-remoted'] | default('unknown') }}'. Scenarios cannot be trusted until
+          both are 'running'. Check `/var/ossec/logs/ossec.log` on wazuh-01.
+        success_msg: "Manager healthy: analysisd and remoted are running"
+      vars:
+        _daemons: "{{ manager_status.json.data.affected_items[0] }}"

@@ -1,0 +1,12 @@
+# roles/wazuh_localfile_nginx/handlers/main.yml
+#
+# Handlers for the Nginx access-log localfile role.
+---
+# Deferred to the end of the play on purpose: an agent restarted mid-configuration re-reads a
+# half-written ossec.conf. Restarting only once the block is fully in place is the whole point of a
+# handler, and it matches the restart handler the wazuh_agent_linux role already uses.
+- name: Restart wazuh-agent
+  ansible.builtin.systemd_service:
+    name: wazuh-agent
+    state: restarted
+    daemon_reload: true

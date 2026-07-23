@@ -68,6 +68,15 @@
         status_code: 200
       changed_when: false
 
+    # A running Nginx that the agent does not read is not telemetry, in exactly the way the header
+    # of this playbook describes. This role appends the <localfile> that forwards the access log to
+    # the manager, which is what makes the built-in web rules able to fire. It belongs in the
+    # standard instrumented baseline, not at scenario time - the endpoint is either instrumented or
+    # it is not.
+    - name: Forward the Nginx access log to the Wazuh manager
+      ansible.builtin.include_role:
+        name: wazuh_localfile_nginx
+
 - name: Configure the Windows workstation
   hosts: win-client-01
   gather_facts: false

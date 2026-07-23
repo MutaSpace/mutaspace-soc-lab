@@ -1,0 +1,17 @@
+# roles/wazuh_localfile_nginx/defaults/main.yml
+#
+# Defaults for the Nginx access-log localfile role. Overridable per host, though in this lab the
+# only carrier is ubuntu-app-01 and the paths below are Wazuh's and Nginx's own defaults.
+---
+# The agent configuration this role appends a <localfile> block to. ossec.conf legitimately holds
+# more than one <ossec_config> root, so a second block is the supported way to add a log source
+# without editing the block the installer wrote.
+wazuh_localfile_nginx_config_path: /var/ossec/etc/ossec.conf
+
+# The log the agent must forward. Nginx's Debian package writes the combined access log here, and
+# it is the source the built-in web rules (Wazuh's 31100-series) decode.
+wazuh_localfile_nginx_location: /var/log/nginx/access.log
+
+# `apache` is Wazuh's decoder name for the NCSA combined log format, which Nginx also emits. There
+# is no separate `nginx` log_format - selecting `apache` is what lets 31103/31106 and their kin fire.
+wazuh_localfile_nginx_log_format: apache

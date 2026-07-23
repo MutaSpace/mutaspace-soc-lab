@@ -1,0 +1,46 @@
+# roles/wazuh_localfile_nginx/tasks/main.yml
+#
+# Tell the Wazuh agent to read the Nginx access log.
+#
+# Installing Nginx creates /var/log/nginx/access.log, but the agent does not forward it unless
+# ossec.conf names it. Without this block Nginx logs every request and the SIEM never sees one -
+# so the built-in web rules (31103/31106 and their siblings) cannot fire no matter how much traffic
+# the server takes. This is the Linux mirror of the Sysmon-channel block in 60-endpoints.yml: the
+# same failure mode (a sensor that runs perfectly and stays invisible) and the same fix.
+---
+# blockinfile appends a second <ossec_config> root guarded by its own marker. The marker is the
+# idempotency guard the Sysmon block does by hand with a string test: on a re-run blockinfile finds
+# the marker, sees the content is unchanged, and reports ok - the block is never duplicated. The
+# marker is written as an XML comment so ossec.conf stays well-formed.
+- name: Forward the Nginx access log to the Wazuh manager
+  ansible.builtin.blockinfile:
+    path: "{{ wazuh_localfile_nginx_config_path }}"
+    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK - nginx access.log localfile -->"
+    block: |
+      <ossec_config>
+        <localfile>
+          <location>{{ wazuh_localfile_nginx_location }}</location>
+          <log_format>{{ wazuh_localfile_nginx_log_format }}</log_format>
+        </localfile>
+      </ossec_config>
+  notify: Restart wazuh-agent
+
+# A block that was written is not proof that the location string the web rules key on is actually
+# present - a bad template or a hand-edit could leave the file without it. Reading the file back and
+# asserting on the location closes that gap, the same way the agent role asserts on client.keys.
+- name: Read the agent configuration back
+  ansible.builtin.slurp:
+    src: "{{ wazuh_localfile_nginx_config_path }}"
+  register: wazuh_localfile_nginx_ossec_conf
+
+- name: Assert the Nginx access log is now a monitored localfile
+  ansible.builtin.assert:
+    that:
+      - wazuh_localfile_nginx_location in (wazuh_localfile_nginx_ossec_conf.content | b64decode)
+    fail_msg: >-
+      {{ wazuh_localfile_nginx_location }} is not present in
+      {{ wazuh_localfile_nginx_config_path }} on {{ inventory_hostname }}. The agent will not forward
+      Nginx access logs, so the built-in web rules cannot fire.
+    success_msg: >-
+      {{ inventory_hostname }} forwards {{ wazuh_localfile_nginx_location }}
+      ({{ wazuh_localfile_nginx_log_format }} format) to the manager
