@@ -1,127 +1,130 @@
 # Resume Here
 
-A running note for picking the build back up. This is the scratchpad;
-docs/iac/session-handoff.md is the durable overview and getting-started.md is the
-operator walkthrough.
+Scratch handoff for picking the work back up. docs/iac/session-handoff.md is the durable
+overview; getting-started.md is the operator walkthrough.
 
-**Last updated: 2026-07-23 — end of the template-build session. 4 of 6 templates built.**
-
----
-
-## Stop state (read this first)
-
-Everything is committed and pushed. No builds running. Host is clean.
-
-| VMID | Template | State |
-|---|---|---|
-| 9000 | `tpl-ubuntu-server-2404` | **BUILT** — on the host |
-| 9001 | `tpl-ubuntu-desktop-2404` | **BUILT** — clone-verified |
-| 9002 | `tpl-win-server-2022` | **BUILT** — see the salvage note below; the rebuild path has a known race |
-| 9004 | `tpl-opnsense-267` | **BUILT** — the hard one; config seed verified on disk, not yet on boot |
-| 9003 | `win11-client` | **NOT built.** Reaches WinPE, aborts before partitioning. Diagnosed — see below |
-| 9005 | `kali-rolling` | **NOT built.** Installs fully, then first boot hangs before the guest agent starts. Diagnosed — see below |
-
-Confirm on the host, don't trust this table:
-```
-ssh swc2026 'for f in /etc/pve/qemu-server/*.conf; do grep -q "^template: 1" "$f" && echo "$(basename $f .conf) $(grep ^name: $f)"; done'
-```
-
-Host is **swc2026** at 10.1.1.2 (SSH alias in ~/.ssh/config; reached over WireGuard from this
-workstation). Four gitignored, machine-local files that do NOT travel with `git clone`:
-`.envrc`, `packer/common.pkrvars.hcl`, `packer/kali-rolling/kali.pkrvars.hcl`, and the build
-SSH key `~/.ssh/id_ed25519_mutaspace_lab*`. On a different machine, recreate or `scp` them,
-and re-derive `http_bind_address` for that machine's network.
+**Last updated: 2026-07-23 — the lab is DEPLOYED and mid-configuration. Context was cleared here.**
 
 ---
 
-## The two templates that do NOT build yet — each has a clear next step
+## One-paragraph state
 
-### 9005 Kali — first boot hangs before the guest agent starts
-The installer now runs fully unattended (fixed: `http_bind_address`, `boot_keygroup_interval`,
-a 404'd ISO URL, an `iso_file` name collision) and reaches "installing the base system" — then
-fails at "Timeout waiting for SSH". **Diagnosed:** the qemu guest agent never responds across
-the whole wait, not even loopback. Since the agent speaks over virtio-serial (network-
-independent) and Debian auto-starts it on install, its total absence means **first boot never
-reaches multi-user.target** — most likely a cloud-init first-boot hang.
-
-**The one test that decides it next session:** during the SSH-wait window, screendump the
-console. A login prompt ⇒ boot finished (agent/package problem). A frozen cloud-init line or an
-emergency shell ⇒ the boot hang. (Prior attempts screenshotted during *install*, so the
-evidence auto-deleted with the VM. Do it during the wait.) Likely fix, in `packer/kali-rolling/`:
-disable cloud-init's first-boot network management via the preseed `late_command`, keeping
-cloud-init for clone identity. `ssh_timeout` is currently 15m for fast iteration; restore 60m
-when green.
-
-### 9003 Windows 11 — WinPE aborts, but the real blocker is catching the CD
-Setup aborts in WinPE before partitioning (scsi0 verified blank). Two hypotheses, unchanged:
-**(A, leading)** a "This PC can't run Windows 11" compat-halt, because the LabConfig bypass runs
-via `RunSynchronous` *after* Setup's compat scan; **(B)** the w11 vioscsi driver didn't load.
-
-**The meta-problem that blocks the diagnosis:** the "Press any key to boot from CD" prompt is a
-~6-second window that recurs only once per ~40–60s firmware boot loop, because the boot order
-grinds through PXE-v4 → PXE-v6 → HTTP-v4 → HTTP-v6 with multi-second timeouts each. This is NOT
-host-load-dependent (confirmed at load 0.08). A bounded keystroke burst cannot reliably land in
-the 6s window; only a ~200-press flood catches it — and that flood dismisses the WinPE error
-dialog before it can be read. So until the CD can be caught with a *bounded* burst, the dialog
-that would pick A vs B can't be seen.
-
-**Fix the boot-catch FIRST next session:** shorten the firmware's network-boot fallthrough so the
-CD prompt recurs quickly (e.g. trim the boot order / disable PXE+HTTP netboot in the VM's OVMF
-boot entries so it goes straight back to the CD), OR use a boot method that doesn't depend on the
-narrow window. Then read the dialog: if compat-halt (A), move the LabConfig bypass earlier
-(winpeshl.ini before setup.exe) WITHOUT weakening the real vTPM; if "no drives" (B),
-Shift+F10 → `wmic diskdrive get size` to check the w11 driver, as the Server template was solved.
-Full detail is in the big `boot_command` comment in `packer/win11-client/win11-client.pkr.hcl`.
+Five core VMs are cloned from templates and running. dc-01 is a promoted domain controller
+(`mutaspace.local`), DNS (forward + reverse) resolves, and the Wazuh SIEM was installing on
+wazuh-01 when we paused. Ansible currently runs **from the Proxmox host** (manual state — see
+below); a `jumpbox-01` VM was just added to lab.yaml to replace that but is **not applied yet**.
+Win11 (9003) is the one unbuilt template, now well-diagnosed. Everything is committed and
+pushed except nothing — the tree is clean at the jumpbox commit.
 
 ---
 
-## 9002 Windows Server was SALVAGED — the rebuild path has a race
+## The host and how to reach things
 
-9002 is a valid generalized template, but note HOW it got there: the build completed sysprep
-(`GeneralizationState = 0x7`, verified) and then HUNG. `sysprep /generalize` restarts WinRM,
-which severs Packer's held session; Packer then blocks on a dead socket until a ~2h timeout, at
-which point its cleanup would DESTROY the VM. The image was salvaged manually: SIGKILL the hung
-packer PIDs (so no destroy-cleanup runs), then `qm stop 9002`, detach the build CDs
-(`qm set 9002 --delete sata0,sata1,sata2,sata3`), `qm template 9002`.
+- **Proxmox host:** `swc2026` at `10.1.1.2`. SSH alias in `~/.ssh/config`, reached over
+  WireGuard from this workstation. Key: `~/.ssh/id_ed25519_proxmox`.
+- **The host was given management IPs on the lab bridges** (`10.10.10.2` on vmbr1, `10.10.20.2`
+  on vmbr2, persisted via post-up in /etc/network/interfaces) so it can reach the lab VMs. This
+  is a stopgap the jumpbox replaces.
+- **Ansible runs from the host** right now: `/root/ansible/` (rsynced from this repo), collections
+  installed, `python3-winrm` installed, secrets at `/root/ansible/.secrets/env` (mode 600).
+- Load the lab creds before any ansible command: `set -a; . /root/ansible/.secrets/env; set +a`
+  then `cd /root/ansible`.
 
-**This is an intermittent race** (an earlier run won it and reached teardown normally). For the
-"instructors rebuild Windows locally" model to be reliable, HARDEN it: have `99-sysprep.ps1` use
-`/shutdown` and let the builder detect the shutdown, instead of `/quit` + waiting on WinRM. Until
-then, a clean rebuild may hit the 2h hang, and the salvage recipe above is the recovery.
-
----
-
-## Design correction landed this session
-Suricata is **core** in OPNsense 26.7, not a plugin. Decision D-04 assumed installing
-`os-suricata`; that package does not exist in 26.7 and its absence was aborting the whole
-install. Fixed in the OPNsense template; **decisions.md D-04 still needs updating to match.**
+### Credentials (in /root/ansible/.secrets/env on the host)
+- `MUTASPACE_WIN_ADMIN_PASSWORD` = `***REMOVED-ROTATED-CREDENTIAL***` (also the domain admin password)
+- `MUTASPACE_SAFE_MODE_PASSWORD`, `MUTASPACE_LAB_USER_PASSWORD` = generated, in the file
+- `MUTASPACE_LINUX_USER` = `labadmin`, `MUTASPACE_LINUX_SSH_KEY` = `/root/.ssh/lab_key`
+  (a copy of `~/.ssh/id_ed25519_mutaspace_lab`)
+- `ANSIBLE_HOST_KEY_CHECKING=False` (lab VMs are resettable; keys change)
 
 ---
 
-## What was committed this session
-- OPNsense template (built) — commit "Build the OPNsense firewall template (9004)"
-- Kali progress (not building) — "Kali template: real fixes, still blocked on a first-boot hang"
-- Win11 progress (not building) — "Windows 11 template: real fixes, still blocked in WinPE"
-- Plus earlier: the `enabled` flag, three PVE privileges (SDN.Use, VM.GuestAgent.Audit,
-  Datastore.Allocate), the `$WinPEDriver$` Windows fix, the netplan-match Desktop fix, and the
-  self-guiding CLAUDE.md + getting-started.md.
+## VM state (verify: `ssh swc2026 'qm list'`)
 
-## The rules that bit us (keep them)
-- **Kill a build ONLY by captured PID.** `pkill -x packer` killed a concurrent build;
-  `pgrep -f 'packer build.*name'` matched its own shell. Always
-  `setsid nohup packer build ... & echo $! > pidfile`, then `kill "$(cat pidfile)"`.
-- **Verify on the host, never assume.** `qm list`, `qm config`, the console screendump.
-- **Screendump during the phase you're debugging**, not the previous one — the VM auto-deletes
-  on failure and takes the evidence with it (both Kali attempts lost evidence this way).
-- **Fix the script, not just the host** — the three privileges are in bootstrap-host.sh because
-  of this.
+| VMID | VM | State | Configured |
+|---|---|---|---|
+| 100 | fw-01 | running | OPNsense gateway; config seed applied; routes + NATs; serves DHCP |
+| 102 | dc-01 | running | **Promoted DC** `mutaspace.local`; DNS forward+reverse; admin pw reset (see gaps) |
+| 103 | analyst-01 | running | Ubuntu Desktop; DHCP reservation .50 |
+| 104 | wazuh-01 | running | **Wazuh installing** (was mid-install at pause; check `/tmp/wazuh-install.log`) |
+| 106 | ubuntu-app-01 | running | bare clone; nginx/ssh pending (60-endpoints) |
+| 108/109/110 | kali-01 / untrusted-01 / nlp-01 | **created, started:false** | need `qm start` before configuring |
+| 206/216/226 | kali learners | created, started:false | learner plane |
+| 101 | **jumpbox-01** | **NOT created** | in lab.yaml, not applied |
+| 105 | win-client-01 | **disabled** | template 9003 not built |
 
-## Next-session order (least friction first)
-1. **Kali** — one screendump during SSH-wait decides the cloud-init hypothesis; likely a small
-   preseed change. Probably the quickest win.
-2. **Win11** — solve the boot-catch (trim the OVMF netboot fallthrough) first, THEN read the
-   dialog and apply fix A or B.
-3. Update **decisions.md D-04** for the Suricata correction, and **harden the Windows Server
-   sysprep/shutdown** path.
-4. Then flip built machines to `enabled: true` in lab.yaml and start on `tofu apply` +
-   the Ansible layer — none of which has been exercised yet (see getting-started.md Part 4).
+---
+
+## Ansible playbook progress (in /root/ansible/playbooks/, run from the host)
+
+| Playbook | Status |
+|---|---|
+| 10-dc-promote | **done** (finished manually — see the reboot gap below) |
+| 20-dns-records | **done** (A + reverse zone + PTR resolve) |
+| 40-wazuh-server | **was installing at pause** — check `ssh swc2026 'tail -30 /tmp/wazuh-install.log'` |
+| 50-wazuh-agents | pending |
+| 60-endpoints | pending (nginx on ubuntu-app-01; Sysmon needs win-client, not built) |
+| 70-detections | pending |
+| 80-ai-assist | pending — installs **Ollama on nlp-01** (start nlp-01 first). The `ai/` Python tooling (detection copilot, lab assistant) drives it |
+| 90-lab-seed | pending — creates test.user / lab.user02 (the incident scenarios need them) |
+
+Run pattern: `ssh swc2026 'set -a; . /root/ansible/.secrets/env; set +a; cd /root/ansible; ansible-playbook -i inventory/hosts.yml playbooks/<pb>'`
+
+---
+
+## THE NEXT STEP: stand up jumpbox-01
+
+jumpbox-01 is in lab.yaml (VMID 101, 10.10.10.5, ubuntu-server template) but not applied. Plan:
+1. `cd tofu; tofu apply` — creates jumpbox-01 (single new VM; the rest are `No changes`).
+2. Write `scripts/bootstrap-jumpbox.sh`: installs ansible + collections + pywinrm, stages the
+   repo (`ansible/`, `ai/`), the SSH key, and a `.secrets/env` on the jumpbox. This captures what
+   is currently manual host state.
+3. Reach it: `ssh -J root@10.1.1.2 labadmin@10.10.10.5` (jump through the host).
+4. Move the config playbooks off the host onto the jumpbox; then the host's vmbr1/vmbr2 mgmt IPs
+   can go away.
+
+---
+
+## Design gaps found this session (each needs a code fix for reproducibility)
+
+1. **Windows admin password is non-deterministic after sysprep.** The Windows cloud-init snippet
+   (`tofu/templates/user-data-windows.tftpl`) deliberately sets no password, and dc-01 uses
+   `cicustom` so there is no `cipassword` — Cloudbase-Init leaves it random. Ansible could not
+   auth; fixed manually via `qm guest exec 102 -- net.exe user Administrator ***REMOVED-ROTATED-CREDENTIAL***`.
+   **Fix:** have the snippet set a known password from a variable.
+2. **dc-promote reboot.** `microsoft.ad.domain` completed the forest but exited code 4 (reboot
+   required) and the module's post-reboot re-auth failed (local admin → domain admin). `reboot:
+   true` is already set. Rebooted manually. **Fix:** tune the post-promotion reconnect, and note
+   the reverse-zone task lives after promotion in 10-dc-promote (it never ran because of this,
+   which is why 20-dns needed the zone created by hand).
+3. **Provider SSH needs a PAM user** — used root (`PROXMOX_VE_SSH_USERNAME=root`, key in agent).
+   bootstrap-host.sh should create a `terraform` PAM user with narrow sudo.
+4. **Three provision privileges** found on first apply — `Sys.Modify`, `Realm.AllocateUser`,
+   `User.Modify` — already added to bootstrap-host.sh (provision role at 31 privs).
+5. **Disk floors:** a clone cannot shrink below its template base. dc-01 50→60, Win11 60/50→64.
+
+---
+
+## Win11 (9003) — NOT built, well-diagnosed
+
+Boot-catch **solved** (spacebar is OVMF's menu hotkey; drive the menu: spam spacebar to park on
+HARDDISK, `<down>` to the install DVD, `<enter>`, then answer the CD prompt — in the template's
+boot_command now). The install then **silently resets at the WinPE→Setup handoff** — NOT a compat
+check (no dialog). Root cause: **virtio-win 0.1.271 crashes the Windows 11 25H2 WinPE kernel**,
+plus a deeper vTPM/media reset. **Fix (outside packer/win11-client/):** rebuild
+`virtio-winpe-drivers-w11.iso` from a virtio-win that supports 25H2 (build 26100); optionally a
+one-off diagnostic build with `tpm_config` removed to isolate the deeper reset. Everything else
+in the E2E works without it.
+
+---
+
+## Git
+
+Branch `feat/infrastructure-as-code`, pushed. HEAD = jumpbox commit (`8cd3ef0`). `tofu test` 14/14.
+The Windows/OPNsense manual ISOs are on the host's `local:iso` shelf.
+
+---
+
+## The five templates that ARE built (on the host)
+9000 ubuntu-server, 9001 ubuntu-desktop, 9002 win-server, 9004 opnsense, 9005 kali. Only
+9003 win11 is missing.
