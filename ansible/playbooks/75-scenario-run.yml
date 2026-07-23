@@ -1,0 +1,137 @@
+# playbooks/75-scenario-run.yml
+#
+# The incident-scenario runner. It sits in the free 75 slot between 70-detections and 90-lab-seed,
+# and it is driven entirely by the catalogue in ansible/scenarios.yml plus one variable:
+#
+#   ansible-playbook playbooks/75-scenario-run.yml --tags verify -e scenario_id=ssh-bruteforce
+#
+# In this wave the playbook carries ONLY the `verify` play. Later waves add the attack plays (they
+# start kali-01 and drive hydra/sqlmap against the target); the run path sets a `scenario_run_started_at`
+# fact and then chains into this same verify play, so the contract that proves a scenario worked lives
+# in exactly one place.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY VERIFY RUNS ON wazuh-01 AND QUERIES THE INDEXER, NOT THE API
+# ---------------------------------------------------------------------------------------------
+# 70-detections talks to the 55000 API to MANAGE rules. Verify asks a different question - "did the
+# alert actually land?" - and only the indexer (OpenSearch on 9200) can answer it, because that is
+# where alerts are stored. Running on the manager itself keeps the query on 127.0.0.1: the control
+# node needs no route to the SOC LAN and no copy of the manager's self-signed CA, exactly as
+# 70-detections argues. validate_certs is false for that same scoped, loopback-only reason.
+#
+# THE VERIFY CONTRACT
+# ---------------------------------------------------------------------------------------------
+# For the selected scenario, each `expected_alerts` entry is turned into a bool query on
+# wazuh-alerts-*: rule.id must match, every field in `match` must match, and @timestamp must be
+# within the scenario's window. The query is polled (until/retries/delay derived from
+# latency_budget_seconds) until the indexer holds at least `min_count` hits, then asserted with a
+# diagnostic naming the rule, fields, window and observed count. A standalone verify (no preceding
+# attack play) defaults the window to the last 15 minutes so a manually-tripped alert can be proven.
+---
+- name: Verify a scenario's expected alerts reached the Wazuh indexer
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+  tags: [verify]
+
+  vars:
+    wazuh_indexer_base: "https://127.0.0.1:{{ wazuh_indexer_port }}"
+    # A standalone verify has no attack timestamp to anchor to, so it looks back over a fixed
+    # window. When the run path calls verify it passes a concrete scenario_run_started_at instead,
+    # which narrows the query to the alerts that attack produced.
+    scenario_window_start: "{{ scenario_run_started_at | default('now-15m') }}"
+    # Poll cadence. retries per alert is derived from its latency_budget_seconds below.
+    scenario_poll_delay: 10
+
+  tasks:
+
+    - name: Require a scenario id
+      ansible.builtin.assert:
+        that:
+          - scenario_id is defined
+          - scenario_id | length > 0
+        fail_msg: >-
+          scenario_id is not set. Pass it, e.g.
+          `-e scenario_id=ssh-bruteforce`. See ansible/scenarios.yml for the catalogue.
+        success_msg: "Verifying scenario '{{ scenario_id }}'"
+      run_once: true
+
+    - name: Load the scenario catalogue
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../scenarios.yml"
+        name: _catalogue
+      run_once: true
+
+    - name: Select the requested scenario
+      ansible.builtin.set_fact:
+        scenario: "{{ _catalogue.scenarios | selectattr('id', 'equalto', scenario_id) | first }}"
+      run_once: true
+
+    - name: Confirm the scenario exists in the catalogue
+      ansible.builtin.assert:
+        that:
+          - scenario is defined
+          - scenario.id | default('') == scenario_id
+        fail_msg: >-
+          No scenario '{{ scenario_id }}' in ansible/scenarios.yml. Known ids:
+          {{ _catalogue.scenarios | map(attribute='id') | join(', ') }}.
+        success_msg: "Scenario '{{ scenario_id }}' has {{ scenario.expected_alerts | length }} expected alert(s)"
+      run_once: true
+
+    # Build a bool query per expected alert and poll the indexer until it holds min_count hits or the
+    # latency budget is spent. The must array is assembled here rather than in scenarios.yml so the
+    # catalogue stays a plain contract: rule.id, then one match_phrase per `match` field, then the
+    # time window. no_log hides the basic-auth credentials on every retry.
+    - name: Query the indexer for each expected alert within its latency budget
+      ansible.builtin.uri:
+        url: "{{ wazuh_indexer_base }}/wazuh-alerts-*/_search"
+        method: POST
+        url_username: "{{ wazuh_indexer_user }}"
+        url_password: "{{ wazuh_indexer_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          size: 0
+          query:
+            bool:
+              must: "{{ _alert_must | from_yaml }}"
+        return_content: true
+        status_code: 200
+      vars:
+        _alert_must: >-
+          {%- set c = [{'match': {'rule.id': item.rule_id}}] -%}
+          {%- for k, v in item.match.items() -%}
+          {%- set _ = c.append({'match_phrase': {k: v}}) -%}
+          {%- endfor -%}
+          {%- set _ = c.append({'range': {'@timestamp': {'gte': scenario_window_start}}}) -%}
+          {{ c }}
+      register: _alert_hits
+      no_log: true
+      until: (_alert_hits.json.hits.total.value | default(0) | int) >= (item.min_count | int)
+      retries: "{{ ((item.latency_budget_seconds | int) // (scenario_poll_delay | int)) + 1 }}"
+      delay: "{{ scenario_poll_delay }}"
+      failed_when: false
+      loop: "{{ scenario.expected_alerts }}"
+      loop_control:
+        label: "rule {{ item.rule_id }}"
+
+    # A dedicated assert, so the diagnostic names the rule, fields, window and the count actually
+    # observed - the failure message an instructor reads when a scenario did not fire.
+    - name: Assert every expected alert was observed within budget
+      ansible.builtin.assert:
+        that:
+          - (item.json.hits.total.value | default(0) | int) >= (item.item.min_count | int)
+        fail_msg: >-
+          Scenario '{{ scenario_id }}': expected rule.id {{ item.item.rule_id }} matching
+          {{ item.item.match }} at least {{ item.item.min_count }} time(s) since
+          {{ scenario_window_start }}, but the indexer returned
+          {{ item.json.hits.total.value | default(0) }} within
+          {{ item.item.latency_budget_seconds }}s. Confirm the attack ran, the agent is connected,
+          and that {{ item.item.rule_id }} is the rule that actually fires (confirm-on-host).
+        success_msg: >-
+          rule.id {{ item.item.rule_id }} observed
+          {{ item.json.hits.total.value | default(0) }} time(s) (>= {{ item.item.min_count }})
+      loop: "{{ _alert_hits.results }}"
+      loop_control:
+        label: "rule {{ item.item.rule_id }}"

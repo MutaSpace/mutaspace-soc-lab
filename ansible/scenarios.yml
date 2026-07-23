@@ -1,0 +1,87 @@
+# scenarios.yml
+#
+# The scenario catalogue: the single source of truth for what an incident scenario IS, what it does,
+# and - crucially - what proves it worked. `scenario:list`, `scenario:run` and `scenario:verify` all
+# read this one file, so a scenario's behaviour and its pass/fail contract can never drift apart.
+#
+# WHY A DECLARATIVE CATALOGUE, NOT CODE PER SCENARIO
+# ---------------------------------------------------------------------------------------------
+# Adding a scenario is meant to be adding a list entry here and nothing else. The verify harness
+# (playbooks/75-scenario-run.yml) is generic: it loops over `expected_alerts` and queries the Wazuh
+# indexer for each. There is no per-scenario Python, no per-scenario task - the contract below is the
+# whole specification. Keep new entries in the same shape and the tooling picks them up for free.
+#
+# THE EXPECTED-ALERT CONTRACT
+# ---------------------------------------------------------------------------------------------
+# Each `expected_alerts` item is a claim of the form: "within `latency_budget_seconds` of the attack,
+# the Wazuh indexer will hold at least `min_count` alerts whose `rule.id` is `rule_id` AND whose
+# fields satisfy every key in `match`". `match` keys are raw indexer field paths (dotted), so they
+# map one-to-one onto the bool query verify builds. That is deliberate: what a reader sees here is
+# exactly what is asked of Elasticsearch/OpenSearch, with no translation layer to get wrong.
+#
+# RULE IDS ARE CONFIRM-ON-HOST, NOT ASSERTED BLIND
+# ---------------------------------------------------------------------------------------------
+# The `rule_id` values below are the built-in Wazuh rules the proposal EXPECTS to fire (ssh brute
+# force: 5710/5712/5720; web attack: 31103/31106). They are seeded as the starting hypothesis. The
+# operator confirms on the host which rule actually fires (query the indexer or read the dashboard)
+# and pins the observed id here - per CLAUDE.md, this repo does not claim a result it did not observe.
+---
+
+scenarios:
+
+  - id: ssh-bruteforce
+    title: "SSH brute force against the Linux application server"
+    attack: T1110              # ATT&CK: Brute Force
+    origin: kali-01            # 10.10.20.10, isolated segment (vmbr2)
+    target: ubuntu-app-01      # 10.10.10.30, SOC LAN (vmbr1)
+    objective: >-
+      Drive a burst of failed SSH authentications from the attacker at 10.10.20.10 against
+      ubuntu-app-01 until the manager's built-in brute-force logic fires, giving the class a
+      repeatable T1110 alert to investigate.
+    prereqs: >-
+      kali-01 powered on with hydra installed; the standing fw-01 allow rule permitting
+      10.10.20.0/24 -> 10.10.10.30:22; OpenSSH running on ubuntu-app-01 with its Wazuh agent
+      connected. Attack tooling and firewall reconciliation are Wave 2, not part of verify.
+    reset_targets: [106, 108]  # ubuntu-app-01, kali-01 - never wazuh-01 (104)
+    expected_alerts:
+      # CONFIRMED ON HOST (swc2026, 2026-07-23): a burst of failed SSH logins against ubuntu-app-01
+      # fires built-in rule 5710 ("Attempt to login using a non-existent user", 14x) and the T1110
+      # brute-force composite 5712 ("brute force trying to get access", 1x). 5720/5716 did NOT fire
+      # in that run, so they are deliberately not asserted. data.srcip is the attacker; it reads
+      # 10.10.20.10 when the real attack runs from kali-01 (Wave 3).
+      - rule_id: 5710
+        match:
+          data.srcip: "10.10.20.10"
+          agent.name: "ubuntu-app-01"
+        min_count: 1
+        latency_budget_seconds: 120
+      - rule_id: 5712
+        match:
+          data.srcip: "10.10.20.10"
+          agent.name: "ubuntu-app-01"
+        min_count: 1
+        latency_budget_seconds: 120
+
+  - id: web-sqli
+    title: "SQL-injection probing of the Nginx application"
+    attack: T1190              # ATT&CK: Exploit Public-Facing Application
+    origin: kali-01            # 10.10.20.10, isolated segment (vmbr2)
+    target: ubuntu-app-01      # 10.10.10.30, SOC LAN (vmbr1)
+    objective: >-
+      Send SQL-injection request patterns from the attacker at 10.10.20.10 to the Nginx site on
+      ubuntu-app-01, producing access-log lines that the web ruleset flags as a T1190 web attack.
+    prereqs: >-
+      kali-01 powered on with sqlmap installed; the standing fw-01 allow rule permitting
+      10.10.20.0/24 -> 10.10.10.30:80; Nginx serving on ubuntu-app-01 AND the agent forwarding
+      /var/log/nginx/access.log (the localfile is added in Wave 2 - without it 31103/31106 cannot
+      fire). Instrumentation is Wave 2, not part of verify.
+    reset_targets: [106, 108]  # ubuntu-app-01, kali-01 - never wazuh-01 (104)
+    expected_alerts:
+      # Built-in web rules. 31103 = SQL-injection pattern in a URL; 31106 = a common web attack
+      # returning a 200. Confirm-on-host which fires and keep only the observed id(s).
+      - rule_id: 31103
+        match:
+          data.srcip: "10.10.20.10"
+          agent.name: "ubuntu-app-01"
+        min_count: 1
+        latency_budget_seconds: 120

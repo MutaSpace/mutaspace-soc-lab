@@ -603,3 +603,40 @@ tasks:
       - >-
         ssh -t "$LAB_HOST_SSH"
         'sudo bash /tmp/learner-reset.sh {{.LEARNER}} {{.CLI_ARGS}}; rm -f /tmp/learner-reset.sh'
+
+  # =========================================================================
+  # Incident scenarios
+  # =========================================================================
+  #
+  # A scenario is an attack (from the catalogue in ansible/scenarios.yml) run
+  # against a target, plus the machine-checkable proof that the attack fired
+  # the expected Wazuh rule. `scenario:verify` is that proof: it queries the
+  # Wazuh indexer on wazuh-01 and asserts the expected rule.id + fields landed
+  # within the scenario's latency budget, so a scenario cannot be declared to
+  # work on a hunch.
+  #
+  # Unlike the learner tasks these run Ansible, not `qm` on the host, so they
+  # need the indexer credentials in the environment - the same admin/indexer
+  # password the installer wrote into ansible/.secrets/wazuh-passwords.txt.
+  # Export it before running; nothing here reads it from a file.
+
+  scenario:verify:
+    desc: >-
+      Prove a scenario's expected alerts reached the Wazuh indexer, within its
+      latency budget. Queries wazuh-01 over the API path; does not run the
+      attack. Usage: task scenario:verify -- ssh-bruteforce
+    preconditions:
+      - sh: 'test -n "{{.CLI_ARGS}}"'
+        msg: >-
+          No scenario named. Usage: task scenario:verify -- ssh-bruteforce
+          (see ansible/scenarios.yml for the catalogue).
+      - sh: 'test -n "$MUTASPACE_WAZUH_INDEXER_PASSWORD"'
+        msg: >-
+          MUTASPACE_WAZUH_INDEXER_PASSWORD is not set. The installer generates
+          it --- read the indexer/admin password out of
+          ansible/.secrets/wazuh-passwords.txt after `task ansible:wazuh-server`.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/75-scenario-run.yml
+        --tags verify -e scenario_id={{.CLI_ARGS}}

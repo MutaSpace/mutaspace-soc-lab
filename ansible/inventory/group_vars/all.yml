@@ -56,6 +56,11 @@ wazuh_manager_fqdn: "wazuh-01.{{ lab_domain }}"
 # The Wazuh API listens on 55000. The dashboard is the separate HTTPS service on 443.
 wazuh_api_port: 55000
 
+# The indexer (OpenSearch) listens on 9200. This is where the alerts land, and it is what the
+# scenario verify harness queries with _search - a different service from the 55000 API, which only
+# manages rules and agents. On the all-in-one box it is reachable on 127.0.0.1, same as the API.
+wazuh_indexer_port: 9200
+
 # Custom rule IDs must live in Wazuh's reserved user range, 100000-120000. Anything outside it can
 # collide with a shipped rule on the next ruleset update.
 wazuh_local_rules_file: local_rules.xml
@@ -96,6 +101,15 @@ wazuh_api_user: >-
   {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_API_USER', default='wazuh') }}
 wazuh_api_password: >-
   {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_API_PASSWORD', default=Undefined) }}
+
+# Wazuh indexer (OpenSearch) credentials, used only by the scenario verify harness to query
+# _search on 127.0.0.1:9200. Distinct from the 55000 API account above: the installer seeds an
+# `admin` indexer user and writes its password alongside the API one into lab_secrets_dir. The
+# operator exports both before running scenario:verify.
+wazuh_indexer_user: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_INDEXER_USER', default='admin') }}
+wazuh_indexer_password: >-
+  {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_INDEXER_PASSWORD', default=Undefined) }}
 
 # ---------------------------------------------------------------------------------------------
 # AI assist - the local model
