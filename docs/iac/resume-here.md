@@ -10,8 +10,8 @@ overview; getting-started.md is the operator walkthrough.
 ## One-paragraph state
 
 Five core VMs are cloned from templates and running. dc-01 is a promoted domain controller
-(`mutaspace.local`), DNS (forward + reverse) resolves, and the Wazuh SIEM was installing on
-wazuh-01 when we paused. Ansible currently runs **from the Proxmox host** (manual state — see
+(`mutaspace.local`), DNS (forward + reverse) resolves, and the Wazuh SIEM finished installing on
+wazuh-01. Ansible currently runs **from the Proxmox host** (manual state — see
 below); a `jumpbox-01` VM was just added to lab.yaml to replace that but is **not applied yet**.
 Win11 (9003) is the one unbuilt template, now well-diagnosed. Everything is committed and
 pushed except nothing — the tree is clean at the jumpbox commit.
@@ -46,7 +46,7 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 | 100 | fw-01 | running | OPNsense gateway; config seed applied; routes + NATs; serves DHCP |
 | 102 | dc-01 | running | **Promoted DC** `mutaspace.local`; DNS forward+reverse; admin pw reset (see gaps) |
 | 103 | analyst-01 | running | Ubuntu Desktop; DHCP reservation .50 |
-| 104 | wazuh-01 | running | **Wazuh installing** (was mid-install at pause; check `/tmp/wazuh-install.log`) |
+| 104 | wazuh-01 | running | **Wazuh installed** (all-in-one assistant completed; verify dashboard on :443) |
 | 106 | ubuntu-app-01 | running | bare clone; nginx/ssh pending (60-endpoints) |
 | 108/109/110 | kali-01 / untrusted-01 / nlp-01 | **created, started:false** | need `qm start` before configuring |
 | 206/216/226 | kali learners | created, started:false | learner plane |
@@ -61,7 +61,7 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 |---|---|
 | 10-dc-promote | **done** (finished manually — see the reboot gap below) |
 | 20-dns-records | **done** (A + reverse zone + PTR resolve) |
-| 40-wazuh-server | **was installing at pause** — check `ssh swc2026 'tail -30 /tmp/wazuh-install.log'` |
+| 40-wazuh-server | **done** — all-in-one assistant completed; next verify the dashboard |
 | 50-wazuh-agents | pending |
 | 60-endpoints | pending (nginx on ubuntu-app-01; Sysmon needs win-client, not built) |
 | 70-detections | pending |
