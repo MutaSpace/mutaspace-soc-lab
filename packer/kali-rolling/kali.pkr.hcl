@@ -139,14 +139,74 @@ variable "build_bridge" {
 
 variable "iso_url" {
   type        = string
-  default     = "https://cdimage.kali.org/kali-2025.4/kali-linux-2025.4-installer-amd64.iso"
-  description = "PLACEHOLDER - verify this filename exists at https://cdimage.kali.org/ before building. Kali rolls roughly quarterly and old images are removed."
+  # Verified resolving 2026-07-23: cdimage.kali.org 302-redirects this to
+  # https://kali.download/base-images/kali-2026.2/... The 2025.4 placeholder this
+  # replaced had already aged out and 404'd - Kali keeps only recent releases, so
+  # re-verify this filename at https://cdimage.kali.org/ before every build and bump
+  # iso_checksum in lockstep.
+  default     = "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-amd64.iso"
+  description = "Kali installer ISO. Verify the filename still exists at https://cdimage.kali.org/ before building; Kali rolls roughly quarterly and old images are removed. Ignored when kali_iso_file is set."
 }
 
 variable "iso_checksum" {
-  type        = string
-  default     = "none"
-  description = "Set to sha256:<hash> from the SHA256SUMS file next to the ISO. 'none' skips verification and Packer will warn on every build, which is the correct amount of nagging."
+  type = string
+
+  # Pinned 2026-07-23 for kali-linux-2026.2-installer-amd64.iso, read from
+  # https://kali.download/base-images/kali-2026.2/SHA256SUMS (the mirror that
+  # cdimage.kali.org's 302 redirects to; the cdimage SHA256SUMS served empty over
+  # plain curl). Verify against SHA256SUMS.gpg for a proper signature check.
+  #
+  # WHY THIS IS NOW A REAL VALUE, NOT "none": the template shipped with "none" while
+  # it was written offline, on the principle that a checksum typed from memory is
+  # worse than none because it LOOKS like verification. This one was read from Kali's
+  # published sums file at build time. If you bump iso_url to a newer Kali release you
+  # MUST bump this too - a stale checksum fails the download loudly, which is the safe
+  # failure, not the silent one where a truncated ISO boots strangely weeks later.
+  default     = "sha256:6dbefacc95e3b556c19c48e8bae39b8b505e2d3a1aba0bfb7ab62b036c3d2ba3"
+  description = "sha256:<hash> from the SHA256SUMS file next to the ISO. Bump alongside iso_url. Ignored when kali_iso_file is set (a host-side ISO is trusted as already-verified)."
+}
+
+variable "kali_iso_file" {
+  type    = string
+  default = ""
+
+  # A Kali installer ISO ALREADY on the Proxmox host, e.g.
+  #   kali_iso_file = "local:iso/kali-linux-2026.2-installer-amd64.iso"
+  # When set, Packer neither downloads nor uploads anything and boots straight from it.
+  #
+  # WHY A KALI-SPECIFIC NAME AND NOT THE UBUNTU TEMPLATE'S `iso_file`:
+  #   common.pkrvars.hcl binds the generic `iso_file` to the UBUNTU server ISO, shared
+  #   across every build. If this template declared `iso_file` it would silently inherit
+  #   that value and try to boot a Kali VM from the Ubuntu installer. This is exactly why
+  #   the Windows templates use their own `windows_iso_file` instead of `iso_file`, set in
+  #   a per-template pkrvars file rather than in common. This follows that precedent.
+  #
+  # Empty means "use iso_url + iso_checksum", which downloads to the workstation and then
+  # uploads to the host - correct for a first run, but a ~4 GB push over the VPN every
+  # build, so prefer the host-side ISO once it is in place.
+  description = "Pre-uploaded Kali ISO on the host, e.g. local:iso/kali-linux-2026.2-installer-amd64.iso. Takes precedence over iso_url. Distinct from common's `iso_file` (which is the Ubuntu ISO)."
+}
+
+variable "http_bind_address" {
+  type    = string
+  default = ""
+
+  # The address Packer's built-in HTTP server binds to, and what {{ .HTTPIP }} expands
+  # to in the boot command's preseed/url=. Empty means auto-detect.
+  #
+  # PIN THIS whenever the workstation has more than one interface. Packer advertises a
+  # SINGLE auto-detected address, and that heuristic has no idea which of the workstation's
+  # interfaces the build VM can route back to. This workstation reaches the lab over a
+  # WireGuard tunnel and has ~ten local interfaces (docker0, several br-*, virbr0, tun0);
+  # if Packer advertises any of the wrong ones the installer requests the preseed from an
+  # address that does not exist on its network, the fetch fails, and debian-installer falls
+  # back to asking questions nobody answers - a silent hang identical to a mangled boot
+  # command. common.pkrvars.hcl pins this to the WireGuard address for exactly this reason.
+  #
+  # WAS MISSING on the first real build: the variable existed nowhere and the source block
+  # never set http_bind_address, so Packer auto-detected and the preseed fetch was at the
+  # mercy of interface ordering. Wired in to match packer/ubuntu-server-2404.
+  description = "Address Packer serves the preseed on. Empty = auto-detect (only safe with one interface); pin it on a multi-homed workstation."
 }
 
 # ---------------------------------------------------------------------------------------
@@ -283,16 +343,39 @@ source "proxmox-iso" "kali-rolling" {
 
   # --- Boot media -------------------------------------------------------------------
   boot_iso {
-    type             = "ide"
-    index            = "2"
-    iso_url          = var.iso_url
-    iso_checksum     = var.iso_checksum
+    type  = "ide"
+    index = "2"
+
+    # Two ways to supply the installer, mirroring packer/ubuntu-server-2404:
+    #   kali_iso_file set -> boot an ISO ALREADY on the host, nothing downloaded or
+    #                        uploaded. Strongly preferred once the ISO is on the host,
+    #                        because the alternative re-pushes ~4 GB over the VPN every build.
+    #   kali_iso_file ""  -> download from iso_url to the workstation and verify iso_checksum,
+    #                        then upload to the host. Correct for a first run or a clean host.
+    # Precedence is explicit so a half-set pair fails loudly rather than doing something in
+    # between. Note this uses kali_iso_file, NOT the generic iso_file, which common.pkrvars
+    # binds to the Ubuntu ISO - see the kali_iso_file variable comment.
+    iso_file         = var.kali_iso_file != "" ? var.kali_iso_file : null
+    iso_url          = var.kali_iso_file == "" ? var.iso_url : null
+    iso_checksum     = var.kali_iso_file == "" ? var.iso_checksum : null
     iso_storage_pool = var.iso_storage_pool
     unmount          = true
+
+    # Inside the block the key is `unmount`, NOT `unmount_iso` - the top-level spelling
+    # emits a removal warning and the wrong in-block spelling is an "unsupported argument".
   }
 
   boot      = "order=scsi0;ide2"
   boot_wait = "10s"
+
+  # Type slowly. Packer drives the console through QEMU's `sendkey`, one keystroke at a
+  # time over the API, and at full speed keystrokes are DROPPED (Proxmox plugin issues
+  # #237/#220, "sendkey: EOF"). The Ubuntu templates learned this the hard way - a dropped
+  # character in `initrd /casper/initrd` produced a kernel panic, "VFS: Unable to mount
+  # root fs on unknown-block(0,0)". This template's boot_command is LONGER and more fragile
+  # (a full preseed/url= line typed at a `boot:` prompt), so the same 100ms interval applies
+  # here. WAS MISSING on the first real build - copied from ubuntu-server-2404.
+  boot_keygroup_interval = "100ms"
 
   # Disk first, CD second: on the first boot the disk is empty and SeaBIOS falls through to
   # the ISO; after the install the disk is bootable and wins. Without this, the installer's
@@ -304,6 +387,12 @@ source "proxmox-iso" "kali-rolling" {
 
   # --- Preseed over HTTP ------------------------------------------------------------
   http_content = local.http_content
+
+  # Bind the seed server to a pinned address on a multi-homed workstation. Empty =
+  # auto-detect. WAS MISSING on the first real build - without it Packer advertises an
+  # auto-detected {{ .HTTPIP }}, and on this ten-interface workstation the installer can
+  # request the preseed from an unreachable address and silently hang. See the variable.
+  http_bind_address = var.http_bind_address
 
   boot_command = [
     # The Kali installer ISO boots isolinux on BIOS firmware. <esc> at the menu drops to a
@@ -362,7 +451,17 @@ source "proxmox-iso" "kali-rolling" {
   communicator           = "ssh"
   ssh_username           = var.ssh_username
   ssh_private_key_file   = var.ssh_private_key_file
-  ssh_timeout            = "60m"
+  # TEMPORARILY 15m while diagnosing the first-build SSH failure (see below). Restore to
+  # 60m once the build is green: 60m is not padding, it covers the whole unattended install
+  # plus apt fetching packages over the network before sshd is even reachable.
+  #
+  # FIRST REAL BUILD FAILED HERE, 2026-07-23: the install completed but Packer sat at
+  # "Waiting for SSH to become available..." for the full timeout and then deleted the VM
+  # with "Timeout waiting for SSH." Packer discovers the guest IP through the qemu guest
+  # agent (qemu_agent = true), so the two candidate causes are (a) the agent never came up
+  # so there was no IP to connect to, or (b) the IP was known but sshd/key auth rejected the
+  # connection. Root cause and fix recorded where they belong once diagnosed live.
+  ssh_timeout            = "15m"
   ssh_handshake_attempts = 100
 
   qemu_agent = true
