@@ -665,18 +665,35 @@ source "proxmox-iso" "win11-client" {
   #
   # WITH the network-free boot order set above (see `boot = "order=scsi0;sata0"`),
   # the CD "press any key" prompt recurs every few seconds after POST instead of
-  # once per ~50 s. So the burst no longer has to hit a single narrow window in a
-  # long loop; it only has to be firing at any point once POST is done.
+  # once per ~50 s.
   #
-  # vTPM POST is ~40-70 s and variable. boot_wait 30 s starts the burst before the
-  # earliest POST completion, and ~60 spacebars at 1 s span t=30-90 s, which covers
-  # the whole POST-uncertainty range. Once POST finishes, the prompt is up almost
-  # continuously, so a 1 s-interval press lands in it within a press or two. This
-  # is a bounded burst that ENDS by ~t=90 s, well before Setup reaches WinPE — so,
-  # unlike the old ~200-press flood, it does not dismiss the WinPE error dialog if
-  # the install then fails (which mattered for reading that dialog).
-  boot_wait    = "30s"
-  boot_command = ["<spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar>"]
+  # THE PURE-SPACEBAR BURST DOES NOT ACTUALLY BOOT THE CD. FOUND BY SCREENDUMP 2026-07-23.
+  # On THIS firmware a spacebar at the "Press any key to boot from CD or DVD..." prompt
+  # is intercepted as the OVMF BOOT-MENU HOTKEY, not consumed as "any key": every
+  # spacebar opens (or, once open, re-holds) the "Please select boot device" menu. So
+  # the old burst just parked the VM in that menu forever, Packer then waited out its
+  # 2 h winrm_timeout, and the CD never booted. Screendumps showed the menu sitting on
+  # its default highlight "UEFI QEMU QEMU HARDDISK" with the install CD one row below.
+  #
+  # THE DETERMINISTIC PATH THAT DOES WORK, verified by hand with `qm sendkey`:
+  #   1. The boot-device menu has NO timeout. Once open it stays put on HARDDISK, so a
+  #      spacebar burst spanning the whole POST-uncertainty window (~45-120 s, and it
+  #      IS that variable under vTPM + a busy host) leaves the menu deterministically
+  #      open on HARDDISK no matter WHEN POST finished. Extra spacebars are harmless:
+  #      spacebar is not a menu action key, so it neither moves the highlight nor
+  #      dismisses the menu (only up/down move, enter selects, esc exits).
+  #   2. One <down> moves the highlight HARDDISK -> "UEFI QEMU DVD-ROM QM00013", which
+  #      is sata0, the Windows install media. (QM00015/17/19 are the other three SATA
+  #      CDs.) <enter> commits to booting it.
+  #   3. Committing to QM00013 DISARMS the boot-menu hotkey, so the Windows
+  #      "Press any key to boot from CD" prompt that follows finally treats <enter> as
+  #      "any key" and boots WinPE. The spaced <enter>s cover that ~5 s window.
+  #
+  # boot_wait 20 s starts phase 1 before the earliest POST; 55 spacebars at 2 s span
+  # t=20-130 s, covering the slow tail. The string is generated, not hand-typed --
+  # see the phaseA/B/C construction recorded in the commit for 2026-07-23.
+  boot_wait    = "20s"
+  boot_command = ["<spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><down><wait1s><enter><wait2s><enter><wait2s><enter><wait2s><enter><wait2s><enter>"]
 
   # --- communicator ---------------------------------------------------------
   #
