@@ -681,3 +681,52 @@ tasks:
       - >-
         ansible-playbook -i {{.INVENTORY}} playbooks/75-scenario-run.yml
         --tags verify -e scenario_id={{.CLI_ARGS}}
+
+  # snapshot/reset run `qm` ON the Proxmox node over SSH, exactly like the
+  # learner:* pair above --- so they scp the script to /tmp and run it there with
+  # a real tty (scenario:reset prompts before it discards the targets' state).
+  # They deliberately do NOT touch wazuh-01 (104): the whole point is that the
+  # alerts a student fired survive a reset for grading. The target set is fixed
+  # to 106 (ubuntu-app-01) and 108 (kali-01) inside the script; nothing passed
+  # here can widen it.
+
+  scenario:snapshot:
+    desc: >-
+      Take the one-time "scenario-baseline" snapshot of the scenario targets
+      (106 ubuntu-app-01, 108 kali-01), on the Proxmox host over SSH. Run ONCE,
+      deliberately, AFTER instrumentation is proven. wazuh-01 (104) is never
+      touched. Usage: task scenario:snapshot (add -- --replace to move it).
+    preconditions:
+      - sh: 'test -f {{.SCRIPTS_DIR}}/scenario-snapshot.sh'
+        msg: 'scripts/scenario-snapshot.sh is missing.'
+      - sh: 'test -n "$LAB_HOST_SSH"'
+        msg: >-
+          LAB_HOST_SSH is not set. `qm` only exists on the Proxmox node, so this
+          runs there over SSH. Set it to root@<LAB_MANAGEMENT_IP> --- see
+          .envrc.example section 1.
+    cmds:
+      - scp {{.SCRIPTS_DIR}}/scenario-snapshot.sh "$LAB_HOST_SSH":/tmp/scenario-snapshot.sh
+      - >-
+        ssh -t "$LAB_HOST_SSH"
+        'sudo bash /tmp/scenario-snapshot.sh {{.CLI_ARGS}}; rm -f /tmp/scenario-snapshot.sh'
+
+  scenario:reset:
+    desc: >-
+      Roll the scenario targets (106 ubuntu-app-01, 108 kali-01) back to
+      "scenario-baseline", start them, repair clock+agent and check the reset
+      landed clean --- on the Proxmox host over SSH. wazuh-01 (104) is preserved
+      so the fired alerts stay queryable. The scenario id is passed for messaging
+      only; the target set is fixed. Usage: task scenario:reset -- ssh-bruteforce
+    preconditions:
+      - sh: 'test -f {{.SCRIPTS_DIR}}/scenario-reset.sh'
+        msg: 'scripts/scenario-reset.sh is missing.'
+      - sh: 'test -n "$LAB_HOST_SSH"'
+        msg: >-
+          LAB_HOST_SSH is not set. `qm` only exists on the Proxmox node, so this
+          runs there over SSH. Set it to root@<LAB_MANAGEMENT_IP> --- see
+          .envrc.example section 1.
+    cmds:
+      - scp {{.SCRIPTS_DIR}}/scenario-reset.sh "$LAB_HOST_SSH":/tmp/scenario-reset.sh
+      - >-
+        ssh -t "$LAB_HOST_SSH"
+        'sudo bash /tmp/scenario-reset.sh {{.CLI_ARGS}}; rm -f /tmp/scenario-reset.sh'
