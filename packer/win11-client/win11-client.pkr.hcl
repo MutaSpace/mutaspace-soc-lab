@@ -226,6 +226,39 @@ variable "windows_image_index" {
   default     = 1
 }
 
+variable "winpe_driver_iso_file" {
+  type    = string
+  default = "local:iso/virtio-winpe-drivers-w11.iso"
+
+  # A small ISO whose root contains a $WinPEDriver$ folder. Windows Setup scans
+  # attached volumes for that folder by name and loads the drivers inside it before
+  # the disk list is drawn - no answer file, no drive letter to guess.
+  #
+  # NOTE THE `-w11` SUFFIX. This is NOT the server template's iso: the driver
+  # directories baked inside differ (w11 vs 2k22), and loading a 2k22 storage driver
+  # into a Windows 11 install is the mistake that appears to work and then produces
+  # intermittent storage errors months later. Build it on the Proxmox host with:
+  #   build-winpe-driver-iso.sh --variant w11 --out .../virtio-winpe-drivers-w11.iso
+  # It is derived from the pinned virtio-win ISO, so it is a build artifact.
+  description = "ISO containing a root $WinPEDriver$ folder built from the w11 virtio drivers. Built by build-winpe-driver-iso.sh --variant w11."
+}
+
+variable "virtio_cd_letter" {
+  type    = string
+  default = "E"
+
+  # Drive letter WinPE assigns to the virtio-win CD.
+  #
+  # X: is WinPE's own ramdisk and optical drives start at D:. This template attaches
+  # four CDs in a fixed order - sata0 install media, sata1 virtio-win, sata2 the
+  # answer-file seed, sata3 the $WinPEDriver$ volume - so virtio-win is E:.
+  #
+  # This is vestigial now that drivers arrive via $WinPEDriver$ rather than by a
+  # drive-letter-positional answer-file path. It is kept only so this template stays
+  # diffable against the server one; nothing in the answer file consumes it.
+  description = "Drive letter of the virtio-win CD inside WinPE. Determined by CD attach order, not guessed."
+}
+
 variable "product_key" {
   type        = string
   description = <<-EOT
@@ -307,18 +340,26 @@ variable "efi_pre_enrolled_keys" {
 }
 
 # ---------------------------------------------------------------------------
-# VirtIO driver injection
+# VirtIO driver injection -- via $WinPEDriver$, exactly as the server template
 #
-# Same mechanism as the server template, different driver directories: `w11` rather
-# than `2k22`. Loading a Server 2022 driver into a Windows 11 install is one of those
-# mistakes that appears to work and then produces intermittent storage errors later.
+# WHY NOT AN ANSWER-FILE MECHANISM. Both were tried first on the server media and
+# neither works (the full history is in packer/win-server-2022/win-server.pkr.hcl):
 #
-# THE DRIVE-LETTER PROBLEM. Drive letters in an answer file are positional. WinPE
-# assigns them in device order, so adding or reordering an `additional_iso_files`
-# block shifts D:/E:/F: and silently breaks injection -- and the symptom is "Setup
-# found no disks", which points nowhere near the cause. We cannot run a lookup script
-# in windowsPE, so every plausible letter is listed for every driver directory. Paths
-# that do not exist are logged in setupact.log and skipped.
+#   Microsoft-Windows-PnpCustomizationsWinPE  -> Setup aborts at "Setup is starting"
+#     with "Windows could not apply the Windows PE bootstrap setting specified in the
+#     unattend answer file", even with every path verified to exist.
+#   RunSynchronous drvload  -> Setup reaches the disk list and still refuses the disk:
+#     drvload loads a driver into memory but does not STAGE it for injection into the
+#     installed OS, and a boot-critical controller that is not staged is rejected.
+#
+# WHAT WORKS. Windows Setup scans the ROOT of every attached volume for a folder named
+# exactly `$WinPEDriver$`, loads what it finds AND schedules it for injection into the
+# installed OS -- the half drvload could not do. No answer file to reject it, no drive
+# letter to guess. build-winpe-driver-iso.sh --variant w11 builds that volume from the
+# w11 virtio driver directories; this template attaches it as sata3.
+#
+# The w11 (not 2k22) directories matter: a Server 2022 storage driver in a Windows 11
+# install appears to work and then produces intermittent storage errors months later.
 # ---------------------------------------------------------------------------
 
 locals {
@@ -330,6 +371,10 @@ locals {
 
   seed_cd_label = "PACKERCD"
 
+  # w11 = the Windows 11 driver directories on the virtio-win ISO. These describe what
+  # the $WinPEDriver$ volume must contain; they are no longer referenced by the answer
+  # file (see the header above), but are kept -- like the server template's 2k22 list --
+  # so the two templates stay diffable and the intent stays documented.
   virtio_driver_dirs = [
     "vioscsi\\w11\\amd64",  # storage controller -- without this, no disks are found
     "NetKVM\\w11\\amd64",   # network -- without this, no WinRM and the build hangs
@@ -337,7 +382,20 @@ locals {
     "vioserial\\w11\\amd64" # virtio-serial, the transport the QEMU guest agent uses
   ]
 
-  candidate_cd_letters = ["D", "E", "F", "G"]
+  # NARROWED FROM ["D","E","F","G"] on 2026-07-22 to match the server template. When the
+  # server still injected drivers through the answer file, guessing four letters x four
+  # directories produced 16 PathAndCredentials entries and windowsPE refused the whole
+  # PnpCustomizationsWinPE component -- guessing wide was the failure, not a free safety
+  # net. Vestigial now that drivers come from $WinPEDriver$; kept for diffability.
+  candidate_cd_letters = [var.virtio_cd_letter]
+
+  # The .inf inside each directory above, paired positionally. Vestigial, as above.
+  virtio_inf_names = [
+    "vioscsi.inf",
+    "netkvm.inf",
+    "balloon.inf",
+    "vioser.inf",
+  ]
 
   virtio_driver_paths = flatten([
     for letter in local.candidate_cd_letters : [
@@ -356,9 +414,14 @@ locals {
     admin_password = local.admin_password_xml
     image_index    = var.windows_image_index
     product_key    = var.product_key
-    driver_paths   = local.virtio_driver_paths
-    seed_cd_label  = local.seed_cd_label
-    computer_name  = "PKR-WIN11-TPL"
+    # PnpCustomizationsWinPE is not used - drivers arrive via $WinPEDriver$. These are
+    # passed for parity with the server template's templatefile call; the answer file
+    # no longer references them.
+    driver_dirs   = local.virtio_driver_dirs
+    inf_names     = local.virtio_inf_names
+    virtio_cd     = var.virtio_cd_letter
+    seed_cd_label = local.seed_cd_label
+    computer_name = "PKR-WIN11-TPL"
   })
 }
 
@@ -479,17 +542,18 @@ source "proxmox-iso" "win11-client" {
 
   # --- boot media -----------------------------------------------------------
   #
-  # THREE CDs, all on SATA, indices pinned.
+  # FOUR CDs, all on SATA, indices pinned.
   #
   # Why SATA and not IDE: q35 exposes only a stub IDE controller (ide0/ide2), which is
-  # not enough ports for three CDs. q35's AHCI controller gives six, and WinPE has a
-  # native AHCI driver.
+  # not enough ports for four CDs. q35's AHCI controller gives six (sata0-sata5), and
+  # WinPE has a native AHCI driver.
   #
   # Why the CDs are NOT on the virtio-scsi controller: chicken and egg. WinPE would
   # need the vioscsi driver to read the CD that contains the vioscsi driver.
   #
-  # Why the indices are explicit: reordering these blocks shifts drive letters and
-  # silently breaks driver injection.
+  # Why the indices are explicit: the $WinPEDriver$ mechanism does not care about drive
+  # letters, but the seed ISO's setup.ps1 finds itself by volume label and the whole
+  # set stays easier to reason about pinned.
 
   boot_iso {
     type     = "sata"
@@ -499,6 +563,21 @@ source "proxmox-iso" "win11-client" {
     # Detach before the template is created. NOTE the key is `unmount`, not
     # `unmount_iso` -- the latter was the deprecated top-level field.
     unmount = true
+  }
+
+  # The $WinPEDriver$ volume. Windows Setup scans the root of every attached volume for
+  # a folder with this exact name and drvloads whatever it finds AND stages it for
+  # injection, BEFORE it enumerates storage for the disk list. That timing -- earlier
+  # than RunSynchronous -- and the staging step are the whole point. It does not go
+  # through the answer file, which is what rejected PnpCustomizationsWinPE.
+  #
+  # Built on the Proxmox host by build-winpe-driver-iso.sh --variant w11: ~30 MB of the
+  # four w11 drivers WinPE actually needs, rather than the full 693 MB virtio ISO.
+  additional_iso_files {
+    type     = "sata"
+    index    = 3
+    iso_file = var.winpe_driver_iso_file
+    unmount  = true
   }
 
   additional_iso_files {
@@ -548,9 +627,67 @@ source "proxmox-iso" "win11-client" {
   #
   # Several spacebars over several seconds beats one perfectly-timed keystroke. The
   # extra presses land in an unattended Setup UI where nothing waits for input.
-  # Expect to re-tune `boot_wait` on first contact with real hardware.
+  #
+  # RE-TUNED 2026-07-22 ON FIRST CONTACT WITH THE REAL HOST -- AND STILL AN OPEN ISSUE.
+  # Read this before you touch the timing OR conclude the template works.
+  #
+  # THE CD-PROMPT IS A MOVING TARGET ON THIS OS. VM 9002 (server) and 9003 (this one)
+  # are byte-identical in firmware -- same OVMF, same q35, same 2023 Secure Boot certs,
+  # same boot order scsi0;sata0;net0 -- EXCEPT 9003 has a vTPM 2.0 (mandatory for Win11).
+  # The vTPM adds measured-boot work, so the "Press any key to boot from CD or DVD"
+  # prompt appears at a WILDLY VARIABLE time: observed anywhere from ~45s (host idle) to
+  # >120s (host running three other template builds at once). The server, with no vTPM,
+  # POSTs in a few seconds and catches the prompt with five spacebars; here five is
+  # hopeless. Miss the prompt and the firmware falls through:
+  #   Press any key to boot from CD or DVD......
+  #   BdsDxe: failed to start Boot0002 "UEFI QEMU DVD-ROM" ... Time out
+  #   >>Start PXE over IPv4 ... >>Start HTTP Boot ... No bootable option or device
+  #
+  # The burst below (boot_wait 4s + ~45 spacebars, one per second, t=4-49s) is tuned for
+  # a NORMAL serial build on an unloaded host, where POST is fast like the server's. When
+  # the host is saturated by concurrent builds the prompt drifts past 49s and this MISSES
+  # -- the only thing that reliably caught it under a 3-4 build load was ~200 presses
+  # (boot_wait 1s + one/sec to t=200s). Widen it if you build several templates at once;
+  # do not widen it needlessly on an idle host (surplus keys are implicated below).
+  #
+  # ############################################################################
+  # # UNRESOLVED: THE INSTALL ITSELF FAILS AFTER THE CD BOOTS. NOT YET FIXED.  #
+  # #                                                                          #
+  # # On the runs where the wide burst DID catch the prompt, the CD booted     #
+  # # into WinPE (Proxmox splash + Windows boot spinner) and then, within ~2   #
+  # # minutes, the VM REBOOTED to a disk that never boots:                     #
+  # #   BdsDxe: No bootable option or device was found.                        #
+  # # Reading scsi0 (local-lvm:vm-9003-disk-1) directly off the host proved    #
+  # # the disk is BLANK: no protective MBR, no "EFI PART" GPT header, ~0       #
+  # # non-zero bytes in the first 50 MB. So Windows Setup ABORTED IN WinPE     #
+  # # BEFORE it ever partitioned the disk. It reproduced at low host load, so  #
+  # # it is NOT resource starvation of the image-apply.                        #
+  # #                                                                          #
+  # # Two candidate causes, not yet distinguished (a flood-free WinPE console  #
+  # # observation was impossible: catching the CD needs the wide key burst,    #
+  # # and those surplus keys dismiss whatever error dialog WinPE puts up,      #
+  # # which is likely what triggers the reboot):                              #
+  # #   1. "This PC can't run Windows 11" -- the LabConfig BypassStorageCheck  #
+  # #      /BypassCPUCheck reg writes are done via RunSynchronous in the       #
+  # #      windowsPE pass, which can run AFTER Setup's own compatibility scan  #
+  # #      on some media. The 60 GB disk (< 64 GB) and host-passthrough CPU    #
+  # #      (not on Microsoft's allow-list) both fail that scan natively, so if #
+  # #      the bypass is too late Setup halts. This is the more Win11-specific #
+  # #      suspect -- the server has no such check and installs fine.          #
+  # #   2. Setup found no disk -- the w11 vioscsi from $WinPEDriver$ did not    #
+  # #      load. Less likely: the identical mechanism with the 2k22 driver     #
+  # #      works on the server, and the w11 driver is present on the ISO.      #
+  # #                                                                          #
+  # # HOW TO FINISH THIS: build with NO other template building (idle host),   #
+  # # so POST is fast, this ~45-press burst catches the CD with few surplus    #
+  # # keys, and the WinPE error dialog stays on screen. Screendump it. If it   #
+  # # is the compat screen, move the LabConfig bypass earlier (a winpeshl.ini  #
+  # # / earlier RunSynchronous, NOT weakening the real vTPM). If it is "no     #
+  # # drives found", check the w11 vioscsi actually loaded (Shift+F10 ->       #
+  # # wmic diskdrive get size), as was done to solve the server template.     #
+  # ############################################################################
   boot_wait    = "4s"
-  boot_command = ["<spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar>"]
+  boot_command = ["<spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar>"]
 
   # --- communicator ---------------------------------------------------------
   #

@@ -8,11 +8,13 @@
     ISO labelled PACKERCD.
 
   HOW IT DIFFERS FROM THE SERVER 2022 ANSWER FILE
-    1. windowsPE DriverPaths point at the `w11` virtio driver directories, not `2k22`.
-    2. A RunSynchronous block writes the HKLM\System\Setup\LabConfig bypass values.
+    1. A RunSynchronous block writes the HKLM\System\Setup\LabConfig bypass values.
        See the long comment on that block - the vTPM is real, so the interesting
        bypasses are the RAM and CPU ones.
-    3. Everything else is the same by design. Two answer files that diverge for no
+    2. A specialize-pass BypassNRO value keeps OOBE local on the client SKU.
+    3. Everything else is the same by design - including driver injection, which does
+       NOT happen in this answer file: like the server, drivers arrive via the
+       $WinPEDriver$ volume (the `w11` variant). Two answer files that diverge for no
        reason are two answer files nobody can diff.
 
   WHY IT EXISTS
@@ -73,34 +75,28 @@
       shows an empty list and the install dead-ends. The historical workaround, and
       what every hand-built Windows VM in the old lab did, was to fall back to a SATA
       disk and an E1000 NIC - emulated 1990s hardware carried forward forever.
-
-      The driver paths here name the `w11` directories on the virtio-win ISO, not the
-      `2k22` ones the server template uses. Loading a Server 2022 driver into a
-      Windows 11 install is one of those mistakes that appears to work and then
-      produces intermittent storage errors months later.
-
-      PnpCustomizationsWinPE loads drivers INTO WinPE before the disk list is drawn,
-      so Setup sees the real controller and installs onto it. The template then
-      matches every other VM in the lab: scsi0 on virtio-scsi-single, virtio NIC.
-
-      Every plausible CD drive letter is listed for every driver directory because
-      drive letters in an answer file are positional and there is no way to run a
-      lookup script this early. Paths that do not exist are noted in setupact.log and
-      skipped, so the redundancy is free.
     -->
-    <component name="Microsoft-Windows-PnpCustomizationsWinPE"
-               processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35"
-               language="neutral"
-               versionScope="nonSxS">
-      <DriverPaths>
-%{ for i, p in driver_paths ~}
-        <PathAndCredentials wcm:action="add" wcm:keyValue="${i + 1}">
-          <Path>${p}</Path>
-        </PathAndCredentials>
-%{ endfor ~}
-      </DriverPaths>
-    </component>
+    <!--
+      NO DRIVER INJECTION IN THIS ANSWER FILE AT ALL. Both answer-file mechanisms were
+      tried on the server media (full history in win-server-2022/win-server.pkr.hcl)
+      and neither works:
+
+        PnpCustomizationsWinPE  -> "Windows could not apply the Windows PE bootstrap
+                                    setting specified in the unattend answer file",
+                                    even with every path verified to exist.
+        RunSynchronous drvload  -> Setup reaches the disk list and still refuses the
+                                    disk: drvload loads a driver into memory but does
+                                    not STAGE it for injection into the installed OS,
+                                    and a boot-critical controller that is not staged
+                                    is rejected.
+
+      The drivers now arrive via $WinPEDriver$ instead - a folder at the ROOT of an
+      attached volume, which Windows Setup itself scans and drvloads (and stages for
+      injection) before it draws the disk list. No answer-file involvement, so nothing
+      here can reject it. That volume is built on the Proxmox host by
+      build-winpe-driver-iso.sh --variant w11 from the `w11` driver directories (not
+      `2k22`), and attached as an extra CD (sata3) by this template.
+    -->
 
     <component name="Microsoft-Windows-Setup"
                processorArchitecture="amd64"
