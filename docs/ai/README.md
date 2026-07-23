@@ -82,8 +82,10 @@ validated *statically and offline* with `sigma check` and `suricata -T`; failure
 repair prompt; the human reviews the survivor before it is deployed into the lab's ruleset (the
 Wazuh `local_rules.xml` / the Suricata rules dir via IaC). The loop only works because both
 artifact types have a mechanical validator — that is the load-bearing point.
-**Status:** planned — reuse the course's generate-validate-repair scripts against the lab's own
-`suricata -T`.
+**Status:** **built** — `ai/detection_copilot.py` (+ `validators.py`, `prompts/`, sample incidents
+in `ai/samples/`). Runs against sample data now; `sigma check` / `suricata -T` gate the rule when
+installed and degrade to a clearly-marked ungated draft when not. The live model round-trip and the
+repair loop are smoke-tested; not yet run against `nlp-01`'s `qwen2.5:3b`.
 
 ### 3. Lab-grounded analyst assistant — *retrieval over your own docs*
 An assistant (AnythingLLM or the course's small Python chat starter, both on Ollama) grounded on
@@ -91,8 +93,10 @@ An assistant (AnythingLLM or the course's small Python chat starter, both on Oll
 asks "how is the isolated segment supposed to route?" and gets an answer *from the lab's own
 documentation*, with the source, rather than a generic web answer. This is the classroom-assistant
 pattern pointed at the SOC lab's corpus.
-**Status:** planned — embed `docs/` with `nomic-embed-text`; keep the corpus read-only to learners
-(an editable corpus is an indirect-injection surface — the Day 2/Day 3 lesson).
+**Status:** **built** — `ai/assistant.py` embeds `docs/` with `nomic-embed-text` and answers from
+it with citations; the corpus is read-only (an editable corpus is an indirect-injection surface —
+the Day 2/Day 3 lesson). Retrieval/chunking/citation logic is unit-tested; the live embed+answer
+pass is not yet run against `nlp-01`.
 
 ### 4. Incident-scenario copilot — *coach and generate*
 Two uses over `docs/incident-scenarios/`: a **Socratic coach** that walks a learner through an
@@ -128,9 +132,9 @@ This is a security lab; the AI is treated as an attackable component, not a trus
 
 1. **Foundation — done here.** `80-ai-assist.yml` + the `ai_host` group + the `ai_*` vars in
    `group_vars/all.yml`. One local endpoint, validated.
-2. **Assistant (3) and rule copilot (2)** next — neither needs live alerts, so both can be built and
-   reviewed against `docs/` and sample rules now.
-3. **Wazuh triage (1)** once the SIEM is up and producing alerts to ground on.
+2. **Assistant (3) and rule copilot (2) — done.** Both live under `ai/` (see `ai/README.md`), built
+   against `docs/` and sample incidents, neither needing live alerts. Host verification pending.
+3. **Wazuh triage (1)** next — once the SIEM is up and producing alerts to ground on.
 4. **Scenario copilot (4)** last — it leans on the rule copilot's validate loop.
 
 > **Not verified on a host yet.** Per the repo's hard rule, this foundation has been written and

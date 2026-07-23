@@ -1,0 +1,9 @@
+# The AI tools themselves use only the Python standard library — nothing here is needed to
+# run assistant.py or the model client. This file lists the OPTIONAL validator used by the
+# detection copilot to gate generated Sigma rules.
+#
+# Without it, detection_copilot.py still runs and shows drafts ungated (clearly marked); with
+# it, Sigma rules are actually checked. The Suricata validator is the system `suricata`
+# package (apt-get install suricata), not a pip dependency.
+
+sigma-cli>=1.0        # provides `sigma check`, used by validators.sigma_check()
