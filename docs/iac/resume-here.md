@@ -3,7 +3,8 @@
 Scratch handoff for picking the work back up. docs/iac/session-handoff.md is the durable
 overview; getting-started.md is the operator walkthrough.
 
-**Last updated: 2026-07-23 — the lab is DEPLOYED and mid-configuration. Context was cleared here.**
+**Last updated: 2026-07-23 — the lab is DEPLOYED and mid-configuration. jumpbox-01 is now built
+and provisioned as the Ansible control node; config playbooks 50–90 still pending.**
 
 ---
 
@@ -72,16 +73,34 @@ Run pattern: `ssh swc2026 'set -a; . /root/ansible/.secrets/env; set +a; cd /roo
 
 ---
 
-## THE NEXT STEP: stand up jumpbox-01
+## jumpbox-01 — BUILT AND PROVISIONED (2026-07-23)
 
-jumpbox-01 is in lab.yaml (VMID 101, 10.10.10.5, ubuntu-server template) but not applied. Plan:
-1. `cd tofu; tofu apply` — creates jumpbox-01 (single new VM; the rest are `No changes`).
-2. Write `scripts/bootstrap-jumpbox.sh`: installs ansible + collections + pywinrm, stages the
-   repo (`ansible/`, `ai/`), the SSH key, and a `.secrets/env` on the jumpbox. This captures what
-   is currently manual host state.
-3. Reach it: `ssh -J root@10.1.1.2 labadmin@10.10.10.5` (jump through the host).
-4. Move the config playbooks off the host onto the jumpbox; then the host's vmbr1/vmbr2 mgmt IPs
-   can go away.
+The control node is live. Done this session:
+1. **`tofu -chdir=tofu apply`** — created jumpbox-01 (VMID 101, 10.10.10.5). Running; guest agent
+   reports the IP; cloud-init `status: done`. The other 11 VMs were `No changes`.
+2. **`scripts/bootstrap-jumpbox.sh`** written (mirrors `bootstrap-host.sh`'s style) — a
+   *workstation-run* provisioner: `ssh -J swc2026`, apt-installs ansible + python3-winrm + git +
+   rsync, rsyncs `ansible/` and `ai/` (with the .gitignore exclusions), stages the lab SSH key
+   (`~/.ssh/mutaspace_lab_ed25519`, 600) and credentials (`ansible/.secrets/env`, 600, with
+   `MUTASPACE_LINUX_SSH_KEY` pinned to the jumpbox path), installs the pinned collections, verifies.
+   Idempotent; `--dry-run` / `--skip-*` flags.
+3. **Ran it — succeeded.** ansible-core 2.16.3 + pywinrm on the jumpbox; collections microsoft.ad
+   1.12.0, ansible.windows 3.7.0, community.proxmox 2.0.0, community.general 13.2.0 in the project
+   `collections/`. Verify passed; `ansible linux -m ping` → analyst-01/ubuntu-app-01/wazuh-01 pong
+   (the vmbr2 isolated hosts time out only because they are `started:false`).
+   - The workstation cred file is `ansible/lab-credentials.env` (gitignored), copied verbatim from
+     the host's `/root/ansible/.secrets/env`. It is **missing `MUTASPACE_WAZUH_API_*`** — add those
+     from the host's `.secrets/wazuh-passwords.txt` before running 70-detections.
+
+**Reach the jumpbox:** `ssh -J swc2026 labadmin@10.10.10.5 -i ~/.ssh/id_ed25519_mutaspace_lab`
+then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
+
+### THE NEXT STEP: run the config playbooks FROM the jumpbox
+- 50-wazuh-agents (Linux hosts are up; enroll them). Then 60/70/80/90 in order — note 80-ai-assist
+  needs nlp-01 started, and several plays need the `started:false` VMs powered on first.
+- After the jumpbox is doing the runs, retire the host's stopgap vmbr1/vmbr2 mgmt IPs and the
+  `/root/ansible/` tree on the host.
+- **Not committed yet:** `scripts/bootstrap-jumpbox.sh` is untracked; `f28848e` is still unpushed.
 
 ---
 
