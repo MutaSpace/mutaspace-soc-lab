@@ -461,7 +461,7 @@ source "proxmox-iso" "kali-rolling" {
   # agent (qemu_agent = true), so the two candidate causes are (a) the agent never came up
   # so there was no IP to connect to, or (b) the IP was known but sshd/key auth rejected the
   # connection. Root cause and fix recorded where they belong once diagnosed live.
-  ssh_timeout            = "15m"
+  ssh_timeout            = "60m"
   ssh_handshake_attempts = 100
 
   qemu_agent = true

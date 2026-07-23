@@ -62,6 +62,28 @@ d-i mirror/http/directory string /kali
 d-i mirror/http/proxy string
 d-i mirror/suite string kali-rolling
 
+# USE the mirror, do not just point at it. FOUND THE HARD WAY, 2026-07-23.
+#
+# The mirror/* settings above only say WHERE the mirror is. Without the line below,
+# d-i installing from a full Kali DVD writes ONLY the cdrom source into the target's
+# /etc/apt/sources.list and never adds the network mirror. pkgsel then installs from
+# the DVD alone, and cloud-init is not on the DVD (it IS in the network repo), so:
+#
+#   in-target: E: Package 'cloud-init' has no installation candidate
+#   main-menu: Configuring 'pkgsel' failed with error code 100
+#
+# Because cloud-init shared one apt transaction with the rest of pkgsel/include, its
+# failure aborted the WHOLE step - so openssh-server and qemu-guest-agent never
+# installed either, and the build then died at "Timeout waiting for SSH" with a guest
+# that had no agent and no sshd. The symptom pointed at a boot hang; the cause was one
+# unavailable package on the install media.
+#
+# use_mirror=true adds the network mirror so pkgsel can reach cloud-init.
+# disable-cdrom-entries removes the DVD source from the INSTALLED system, so the
+# clone's apt does not error looking for a disc that is not there.
+d-i apt-setup/use_mirror boolean true
+d-i apt-setup/disable-cdrom-entries boolean true
+
 # ---------------------------------------------------------------------------------------
 # Clock
 #
