@@ -450,6 +450,26 @@ source "proxmox-iso" "win11-client" {
   bios    = "ovmf"
   machine = "q35"
 
+  # Boot the DISK first, then the install CD — and DELIBERATELY LEAVE net0 OUT.
+  # THIS IS THE FIX for the boot-catch problem that blocked this template. FOUND
+  # 2026-07-23.
+  #
+  # With the default boot order (which includes net0), a missed "Press any key to
+  # boot from CD" sends OVMF into a PXE-v4 -> PXE-v6 -> HTTP-v4 -> HTTP-v6 fall-
+  # through, each with a multi-second timeout, so the CD prompt only comes back
+  # around once every ~50 s. Combined with this VM's slow, variable vTPM POST
+  # (~40-70 s, measured), no bounded keystroke burst could reliably land in the
+  # ~6 s window — the server template has no vTPM, POSTs fast, and catches the
+  # prompt with five spacebars, which is why it never needed this.
+  #
+  # Omitting net0 from the boot order removes the PXE detour entirely. Now the
+  # loop is scsi0 (empty on first boot, fails instantly) -> sata0 CD (the ~5 s
+  # "press any key") -> repeat every few seconds. The prompt is up almost
+  # continuously after POST, so the spacebar burst below catches it. net0 is still
+  # present and fully functional for the OS and for WinRM — it is just not a
+  # firmware boot device. After install, scsi0 is bootable and wins on its own.
+  boot = "order=scsi0;sata0"
+
   # Proxmox ostype: win11 covers "Windows 11/2022/2025".
   #
   # This also matters on the OpenTofu side, where ostype MUST be set before cipassword
@@ -500,7 +520,7 @@ source "proxmox-iso" "win11-client" {
 
   disks {
     type         = "scsi"
-    disk_size    = "60G"
+    disk_size    = "64G"
     storage_pool = var.storage_pool
 
     # raw, not qcow2: local-lvm is LVM-thin and does not support qcow2.
@@ -643,51 +663,20 @@ source "proxmox-iso" "win11-client" {
   #   BdsDxe: failed to start Boot0002 "UEFI QEMU DVD-ROM" ... Time out
   #   >>Start PXE over IPv4 ... >>Start HTTP Boot ... No bootable option or device
   #
-  # The burst below (boot_wait 4s + ~45 spacebars, one per second, t=4-49s) is tuned for
-  # a NORMAL serial build on an unloaded host, where POST is fast like the server's. When
-  # the host is saturated by concurrent builds the prompt drifts past 49s and this MISSES
-  # -- the only thing that reliably caught it under a 3-4 build load was ~200 presses
-  # (boot_wait 1s + one/sec to t=200s). Widen it if you build several templates at once;
-  # do not widen it needlessly on an idle host (surplus keys are implicated below).
+  # WITH the network-free boot order set above (see `boot = "order=scsi0;sata0"`),
+  # the CD "press any key" prompt recurs every few seconds after POST instead of
+  # once per ~50 s. So the burst no longer has to hit a single narrow window in a
+  # long loop; it only has to be firing at any point once POST is done.
   #
-  # ############################################################################
-  # # UNRESOLVED: THE INSTALL ITSELF FAILS AFTER THE CD BOOTS. NOT YET FIXED.  #
-  # #                                                                          #
-  # # On the runs where the wide burst DID catch the prompt, the CD booted     #
-  # # into WinPE (Proxmox splash + Windows boot spinner) and then, within ~2   #
-  # # minutes, the VM REBOOTED to a disk that never boots:                     #
-  # #   BdsDxe: No bootable option or device was found.                        #
-  # # Reading scsi0 (local-lvm:vm-9003-disk-1) directly off the host proved    #
-  # # the disk is BLANK: no protective MBR, no "EFI PART" GPT header, ~0       #
-  # # non-zero bytes in the first 50 MB. So Windows Setup ABORTED IN WinPE     #
-  # # BEFORE it ever partitioned the disk. It reproduced at low host load, so  #
-  # # it is NOT resource starvation of the image-apply.                        #
-  # #                                                                          #
-  # # Two candidate causes, not yet distinguished (a flood-free WinPE console  #
-  # # observation was impossible: catching the CD needs the wide key burst,    #
-  # # and those surplus keys dismiss whatever error dialog WinPE puts up,      #
-  # # which is likely what triggers the reboot):                              #
-  # #   1. "This PC can't run Windows 11" -- the LabConfig BypassStorageCheck  #
-  # #      /BypassCPUCheck reg writes are done via RunSynchronous in the       #
-  # #      windowsPE pass, which can run AFTER Setup's own compatibility scan  #
-  # #      on some media. The 60 GB disk (< 64 GB) and host-passthrough CPU    #
-  # #      (not on Microsoft's allow-list) both fail that scan natively, so if #
-  # #      the bypass is too late Setup halts. This is the more Win11-specific #
-  # #      suspect -- the server has no such check and installs fine.          #
-  # #   2. Setup found no disk -- the w11 vioscsi from $WinPEDriver$ did not    #
-  # #      load. Less likely: the identical mechanism with the 2k22 driver     #
-  # #      works on the server, and the w11 driver is present on the ISO.      #
-  # #                                                                          #
-  # # HOW TO FINISH THIS: build with NO other template building (idle host),   #
-  # # so POST is fast, this ~45-press burst catches the CD with few surplus    #
-  # # keys, and the WinPE error dialog stays on screen. Screendump it. If it   #
-  # # is the compat screen, move the LabConfig bypass earlier (a winpeshl.ini  #
-  # # / earlier RunSynchronous, NOT weakening the real vTPM). If it is "no     #
-  # # drives found", check the w11 vioscsi actually loaded (Shift+F10 ->       #
-  # # wmic diskdrive get size), as was done to solve the server template.     #
-  # ############################################################################
-  boot_wait    = "4s"
-  boot_command = ["<spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar>"]
+  # vTPM POST is ~40-70 s and variable. boot_wait 30 s starts the burst before the
+  # earliest POST completion, and ~60 spacebars at 1 s span t=30-90 s, which covers
+  # the whole POST-uncertainty range. Once POST finishes, the prompt is up almost
+  # continuously, so a 1 s-interval press lands in it within a press or two. This
+  # is a bounded burst that ENDS by ~t=90 s, well before Setup reaches WinPE — so,
+  # unlike the old ~200-press flood, it does not dismiss the WinPE error dialog if
+  # the install then fails (which mattered for reading that dialog).
+  boot_wait    = "30s"
+  boot_command = ["<spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar><wait1s><spacebar>"]
 
   # --- communicator ---------------------------------------------------------
   #

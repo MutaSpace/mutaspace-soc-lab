@@ -375,7 +375,7 @@ vms:
     os_type: win11
     cores: 2
     memory: { dedicated: 4096, floating: 0 } # Windows needs blnsvr.exe to balloon; assume not
-    disk: { size: 50, interface: scsi0 }
+    disk: { size: 64, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:51" }
     ipv4: { mode: dhcp, reservation: 10.10.10.51 }
     agent: true
@@ -534,7 +534,7 @@ learner_endpoints:
     os_type: win11
     cores: 2
     memory: { dedicated: 4096, floating: 0 }
-    disk: { size: 50, interface: scsi0 }
+    disk: { size: 64, interface: scsi0 }
     nic: { model: virtio }
     network: lan
     ipv4: { mode: dhcp, host_base: 60, host_step: 2 }
