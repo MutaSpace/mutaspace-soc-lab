@@ -315,3 +315,188 @@
         success_msg: "Manager healthy: analysisd and remoted are running"
       vars:
         _daemons: "{{ manager_status.json.data.affected_items[0] }}"
+
+# ---------------------------------------------------------------------------------------------
+# ATTACK PLAYS - one per scenario, tag-selected by the scenario id
+# ---------------------------------------------------------------------------------------------
+# Each attack play carries its own scenario-id tag (`ssh-bruteforce`, `web-sqli`), so
+# `--tags <scenario_id>` runs exactly one attack and nothing else. They run FROM kali-01: Ansible
+# connects to the attacker and drives the real tool (hydra / crafted curl) across fw-01 at the
+# target, exactly as a student would. The Taskfile `scenario:run` target runs the attack tag first
+# and then `--tags verify` as a second invocation, so the same contract in scenarios.yml proves the
+# attack landed. Each play records a `scenario_run_started_at` fact for the operator's log; verify
+# runs as its own process and anchors to its own last-15-minutes window (see the verify header),
+# which is wider than the attack that just ran, so it cannot produce a false negative.
+#
+# kali-01 must be powered on (see the tooling play's note) and carry hydra/sqlmap - that is the
+# `--tags tooling` / Wave-2 prerequisite, not repeated here.
+- name: Run the ssh-bruteforce attack from kali-01
+  hosts: kali-01
+  gather_facts: false
+  become: true
+  tags: [ssh-bruteforce]
+
+  vars:
+    scenario_ssh_target: "10.10.10.30"
+    # A NON-EXISTENT user, on purpose: every attempt is guaranteed to fail, which is what trips the
+    # built-in non-existent-user rule (5710) and, once the burst crosses >= 8 failures / 120s, the
+    # brute-force composite (5712). No real account is ever at risk.
+    scenario_ssh_user: "baduser"
+    scenario_ssh_wordlist: /tmp/mutaspace-scenario-ssh-passwords.txt
+    # How many invalid-user connections the burst makes. Comfortably above the built-in >= 8
+    # failures / 120s threshold so 5712 fires with margin, but small enough to finish in seconds.
+    scenario_ssh_attempts: 15
+
+  tasks:
+
+    - name: Record the attack start time (UTC)
+      ansible.builtin.set_fact:
+        scenario_run_started_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    - name: Announce the attack window
+      ansible.builtin.debug:
+        msg: >-
+          ssh-bruteforce: hydra + {{ scenario_ssh_attempts }} invalid-user attempts ->
+          ssh://{{ scenario_ssh_target }} as '{{ scenario_ssh_user }}'
+          starting at {{ scenario_run_started_at }}.
+
+    # Ship the synthetic wordlist to kali rather than relying on a system list, so the attempt count
+    # is fixed and the scenario is reproducible run to run.
+    - name: Stage the synthetic password list on kali-01
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/scenario-ssh-passwords.txt"
+        dest: "{{ scenario_ssh_wordlist }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # hydra is the brute-force tool a student reaches for, so the scenario leads with it. Against
+    # ubuntu-app-01, though, sshd enforces key-only auth (PasswordAuthentication no), so hydra probes
+    # once, sees password auth is unsupported and stops - it still leaves a real "Invalid user"
+    # attempt from the attacker in the log, but it cannot spray a wordlist at a target that refuses
+    # passwords. Its rc is therefore not a pass/fail signal here (failed_when: false); the burst below
+    # is what reliably generates the brute-force volume. This mirrors reality: a hardened target
+    # defeats password spraying, and the detection that matters is the flood of invalid-user attempts.
+    - name: Probe with hydra (best-effort against a key-only target)
+      ansible.builtin.command:
+        cmd: >-
+          hydra -l {{ scenario_ssh_user }} -P {{ scenario_ssh_wordlist }}
+          -t 4 ssh://{{ scenario_ssh_target }}
+      register: scenario_ssh_hydra
+      changed_when: true
+      failed_when: false
+
+    # The reliable trigger: a bounded burst of SSH connections as the non-existent user. Each one
+    # makes sshd log "Invalid user baduser from 10.10.20.10" (rule 5710); enough of them inside 120s
+    # trip the brute-force composite (5712). BatchMode + a throwaway known-hosts file keep every
+    # attempt non-interactive and fast, and ssh's rc 255 (auth refused) is the expected outcome, so
+    # the loop swallows it and just counts the attempts it made.
+    - name: Drive the invalid-user SSH burst that crosses the brute-force threshold
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          n=0
+          for _ in $(seq 1 {{ scenario_ssh_attempts }}); do
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                {{ scenario_ssh_user }}@{{ scenario_ssh_target }} true >/dev/null 2>&1 || true
+            n=$((n + 1))
+          done
+          echo "attempts=${n}"
+      register: scenario_ssh_burst
+      changed_when: true
+
+    - name: Confirm the burst made the expected number of attempts
+      ansible.builtin.assert:
+        that:
+          - "'attempts=' ~ scenario_ssh_attempts in scenario_ssh_burst.stdout"
+        fail_msg: >-
+          The invalid-user burst did not complete {{ scenario_ssh_attempts }} attempts against
+          {{ scenario_ssh_target }} (saw: {{ scenario_ssh_burst.stdout | trim }}). Confirm kali-01
+          can reach {{ scenario_ssh_target }}:22 across fw-01.
+        success_msg: >-
+          {{ scenario_ssh_attempts }} invalid-user attempts sent to {{ scenario_ssh_target }} as
+          '{{ scenario_ssh_user }}' - the non-existent-user and brute-force rules should now fire.
+
+- name: Run the web-sqli attack from kali-01
+  hosts: kali-01
+  gather_facts: false
+  become: true
+  tags: [web-sqli]
+
+  vars:
+    scenario_web_target: "http://10.10.10.30/"
+    # SQL-injection request patterns, pre-URL-encoded so curl sends them verbatim and nginx logs the
+    # payload into access.log (the Wave-2 localfile forwards that log to Wazuh, where the built-in web
+    # ruleset flags the pattern). A spread of classic tokens - ' OR 1=1, UNION SELECT, DROP TABLE,
+    # SLEEP - so at least one matches whichever web rule the manager's ruleset actually fires.
+    scenario_web_payloads:
+      - "id=1%27%20OR%20%271%27=%271"
+      - "id=1%20UNION%20SELECT%20username,password%20FROM%20users--"
+      - "id=1%27%3B%20DROP%20TABLE%20users%3B--"
+      - "q=%27%20OR%201=1--"
+      - "id=1%27%20AND%201=1%20UNION%20SELECT%20NULL,version()--"
+      - "search=%27%20OR%20SLEEP(5)--"
+
+  tasks:
+
+    - name: Record the attack start time (UTC)
+      ansible.builtin.set_fact:
+        scenario_run_started_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    - name: Announce the attack window
+      ansible.builtin.debug:
+        msg: >-
+          web-sqli: {{ scenario_web_payloads | length }} SQL-injection requests ->
+          {{ scenario_web_target }} starting at {{ scenario_run_started_at }}.
+
+    # Each request is a normal GET carrying an injection pattern in the query string. -o /dev/null
+    # discards the body (the site is static; the response is irrelevant), --max-time bounds a hung
+    # request, and -w prints the status so the operator sees the server answered. The point is the
+    # LOG line each request leaves, not the response.
+    - name: Send the SQL-injection request patterns with curl
+      ansible.builtin.command:
+        cmd: >-
+          curl -s -o /dev/null -w '%{http_code}\n' --max-time 10
+          "{{ scenario_web_target }}?{{ item }}"
+      register: scenario_web_curl
+      changed_when: true
+      failed_when: scenario_web_curl.rc != 0
+      loop: "{{ scenario_web_payloads }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report the response codes nginx returned
+      ansible.builtin.debug:
+        msg: "{{ scenario_web_curl.results | map(attribute='stdout') | map('trim') | list }}"
+
+# ---------------------------------------------------------------------------------------------
+# LIST - print the catalogue (read-only, no host, no credentials)
+# ---------------------------------------------------------------------------------------------
+# `scenario:list` is a convenience for the instructor: what scenarios exist, who attacks whom, and
+# which rule proves each. It runs on localhost and loads scenarios.yml with the SAME include_vars
+# the verify play uses, so the three verbs (list/run/verify) all read the one catalogue the one way
+# - no yq or other YAML tool beyond the Ansible this repo already requires.
+- name: List the scenario catalogue
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [list]
+
+  tasks:
+
+    - name: Load the scenario catalogue
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../scenarios.yml"
+        name: _catalogue
+
+    - name: Print each scenario as a one-line summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ '%-16s' | format(item.id) }} {{ '%-7s' | format(item.attack) }}
+          {{ '%-26s' | format(item.origin ~ ' -> ' ~ item.target) }} rule(s)
+          {{ item.expected_alerts | map(attribute='rule_id') | join(',') }}
+          (<= {{ item.expected_alerts | map(attribute='latency_budget_seconds') | map('int') | max }}s)
+      loop: "{{ _catalogue.scenarios }}"
+      loop_control:
+        label: "{{ item.id }}"

@@ -640,3 +640,44 @@ tasks:
       - >-
         ansible-playbook -i {{.INVENTORY}} playbooks/75-scenario-run.yml
         --tags verify -e scenario_id={{.CLI_ARGS}}
+
+  scenario:list:
+    desc: >-
+      Print the incident-scenario catalogue --- id, attacker, target, expected
+      rule and latency budget --- read straight from ansible/scenarios.yml.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      # Reads only the committed catalogue --- no host, no credentials. It runs on localhost through
+      # the same playbook (and the same include_vars) that run/verify use, so all three verbs read
+      # scenarios.yml the one way, and no extra YAML tool is needed beyond the Ansible this repo
+      # already requires.
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/75-scenario-run.yml --tags list
+
+  scenario:run:
+    desc: >-
+      Run a scenario's attack from kali-01, then verify the expected alert landed
+      in the Wazuh indexer within budget. Does NOT snapshot. kali-01 must be
+      powered on (qm status 108 = running). Usage: task scenario:run -- ssh-bruteforce
+    preconditions:
+      - sh: 'test -n "{{.CLI_ARGS}}"'
+        msg: >-
+          No scenario named. Usage: task scenario:run -- ssh-bruteforce
+          (see ansible/scenarios.yml for the catalogue).
+      - sh: 'test -n "$MUTASPACE_WAZUH_INDEXER_PASSWORD"'
+        msg: >-
+          MUTASPACE_WAZUH_INDEXER_PASSWORD is not set. The installer generates
+          it --- read the indexer/admin password out of
+          ansible/.secrets/wazuh-passwords.txt after `task ansible:wazuh-server`.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      # Attack first (selected by the scenario-id tag), then the shared verify contract as a second
+      # invocation. Two invocations, not one combined --tags, so the attack always runs before verify
+      # regardless of play order in the file. verify anchors to its own last-15m window, which comfortably
+      # covers the attack that just ran.
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/75-scenario-run.yml
+        --tags {{.CLI_ARGS}} -e scenario_id={{.CLI_ARGS}}
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/75-scenario-run.yml
+        --tags verify -e scenario_id={{.CLI_ARGS}}

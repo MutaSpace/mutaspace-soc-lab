@@ -77,9 +77,19 @@ scenarios:
       fire). Instrumentation is Wave 2, not part of verify.
     reset_targets: [106, 108]  # ubuntu-app-01, kali-01 - never wazuh-01 (104)
     expected_alerts:
-      # Built-in web rules. 31103 = SQL-injection pattern in a URL; 31106 = a common web attack
-      # returning a 200. Confirm-on-host which fires and keep only the observed id(s).
-      - rule_id: 31103
+      # CONFIRMED ON HOST (swc2026, 2026-07-23): the crafted SQL-injection requests from kali-01 fire
+      # built-in rule 31164 ("SQL injection attempt", level 6, 3x) - NOT 31103. 31103 was the
+      # proposal's guess; this Wazuh 4.14 ruleset carries the SQL-injection signature under 31164, and
+      # 31103 never fired. The requests also trip 31106 ("A web attack returned code 200 (success)",
+      # level 6, 2x) because the static Nginx site answers 200. Both are attributable to srcip
+      # 10.10.20.10 / agent ubuntu-app-01 and prove the Wave-2 nginx access.log localfile end-to-end.
+      - rule_id: 31164
+        match:
+          data.srcip: "10.10.20.10"
+          agent.name: "ubuntu-app-01"
+        min_count: 1
+        latency_budget_seconds: 120
+      - rule_id: 31106
         match:
           data.srcip: "10.10.20.10"
           agent.name: "ubuntu-app-01"
