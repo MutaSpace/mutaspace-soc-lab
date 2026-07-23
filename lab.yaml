@@ -220,7 +220,6 @@ vms:
   # install, and claiming otherwise is how you buy a 15-minute timeout per refresh.
   fw-01:
     vm_id: 100
-    enabled: false # template 9004 (OPNsense) not built - needs a manually decompressed ISO
     # `role: firewall` is not decoration. It is the flag that switches on the
     # plan-time preconditions in tofu/modules/proxmox-vm/main.tf: this is the only
     # machine permitted on vmbr0, and its net0 MUST be the vmbr0 leg.
@@ -268,14 +267,13 @@ vms:
   # teaching rather than hiding.
   dc-01:
     vm_id: 102
-    enabled: false # template 9002 (Windows Server 2022) not built - needs a registration-gated ISO
     lifecycle: reprovisioned
     template: win-server-2022
     guest: windows
     os_type: win11 # Proxmox's ostype for Server 2022/2025 and Windows 11
     cores: 2
     memory: { dedicated: 4096, floating: 0 }
-    disk: { size: 50, interface: scsi0 }
+    disk: { size: 60, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:10" }
     ipv4: { mode: static, address: 10.10.10.10/24, gateway: 10.10.10.1 }
     agent: true
@@ -297,7 +295,6 @@ vms:
   # static mappings are templated from this same map.
   analyst-01:
     vm_id: 103
-    enabled: false # template 9001 (Ubuntu Desktop) not built yet
     lifecycle: reprovisioned
     template: ubuntu-desktop-2404
     guest: linux
@@ -427,7 +424,6 @@ vms:
   # instead of copying 40 GB every time.
   kali-01:
     vm_id: 108
-    enabled: false # template 9005 (Kali) not built yet
     lifecycle: linked
     template: kali-rolling
     guest: linux
@@ -451,7 +447,6 @@ vms:
   # It exists to BE a trust boundary, not to do work. 2 GB and 20 GB is the point.
   untrusted-01:
     vm_id: 109
-    enabled: false # template 9005 (Kali) not built yet
     lifecycle: linked
     template: kali-rolling
     guest: linux
@@ -549,7 +544,6 @@ learner_endpoints:
 
   kali:
     vmid_offset: 6
-    enabled: false # template 9005 (Kali) not built yet
     lifecycle: linked
     template: kali-rolling
     guest: linux

@@ -486,6 +486,8 @@ provision_privs() {
     Datastore.Audit
     Pool.Allocate
     Pool.Audit
+    Realm.AllocateUser           # create the per-learner PVE users (access.tf); found on first apply
+    User.Modify                  # set those users' properties/group; the other half of user creation
     SDN.Audit
     Sys.Audit
     VM.Allocate
@@ -505,6 +507,17 @@ provision_privs() {
     VM.PowerMgmt                 # PVE 9.2 needs this to START a VM after rollback
     VM.Snapshot
     VM.Snapshot.Rollback
+
+    # Sys.Modify - VERIFIED THE HARD WAY on the first real tofu apply, 2026-07-23.
+    #
+    # Creating a VM whose network devices attach to bridges fails without it:
+    #   403 Permission check failed (/, Sys.Modify)
+    # bpg needs Sys.Modify to configure the guest's networking against the node's
+    # bridges. This is the provision-role twin of the SDN.Use lesson from the build
+    # role: the minimum privilege set is a synthesis, and PVE names exactly what is
+    # missing on first contact. fw-01 (three bridges) surfaced it; it applies to any
+    # VM with a NIC.
+    Sys.Modify
   )
   if (( PVE_MAJOR <= 8 )); then
     privs+=(VM.Monitor)          # removed in PVE 9.0
