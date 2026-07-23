@@ -28,17 +28,23 @@
 ---
 ansible_connection: ansible.builtin.winrm
 ansible_port: 5985
-ansible_winrm_transport: kerberos
+# NTLM, not Kerberos. The design originally chose Kerberos (correct for a domain
+# member and required if AD-object plays ran from a non-DC host needing delegation).
+# In practice every AD-object play in this lab runs AGAINST dc-01 itself, so no
+# delegation is needed, and Kerberos would require krb5-user + a krb5.conf on the
+# control node. NTLM works with the pywinrm already installed. To harden: install
+# krb5-user, point default_realm at MUTASPACE.LOCAL/10.10.10.10, and flip this back.
+ansible_winrm_transport: ntlm
 
 # Kerberos wants a UPN, not a DOMAIN\user string. The realm is upper-cased by convention and by
 # most krb5 configurations' expectations.
-ansible_user: "{{ lab_domain_admin_user }}@{{ lab_domain | upper }}"
+ansible_user: "{{ lab_netbios | default('MUTASPACE') }}\\{{ lab_domain_admin_user }}"
 ansible_password: "{{ lab_domain_admin_password }}"
 
 # Ask the winrm connection plugin to obtain the ticket itself rather than depending on whatever is
 # already in the operator's credential cache. This keeps runs reproducible - a stale kinit from a
 # previous class is a genuinely confusing failure mode.
-ansible_winrm_kinit_mode: managed
+# ansible_winrm_kinit_mode: managed   # Kerberos-only; unused under NTLM
 
 # NOTE ON ADDRESSING: Kerberos requires the target to be addressed by a name that matches its
 # service principal name, so hosts in this group set `ansible_host` to the FQDN in hosts.yml rather
