@@ -174,8 +174,8 @@ run "learner_count_zero_builds_only_the_shared_core" {
   }
 
   assert {
-    condition     = length([for name, kind in output.vm_kinds : name if kind == "core"]) == 9
-    error_message = "The shared core is not nine machines. It should be fw-01, dc-01, analyst-01, wazuh-01, win-client-01, ubuntu-app-01, kali-01, untrusted-01 and nlp-01."
+    condition     = length([for name, kind in output.vm_kinds : name if kind == "core"]) == 10
+    error_message = "The shared core is not ten machines. It should be jumpbox-01, fw-01, dc-01, analyst-01, wazuh-01, win-client-01, ubuntu-app-01, kali-01, untrusted-01 and nlp-01."
   }
 }
 

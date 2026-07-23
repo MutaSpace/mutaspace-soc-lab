@@ -410,6 +410,37 @@ vms:
       SOC LAN for kali-01 to reach across the firewall.
 
   # ---------------------------------------------------------------------------
+  # jumpbox-01 - the control node the lab is configured FROM
+  # ---------------------------------------------------------------------------
+  #
+  # WHY THIS EXISTS. Ansible, the repo and the lab credentials have to run from
+  # somewhere that can reach every VM - Linux over SSH and Windows over WinRM.
+  # The first bring-up ran them from the Proxmox host, which meant installing
+  # tooling on the hypervisor and giving it an address on the SOC LAN: manual
+  # state that no `git clone` reproduces. This VM captures that role properly.
+  # It is a normal lab citizen on vmbr1 (so it reaches vmbr2 through fw-01 too),
+  # and it is reached from the operator's workstation by SSH-jumping through the
+  # Proxmox host. scripts/bootstrap-jumpbox.sh turns a fresh clone of it into a
+  # working control node (ansible, collections, pywinrm, the repo, the secrets).
+  jumpbox-01:
+    vm_id: 101
+    lifecycle: reprovisioned
+    template: ubuntu-server-2404
+    guest: linux
+    os_type: l26
+    cores: 2
+    memory: { dedicated: 4096, floating: 2048 }
+    disk: { size: 30, interface: scsi0 }
+    nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:05" }
+    ipv4: { mode: static, address: 10.10.10.5/24, gateway: 10.10.10.1 }
+    agent: true
+    started: true
+    startup_order: 2
+    description: >-
+      Ansible control node / bastion for the lab. Runs the config playbooks and
+      the ai/ tooling; reached by SSH-jumping through the Proxmox host.
+
+  # ---------------------------------------------------------------------------
   # kali-01 - attack simulation, isolated plane
   # ---------------------------------------------------------------------------
   #
