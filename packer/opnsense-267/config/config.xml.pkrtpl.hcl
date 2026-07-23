@@ -37,8 +37,10 @@
         <OPNsense><Kea><dhcp4>. The Kea block below follows that model. If a
         26.7 export shows Dnsmasq as the active DHCP backend instead, the
         pool and the reservations move, but the VALUES stay the same.
-      * <IDS>.  The Suricata plugin's model version attribute changes almost
-        every release; OPNsense migrates it forward on boot.
+      * <IDS>.  The core Intrusion Detection (Suricata) model version attribute
+        changes almost every release; OPNsense migrates it forward on boot.
+        (Suricata is core in 26.7 — base `suricata` package, no os-suricata
+        plugin. The version below may migrate on first boot.)
 
     XML comments in this file survive only until OPNsense first rewrites
     config.xml, which it does on the first configuration change. The comments
@@ -127,17 +129,24 @@
 
     <!--
       Plugins are tracked in the config, not just on disk. The build installs
-      os-qemu-guest-agent and os-suricata with pkg; if this list did not name
-      them, a later firmware sync could decide they are strays and remove them.
+      os-qemu-guest-agent with pkg; if this list did not name it, a later
+      firmware sync could decide it is a stray and remove it.
 
       os-qemu-guest-agent is not optional: the bpg provider's agent.enabled is
       true for every VM in this lab, and without a running guest agent every
       create AND every refresh blocks for fifteen minutes.
+
+      NOTE (corrected 2026-07-22): os-suricata was ALSO listed here, but no such
+      plugin exists in OPNsense 26.7 — Intrusion Detection is a core feature and
+      Suricata is the base `suricata` package, configured through <OPNsense><IDS>
+      below. Listing a non-existent plugin here invites a firmware audit to keep
+      trying to reconcile it, so it is removed. See the pkg step's comment in
+      opnsense.pkr.hcl.
     -->
     <firmware version="1.0.1">
       <mirror/>
       <flavour/>
-      <plugins>os-qemu-guest-agent,os-suricata</plugins>
+      <plugins>os-qemu-guest-agent</plugins>
       <type/>
       <subscription/>
       <reboot/>

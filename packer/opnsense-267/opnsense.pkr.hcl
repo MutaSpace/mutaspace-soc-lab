@@ -461,29 +461,52 @@ source "proxmox-iso" "opnsense" {
     # keymap here would desynchronise every character typed afterwards.
     "<enter><wait10s>",
 
-    # Main installer task menu.
+    # Main installer task menu ("Choose one of the following tasks to perform").
     #
-    # ⚠️ ASSUMPTION: the first entry is "Install (UFS)" and the cursor starts
-    # on it, so a bare Enter selects it. VERIFY THIS FIRST when the build
-    # breaks — it is the single most likely thing to have moved, and picking
-    # the wrong entry here lands in "Import Configuration" or "Password Reset"
-    # rather than an install.
+    # VERIFIED 2026-07-22 on OPNsense 26.7, in this exact menu order:
+    #   Install (ZFS)   ZFS GPT/UEFI Hybrid   <- cursor starts HERE
+    #   Install (UFS)   UFS GPT/UEFI Hybrid
+    #   Other Modes >>  Extended Installation
+    #   Import Config   Load Configuration
+    #   Password Reset  Recover Installation
+    #   Force Reboot / Force Halt
+    #
+    # SYMPTOM THAT CHANGED THIS: the template shipped a bare <enter> here
+    # expecting "Install (UFS)" to be the first/highlighted entry. In 26.7 the
+    # first entry is "Install (ZFS)", so the bare <enter> started a ZFS install
+    # and the next keystrokes (tuned for the 2-dialog UFS path) desynced onto
+    # the ZFS vdev/checklist dialogs and finally hit a "Partitioning error".
+    # One <down> moves the cursor from Install (ZFS) to Install (UFS).
     #
     # UFS rather than ZFS on purpose: the UFS path is two dialogs (pick disk,
     # confirm) where ZFS is four (vdev type, disk checklist, options, confirm).
     # Fewer dialogs is less to break. This firewall is rebuilt from this
     # template rather than upgraded in place, so ZFS boot environments — the
     # main reason to prefer ZFS on OPNsense — buy nothing here. If you want
-    # ZFS, that is a one-line change plus re-tuning this section.
-    "<enter><wait10s>",
+    # ZFS, that is more than a one-line change: it re-tunes this whole section.
+    "<down><enter><wait10s>",
 
-    # Disk selection. One disk exists (scsi0 on virtio-scsi-single, which
-    # FreeBSD enumerates as da0), so it is the only entry and is preselected.
-    "<enter><wait5s>",
+    # Disk selection ("Please select a disk to continue").
+    #
+    # SYMPTOM THAT CHANGED THIS: the template assumed da0 was "the only entry
+    # and preselected" and sent a bare <enter>. In fact THREE devices are
+    # listed because both attached CDs enumerate as disks, and the cursor
+    # starts on the first one (cd0 = the install DVD). Installing onto the DVD
+    # is not what we want. VERIFIED 26.7 order:
+    #   cd0  <QEMU DVDROM>   (the OPNsense install ISO, ide2)
+    #   cd1  <QEMU DVDROM>   (the config-seed ISO, ide3)
+    #   da0  <QEMU HARDDISK> (scsi0, the 20G target)
+    # Two <down> move from cd0 to da0. If the seed CD is ever removed or its
+    # ide index changes, recount: da0 is always the HARDDISK entry.
+    "<down><down><enter><wait5s>",
 
-    # Destructive-write confirmation. The dialog defaults to "No"; one <right>
-    # moves to "Yes".
-    "<right><enter>",
+    # Destructive-write confirmation ("Last Chance! Are you sure...").
+    #
+    # SYMPTOM THAT CHANGED THIS: the template sent <right><enter> believing the
+    # dialog defaulted to [No]. In 26.7 it defaults to [YES] (left button,
+    # pre-highlighted), so <right> moved to [NO] and <enter> CANCELLED the
+    # install. A bare <enter> accepts the default [YES].
+    "<enter>",
 
     # ── The install itself ────────────────────────────────────────────────
     # Copies the DVD onto da0. On an NVMe-backed local-lvm this is a few
@@ -491,15 +514,33 @@ source "proxmox-iso" "opnsense" {
     # is genuinely I/O-bound and varies with the host.
     "<wait8m>",
 
-    # "Root Password" — new password, then confirmation.
-    # Empty by default (see variables.pkr.hcl): an empty entry is rejected and
-    # the build fails loudly rather than shipping a firewall with a password
-    # that is public in this repository.
-    "${var.root_password}<enter><wait2s>",
-    "${var.root_password}<enter><wait10s>",
+    # "Final Configuration" menu.
+    #
+    # SYMPTOM THAT CHANGED THIS: the template assumed the install dropped
+    # straight into a root-password prompt (type / confirm / bare-enter to
+    # finish). In 26.7 the install instead ends on a "Final Configuration" MENU:
+    #   Root Password    Change root password   <- cursor starts HERE
+    #   Complete Install Confirm and exit
+    # so the password keystrokes were landing on a menu, not a text field, and
+    # the whole tail desynced. The flow is now: <enter> to open the password
+    # dialog, fill both fields, then move to "Complete Install" and select it.
+    #
+    # Open the Set Password dialog.
+    "<enter><wait3s>",
 
-    # "Complete Install" → reboot into the installed system.
-    "<enter><wait30s>",
+    # "Set Password" — two sequential single-field dialogs: first "Please
+    # select a password...", then "Please confirm the password...". Same string
+    # both times, each followed by <enter> (accepts the [OK] default and
+    # advances). root_password is empty by default (see variables.pkr.hcl): an
+    # empty entry is rejected and the build fails loudly rather than shipping a
+    # firewall with a password that is public in this repository.
+    "${var.root_password}<enter><wait2s>",
+    "${var.root_password}<enter><wait5s>",
+
+    # Back on the "Final Configuration" menu, cursor still on "Root Password".
+    # One <down> moves to "Complete Install"; <enter> confirms and reboots into
+    # the installed system.
+    "<down><enter><wait30s>",
 
     # ======================================================================
     # PHASE 2 — the installed system  (robust: a shell, not dialogs)
@@ -523,32 +564,68 @@ source "proxmox-iso" "opnsense" {
     "8<enter><wait10s>",
 
     # ── Build-plane networking ────────────────────────────────────────────
-    # Nothing serves DHCP on vmbr9, so the half-built firewall gives itself an
-    # address by hand purely so it can reach the OPNsense package mirror. All
-    # of this is thrown away when the real config is imported a few lines down.
+    # The half-built firewall needs an uplink purely so it can reach the
+    # OPNsense package mirror. All of this is thrown away when the real config
+    # is imported a few lines down.
     #
-    # This is done with ifconfig rather than the console's "Set interface IP
-    # address" menu because ifconfig is not a dialog and cannot move.
-    "ifconfig ${var.wan_if} inet ${var.build_address}/${var.build_prefix} up<enter><wait3s>",
-    "route add default ${var.build_gateway}<enter><wait3s>",
+    # SYMPTOM THAT CHANGED THIS (2026-07-22): the shared common.pkrvars.hcl now
+    # builds on vmbr0 (the 10.1.1.0/24 management LAN, gateway 10.1.1.1 which
+    # also serves DHCP), NOT the old vmbr9 build plane. The original static
+    # `ifconfig vtnet0 10.99.0.90/24 + route add default 10.99.0.1` put the WAN
+    # on the wrong subnet with an unreachable gateway, so every `pkg` command
+    # below timed out. On vmbr0 there is a real DHCP server, so we lease an
+    # address instead — this also keeps the real management subnet out of the
+    # template (var.build_address/build_gateway are no longer referenced).
+    #
+    # dhclient rather than the console's "Set interface IP" dialog because it is
+    # not a menu and cannot move between releases.
+    #
+    # INTERFACE NOTE (verified 26.7): at build time the machine is still on the
+    # FACTORY-DEFAULT config, which auto-assigns WAN=vtnet1 (and leases it via
+    # DHCP on its own) and LAN=vtnet0 (static 192.168.1.1). The seed config we
+    # import later reassigns WAN=vtnet0 — but that has not happened yet here.
+    # We do not need the "WAN" role at build time, only *any* working uplink:
+    # every port on the build bridge (vmbr0) is served by the same DHCP server,
+    # so leasing vtnet0 yields a valid address and default route regardless of
+    # the factory role. dhclient returns in a second or two on success; the
+    # wait is generous margin, not an expected duration.
+    "dhclient ${var.wan_if}<enter><wait20s>",
     "echo 'nameserver ${var.upstream_dns}' > /etc/resolv.conf<enter><wait3s>",
 
     # Prove connectivity before the long step. If this fails the pkg commands
     # below fail too, but the ping output on the console is what tells a human
-    # watching the build WHICH half broke.
-    "ping -c 3 ${var.build_gateway}<enter><wait10s>",
+    # watching the build WHICH half broke. Ping the upstream resolver (reachable
+    # through the leased default route) rather than a hardcoded gateway address.
+    "ping -c 3 ${var.upstream_dns}<enter><wait10s>",
 
     # ── Plugins ───────────────────────────────────────────────────────────
-    # os-qemu-guest-agent: mandatory. Every VM in this lab is created with
+    # os-qemu-guest-agent: MANDATORY. Every VM in this lab is created with
     #   agent.enabled = true, and a VM with that set and no agent running
-    #   blocks for fifteen minutes on every create AND every refresh.
-    # os-suricata: decision D-04. Suricata runs here, inline on the firewall,
-    #   because a Linux bridge does not mirror and a sensor VM on vmbr1 would
-    #   see almost nothing. It is installed now, on the build plane, because
-    #   after the real config is imported this machine has no working uplink
-    #   until it is cloned into fw-01 and plugged into vmbr0.
+    #   blocks for fifteen minutes on every create AND every refresh. It is
+    #   installed now, on the build plane, because after the real config is
+    #   imported this machine has no working uplink until it is cloned into
+    #   fw-01 and plugged into vmbr0. VERIFIED present in 26.7 as
+    #   os-qemu-guest-agent-1.3 (`pkg search os-qemu`).
+    #
+    # SYMPTOM THAT CHANGED THIS (2026-07-22): the template installed
+    # "os-qemu-guest-agent os-suricata" on ONE pkg line. os-suricata does NOT
+    # exist in the 26.7 catalogue — `pkg search suricata` lists only the base
+    # engine "suricata-8.0.6", and `pkg search os-suricata` / `os-ids` return
+    # nothing. pkg resolves ALL names before installing ANY, so the bogus name
+    # aborted the whole command and the guest agent silently did not install —
+    # a template every clone would then hang fifteen minutes on. The mandatory
+    # package is now on its own line so nothing can block it.
     "pkg update -f<enter><wait2m>",
-    "pkg install -y os-qemu-guest-agent os-suricata<enter><wait5m>",
+    "pkg install -y os-qemu-guest-agent<enter><wait5m>",
+
+    # Suricata (decision D-04) needs NO pkg step here. In OPNsense 26.7,
+    # Intrusion Detection is a CORE feature and the engine ships as the base
+    # package `suricata` — VERIFIED already installed on a fresh 26.7 system via
+    # `pkg info suricata` (suricata-8.0.6, repository OPNsense). The seeded
+    # config drives it through the core <OPNsense><IDS> model (see
+    # config/config.xml.pkrtpl.hcl), not through an os-suricata plugin, which is
+    # why no such plugin exists to install. D-04 — Suricata inline on the
+    # firewall — is unchanged; only the offline packaging assumption was wrong.
 
     # ── Seed the real configuration ───────────────────────────────────────
     # Mount by ISO9660 volume label, not by device node: /dev/iso9660/OPNCFG
