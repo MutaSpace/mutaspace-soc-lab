@@ -111,6 +111,34 @@ runcmd:
   # running, because the provider is configured to wait for it.
   - [systemctl, enable, --now, qemu-guest-agent]
 
+  # Grow the root filesystem to fill the disk.
+  #
+  # A template is built on a small disk, so its root partition is frozen at the BUILD size (~18-28G)
+  # while OpenTofu clones it onto the larger disk lab.yaml asks for (30-60G). cloud-init's own
+  # growpart does NOT understand LVM, so without this the extra space sits unpartitioned forever -
+  # and an install that needs it (the Wazuh all-in-one) fills the small root and fails half-way,
+  # taking /var/ossec down with it. This grows partition -> PV -> LV -> filesystem on first boot and
+  # is idempotent: once the disk is already full, every step is a harmless no-op. Shell form with
+  # `|| true` throughout so a guest without LVM (or without growpart) does not mark cloud-init errored.
+  - |
+    set -x
+    root_src=$(findmnt -no SOURCE /)
+    if printf '%s' "$root_src" | grep -q '/dev/mapper/'; then
+      pv=$(pvs --noheadings -o pv_name 2>/dev/null | head -1 | tr -d ' ')
+      if [ -n "$pv" ]; then
+        disk=$(lsblk -no pkname "$pv" 2>/dev/null | head -1)
+        part=$(printf '%s' "$pv" | grep -oE '[0-9]+$')
+        { [ -n "$disk" ] && [ -n "$part" ] && growpart "/dev/$disk" "$part"; } || true
+        pvresize "$pv" || true
+        lvextend -l +100%FREE "$root_src" || true
+      fi
+    else
+      disk=$(lsblk -no pkname "$root_src" 2>/dev/null | head -1)
+      part=$(printf '%s' "$root_src" | grep -oE '[0-9]+$')
+      { [ -n "$disk" ] && [ -n "$part" ] && growpart "/dev/$disk" "$part"; } || true
+    fi
+    resize2fs "$root_src" 2>/dev/null || xfs_growfs / 2>/dev/null || true
+
   # Never let a clone inherit an agent identity.
   #
   # If a Wazuh agent key is baked into a template, every machine cloned from it

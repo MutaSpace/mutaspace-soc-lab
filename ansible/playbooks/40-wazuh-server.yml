@@ -20,7 +20,17 @@
 # because "the SIEM install needs the internet" is a constraint worth teaching rather than hiding.
 #
 # If you run it as-is, fw-01 must permit wazuh-01 outbound HTTPS for the duration.
+#
 # ---------------------------------------------------------------------------------------------
+# FAILURE FEEDBACK - why this playbook is noisy when it breaks.
+# ---------------------------------------------------------------------------------------------
+# The Wazuh installer fails in ways that look like nothing (a blocked port, a flapping DNS answer,
+# a half-removed prior install) and whose native error is a single unhelpful line. Every failure
+# path below is wrapped to print a DIAGNOSTIC REPORT: what failed, the evidence (log tail, service
+# journals, the check that tripped) and concrete next steps. The report ends with a line telling
+# the operator that if they are running this under Claude Code they can paste the report and it can
+# continue the diagnosis, and if they are not, the same report is the checklist to work through by
+# hand. The goal is that a stuck install never leaves someone staring at "non-zero return code".
 #
 # Usage:
 #   ansible-playbook playbooks/40-wazuh-server.yml
@@ -34,60 +44,247 @@
     wazuh_installer_path: /root/wazuh-install.sh
     wazuh_files_tar: /root/wazuh-install-files.tar
     wazuh_files_dir: /root/wazuh-install-files
+    wazuh_install_log: /var/log/wazuh-install.log
+    # All-in-one is manager + a JVM indexer + a Node dashboard. The three packages alone are ~3.3 GB
+    # installed, plus the .deb archives in the apt cache and the indexer's initial data - an 8.6 GB
+    # root once overflowed during the dashboard's node_modules unpack ("No space left on device"),
+    # so 5 GB was proven too low. 10 GB is the floor; the disk should really be grown to fill the VM.
+    wazuh_min_free_mb: 10000
+    wazuh_component_packages:
+      - wazuh-manager
+      - wazuh-indexer
+      - wazuh-dashboard
+      - filebeat
+    # URLs the installer depends on. The preflight only needs to prove each HOST is reachable, so
+    # it accepts any sane HTTP status (a 404 still proves DNS + TCP + TLS worked).
+    wazuh_connectivity_urls:
+      - "https://packages.wazuh.com/{{ wazuh_major }}/wazuh-install.sh"
+      - "https://raw.githubusercontent.com/wazuh/wazuh/main/README.md"
 
   tasks:
 
-    # -----------------------------------------------------------------------------------------
-    # Is it already installed?
-    # -----------------------------------------------------------------------------------------
-    # The installation assistant is not idempotent. Re-running it on a working installation is
-    # destructive: it regenerates certificates and passwords, which disconnects every enrolled
-    # agent. Everything below is guarded on this one check.
-    - name: Check whether Wazuh is already installed
+    # =========================================================================================
+    # Detect the current state
+    # =========================================================================================
+    # /var/ossec/bin/wazuh-control is the honest signal that a manager exists ON DISK. A dpkg entry
+    # is not: a manager whose /var/ossec was deleted still shows `ii wazuh-manager` while being
+    # completely non-functional. Both facts are gathered so the guard below can tell the difference.
+    - name: Check whether the Wazuh control binary exists on disk
       ansible.builtin.stat:
         path: /var/ossec/bin/wazuh-control
       register: wazuh_control
 
+    - name: Gather installed packages
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Work out which Wazuh component packages are registered
+      ansible.builtin.set_fact:
+        wazuh_pkgs_present: >-
+          {{ wazuh_component_packages | select('in', ansible_facts.packages) | list }}
+
     - name: Report the installation state
       ansible.builtin.debug:
         msg: >-
-          {{ 'Wazuh is already installed - the installer will be skipped.'
+          {{ 'Wazuh is installed on disk - the installer will be skipped.'
              if wazuh_control.stat.exists
-             else 'Wazuh is not installed - the installation assistant will run.' }}
+             else ('Wazuh is NOT installed - the installation assistant will run.'
+                   if (wazuh_pkgs_present | length == 0)
+                   else 'A PARTIAL install was detected - see the failure below.') }}
 
-    # -----------------------------------------------------------------------------------------
-    # Install
-    # -----------------------------------------------------------------------------------------
-    - name: Download the pinned Wazuh installation assistant
-      ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/{{ wazuh_major }}/wazuh-install.sh"
-        dest: "{{ wazuh_installer_path }}"
-        mode: "0700"
-        owner: root
-        group: root
+    # =========================================================================================
+    # Guard: a partial / corrupt prior install
+    # =========================================================================================
+    # This is the exact state a deleted /var/ossec leaves behind: package(s) still registered but no
+    # control binary. Left alone, the installer aborts with "components were found on the host" and
+    # the operator has no idea a manual purge is needed. Catch it here with the remediation spelled
+    # out, rather than letting the installer fail cryptically 10 minutes in.
+    - name: Fail with remediation if a partial or corrupt Wazuh install is present
+      when:
+        - not wazuh_control.stat.exists
+        - wazuh_pkgs_present | length > 0
+      ansible.builtin.fail:
+        msg: |
+          ============================================================================
+          DIAGNOSTIC REPORT - PARTIAL / CORRUPT WAZUH INSTALL on {{ inventory_hostname }}
+          ============================================================================
+          Registered package(s) : {{ wazuh_pkgs_present | join(', ') }}
+          Control binary on disk : MISSING (/var/ossec/bin/wazuh-control)
+
+          What this means:
+            Wazuh packages are registered with dpkg but /var/ossec is gone, so the manager
+            cannot run and the all-in-one installer will refuse ("components were found").
+            This typically happens when /var/ossec was deleted while packages stayed registered.
+
+          Remediation - run on {{ inventory_hostname }}, then re-run this playbook:
+            sudo systemctl stop {{ wazuh_pkgs_present | join(' ') }} 2>/dev/null || true
+            # The maintainer scripts fail on the missing /var/ossec, so neutralise them, then purge:
+            for p in {{ wazuh_pkgs_present | join(' ') }}; do
+              for s in prerm postrm; do
+                printf '#!/bin/sh\nexit 0\n' | sudo tee /var/lib/dpkg/info/$p.$s >/dev/null
+                sudo chmod 755 /var/lib/dpkg/info/$p.$s
+              done
+            done
+            sudo dpkg --purge --force-all {{ wazuh_pkgs_present | join(' ') }}
+            sudo systemctl daemon-reload
+
+          If you are using Claude Code: paste this whole report and it can run the remediation
+          and re-run the install for you. If not: the block above is the fix, in order.
+          ============================================================================
+
+    # =========================================================================================
+    # Preflight - only when we are actually going to install
+    # =========================================================================================
+    - name: Preflight for a fresh install
       when: not wazuh_control.stat.exists
+      block:
 
-    # -a is the all-in-one deployment. -i skips the hardware precheck, which the assistant fails on
-    # anything under its recommended sizing - this lab gives wazuh-01 4 vCPU and 8 GB, which works
-    # for a classroom but is below what the check wants to see.
-    #
-    # The command deliberately does not have a `changed_when: false`: it changes a great deal.
-    - name: Run the Wazuh installation assistant (all-in-one)
-      ansible.builtin.command:
-        cmd: "bash {{ wazuh_installer_path }} --all-in-one --ignore-check"
-        creates: /var/ossec/bin/wazuh-control
-      register: wazuh_install
+        # --- Disk ---------------------------------------------------------------------------
+        - name: Measure free space on /
+          ansible.builtin.set_fact:
+            wazuh_root_free_mb: >-
+              {{ ((ansible_facts.mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first | default(0))
+                  / 1048576) | round | int }}
+
+        - name: Require enough free disk for the all-in-one install
+          ansible.builtin.assert:
+            that:
+              - wazuh_root_free_mb | int >= wazuh_min_free_mb | int
+            fail_msg: |
+              ============================================================================
+              DIAGNOSTIC REPORT - NOT ENOUGH DISK on {{ inventory_hostname }}
+              ============================================================================
+              Free on /  : {{ wazuh_root_free_mb }} MB
+              Required   : {{ wazuh_min_free_mb }} MB (floor - the JVM indexer wants more)
+
+              The all-in-one install (manager + indexer + dashboard) will fill / and fail
+              partway, and the installer's own cleanup then removes /var/ossec on the way out.
+
+              The usual cause is a clone whose root partition is still the template's BUILD
+              size while the VM disk is larger. Grow it (a fresh clone now self-grows via
+              cloud-init; an already-cloned LVM VM needs):
+                sudo growpart /dev/sda 3 && sudo pvresize /dev/sda3
+                sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubuntu-vg/ubuntu-lv
+              then re-run this playbook.
+              If you are using Claude Code, paste this report and it can grow the disk and re-run.
+              ============================================================================
+            success_msg: "Disk OK: {{ wazuh_root_free_mb }} MB free on / (>= {{ wazuh_min_free_mb }} MB)."
+
+        # --- Connectivity -------------------------------------------------------------------
+        - name: Connectivity preflight (own block so a failure can be explained)
+          block:
+            - name: Reach the Wazuh + GitHub endpoints the installer depends on
+              ansible.builtin.uri:
+                url: "{{ item }}"
+                method: GET
+                status_code: [200, 301, 302, 403, 404]
+                follow_redirects: none
+                timeout: 20
+                return_content: false
+              loop: "{{ wazuh_connectivity_urls }}"
+              register: wazuh_conn
+          rescue:
+            - name: Report the connectivity failure with next steps
+              ansible.builtin.fail:
+                msg: |
+                  ============================================================================
+                  DIAGNOSTIC REPORT - NO ROUTE TO THE WAZUH SOURCES from {{ inventory_hostname }}
+                  ============================================================================
+                  Could not reach at least one of:
+                    - packages.wazuh.com   (the package repository + wazuh-install.sh)
+                    - raw.githubusercontent.com (wazuh-template.json during the indexer stage)
+
+                  This is expected on an isolated SOC LAN unless fw-01 permits it. Check, in order:
+                    On {{ inventory_hostname }}:
+                      curl -I https://packages.wazuh.com/{{ wazuh_major }}/wazuh-install.sh
+                      getent hosts raw.githubusercontent.com   # DNS via dc-01 working?
+                    On fw-01 (OPNsense):
+                      allow 10.10.10.0/24 outbound tcp/443, and confirm the WAN NAT is up.
+
+                  The install needs this only WHILE it runs; you can tighten the rule afterwards.
+                  If you are using Claude Code, paste this report and it can help inspect fw-01's
+                  rules/NAT and dc-01's DNS. If not, the three checks above isolate it.
+                  ============================================================================
+
+    # =========================================================================================
+    # Install - with a diagnostic bundle on failure
+    # =========================================================================================
+    - name: Install Wazuh (all-in-one), reporting a diagnostic bundle on failure
       when: not wazuh_control.stat.exists
-      # The installer echoes the generated admin password to stdout on completion. Suppressing the
-      # output is the entire reason this task has no_log - the credential is retrieved deliberately
-      # and privately a few tasks below instead.
-      no_log: true
-      async: 3600
-      poll: 30
+      block:
 
-    # -----------------------------------------------------------------------------------------
+        - name: Download the pinned Wazuh installation assistant
+          ansible.builtin.get_url:
+            url: "https://packages.wazuh.com/{{ wazuh_major }}/wazuh-install.sh"
+            dest: "{{ wazuh_installer_path }}"
+            mode: "0700"
+            owner: root
+            group: root
+
+        # -a is the all-in-one deployment. -i skips the hardware precheck, which the assistant fails
+        # on anything under its recommended sizing - this lab gives wazuh-01 4 vCPU and 8 GB, which
+        # works for a classroom but is below what the check wants to see.
+        #
+        # The command deliberately does not have a `changed_when: false`: it changes a great deal.
+        - name: Run the Wazuh installation assistant (all-in-one)
+          ansible.builtin.command:
+            cmd: "bash {{ wazuh_installer_path }} --all-in-one --ignore-check"
+            creates: /var/ossec/bin/wazuh-control
+          register: wazuh_install
+          # The installer echoes the generated admin password to stdout on completion. Suppressing
+          # the output is the entire reason this task has no_log - the credential is retrieved
+          # deliberately and privately a few tasks below instead.
+          no_log: true
+          async: 3600
+          poll: 30
+
+      rescue:
+
+        # The installer writes progress to wazuh_install_log. On failure the installer's OWN cleanup
+        # runs next and floods the file with package-removal output, so a plain tail buries the real
+        # error. Pull the actual ERROR/failure lines FIRST, then a short tail. Password lines are
+        # stripped throughout so the report can be pasted anywhere (chat, an issue, to Claude) safely.
+        - name: Grab the installer error lines and log tail (password lines removed)
+          ansible.builtin.shell:
+            cmd: |
+              {
+                echo "--- error / failure lines ---"
+                grep -iE 'error|failed|no space|denied|cannot|unable|fatal' {{ wazuh_install_log }} 2>/dev/null \
+                  | grep -viE 'reading database|not empty so not removed' | tail -n 15
+                echo "--- last 15 log lines ---"
+                tail -n 15 {{ wazuh_install_log }} 2>/dev/null
+              } | grep -vi password || true
+            executable: /bin/bash
+          register: wazuh_log_tail
+          changed_when: false
+          failed_when: false
+
+        - name: Report the install failure with the log tail and next steps
+          ansible.builtin.fail:
+            msg: |
+              ============================================================================
+              DIAGNOSTIC REPORT - WAZUH INSTALL FAILED on {{ inventory_hostname }}
+              ============================================================================
+              --- from {{ wazuh_install_log }} (password lines stripped) ---
+              {{ wazuh_log_tail.stdout | default('(no installer log was found - the installer may not have started)') }}
+              --------------------------------------------------------------------------
+
+              Full log on {{ inventory_hostname }}: {{ wazuh_install_log }}
+
+              Re-running this playbook is SAFE: it is guarded on /var/ossec/bin/wazuh-control, so a
+              successful install is never re-run destructively. Common causes, in order of likelihood:
+                * outbound HTTPS dropped part-way (fw-01 rule flap / NAT) - re-check connectivity
+                * DNS to raw.githubusercontent.com stopped resolving mid-run (dc-01)
+                * disk filled during the indexer stage (df -h / on {{ inventory_hostname }})
+                * a leftover partial install - see the purge remediation this playbook prints for that case
+
+              If you are using Claude Code, paste this whole report and it can read the full log and
+              continue. If not, the log tail above plus the four causes are where to start.
+              ============================================================================
+
+    # =========================================================================================
     # Capture the generated credentials - privately
-    # -----------------------------------------------------------------------------------------
+    # =========================================================================================
     # The assistant writes every generated password into wazuh-install-files.tar. Those passwords
     # are needed by 70-detections.yml and by anyone who wants to log into the dashboard, so they
     # cannot simply be discarded - but they must never reach the terminal, the log, or the repo.
@@ -152,32 +349,72 @@
           installation time when running 70-detections.yml.
       when: not wazuh_tar.stat.exists
 
-    # -----------------------------------------------------------------------------------------
-    # Validation
-    # -----------------------------------------------------------------------------------------
-    - name: Confirm the three Wazuh services are running
-      ansible.builtin.service_facts:
+    # =========================================================================================
+    # Validation - with service journals on failure
+    # =========================================================================================
+    - name: Validate the deployment, reporting service journals on failure
+      block:
 
-    - name: Assert that manager, indexer and dashboard are all up
-      ansible.builtin.assert:
-        that:
-          - ansible_facts.services[item + '.service'] is defined
-          - ansible_facts.services[item + '.service'].state == 'running'
-        fail_msg: "{{ item }} is not running. Check `journalctl -u {{ item }}` on wazuh-01."
-        success_msg: "{{ item }} is running"
-      loop:
-        - wazuh-manager
-        - wazuh-indexer
-        - wazuh-dashboard
+        - name: Confirm the three Wazuh services are running
+          ansible.builtin.service_facts:
 
-    - name: Confirm the Wazuh API is listening
-      ansible.builtin.wait_for:
-        port: "{{ wazuh_api_port }}"
-        host: 127.0.0.1
-        timeout: 300
+        - name: Assert that manager, indexer and dashboard are all up
+          ansible.builtin.assert:
+            that:
+              - ansible_facts.services[item + '.service'] is defined
+              - ansible_facts.services[item + '.service'].state == 'running'
+            fail_msg: "{{ item }} is not running."
+            success_msg: "{{ item }} is running"
+          loop:
+            - wazuh-manager
+            - wazuh-indexer
+            - wazuh-dashboard
 
-    - name: Confirm the dashboard is listening on 443
-      ansible.builtin.wait_for:
-        port: 443
-        host: 127.0.0.1
-        timeout: 300
+        - name: Confirm the Wazuh API is listening
+          ansible.builtin.wait_for:
+            port: "{{ wazuh_api_port }}"
+            host: 127.0.0.1
+            timeout: 300
+
+        - name: Confirm the dashboard is listening on 443
+          ansible.builtin.wait_for:
+            port: 443
+            host: 127.0.0.1
+            timeout: 300
+
+      rescue:
+
+        - name: Collect the recent journal for each Wazuh service
+          ansible.builtin.shell:
+            cmd: "journalctl -u {{ item }} -n 25 --no-pager 2>/dev/null || echo '(no journal for {{ item }})'"
+          loop:
+            - wazuh-manager
+            - wazuh-indexer
+            - wazuh-dashboard
+          register: wazuh_journals
+          changed_when: false
+          failed_when: false
+
+        - name: Report which service failed to come up, with its journal
+          ansible.builtin.fail:
+            msg: |
+              ============================================================================
+              DIAGNOSTIC REPORT - WAZUH DID NOT COME UP CLEANLY on {{ inventory_hostname }}
+              ============================================================================
+              The install ran but not all of manager / indexer / dashboard reached "running",
+              or a port never opened. Recent journals:
+
+              {% for j in wazuh_journals.results %}
+              --- {{ j.item }} ---
+              {{ j.stdout | default('(none)') }}
+
+              {% endfor %}
+              --------------------------------------------------------------------------
+              Check on {{ inventory_hostname }}:
+                systemctl status wazuh-manager wazuh-indexer wazuh-dashboard
+                ss -tlnp | grep -E ':{{ wazuh_api_port }}|:443|:9200'
+              The indexer (a JVM) is the usual culprit - it is slow to start and hungry for RAM.
+
+              If you are using Claude Code, paste this whole report and it can dig into the failing
+              service. If not, the journals above name the service and the reason.
+              ============================================================================

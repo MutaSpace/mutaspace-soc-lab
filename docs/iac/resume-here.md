@@ -47,7 +47,7 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 | 100 | fw-01 | running | OPNsense gateway; config seed applied; routes + NATs; serves DHCP |
 | 102 | dc-01 | running | **Promoted DC** `mutaspace.local`; DNS forward+reverse; admin pw reset (see gaps) |
 | 103 | analyst-01 | running | Ubuntu Desktop; DHCP reservation .50 |
-| 104 | wazuh-01 | running | **Wazuh install is BROKEN (zombie)** — see the warning below; needs reinstall |
+| 104 | wazuh-01 | running | **Wazuh healthy** (reinstalled 2026-07-23; disk grown 18→58G; 3 agents Active) |
 | 106 | ubuntu-app-01 | running | bare clone; nginx/ssh pending (60-endpoints) |
 | 108/109/110 | kali-01 / untrusted-01 / nlp-01 | **created, started:false** | need `qm start` before configuring |
 | 206/216/226 | kali learners | created, started:false | learner plane |
@@ -62,8 +62,8 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 |---|---|
 | 10-dc-promote | **done** (finished manually — see the reboot gap below) |
 | 20-dns-records | **done** (A + reverse zone + PTR resolve) |
-| 40-wazuh-server | **MUST RE-RUN** — the manager on wazuh-01 is a zombie (see warning below) |
-| 50-wazuh-agents | **BLOCKED** by the above; also fixed an ansible.cfg callback bug to get this far |
+| 40-wazuh-server | **done (reinstalled 2026-07-23)** — healthy: manager+indexer+dashboard active, API :55000, dashboard :443. Hardened with preflight + diagnostics. |
+| 50-wazuh-agents | **done for powered-on hosts** — agents Active: ubuntu-app-01, analyst-01, dc-01 (+ wazuh-01 local). Off hosts (kali/untrusted/nlp) + unbuilt win-client-01 not enrolled → the playbook's final assert fails on those; re-run when they're up. |
 | 60-endpoints | pending (nginx on ubuntu-app-01; Sysmon needs win-client, not built) |
 | 70-detections | pending |
 | 80-ai-assist | pending — installs **Ollama on nlp-01** (start nlp-01 first). The `ai/` Python tooling (detection copilot, lab assistant) drives it |
@@ -73,20 +73,29 @@ Run pattern (now from the **jumpbox**, not the host):
 `ssh -J swc2026 labadmin@10.10.10.5 -i ~/.ssh/id_ed25519_mutaspace_lab` then
 `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a; ansible-playbook -i inventory/hosts.yml playbooks/<pb>`
 
-### ⚠️ WAZUH-01 IS BROKEN — reinstall before 50-agents (found 2026-07-23)
+### ✅ WAZUH-01 rebuilt + the root cause fixed lab-wide (2026-07-23)
 
-Attempting 50-wazuh-agents from the jumpbox surfaced this: **`/var/ossec` has been deleted from
-disk on wazuh-01 while the daemons keep running from unlinked inodes.** Evidence:
-`/proc/<pid>/exe -> /var/ossec/bin/wazuh-analysisd (deleted)`; `sudo ls /var/ossec` → ENOENT; no
-mount, nothing under `/var` named ossec/wazuh; disk only 50% full (not a space issue). The manager
-answers on :55000 and authd listens on :1515 *for now*, purely from RAM — **a restart or reboot will
-not bring Wazuh back**, and any fresh CLI exec (e.g. `agent_groups -l`, which 50-wazuh-agents calls)
-fails with ENOENT. So the "40-wazuh-server done" claim in earlier notes is **not true on disk**.
-- **Fix:** re-run `40-wazuh-server` to reinstall the manager cleanly, THEN 50-agents. First figure
-  out *why* /var/ossec vanished (snapshot/rollback hygiene? a stray cleanup?) so it doesn't recur.
-- **Repo bug fixed along the way:** `ansible/ansible.cfg` set `stdout_callback = community.general.yaml`,
-  removed in community.general 12.0.0; a fresh jumpbox installs 13.x, so every play errored before task 1.
-  Now `stdout_callback = ansible.builtin.default` + `result_format = yaml` (works on all versions).
+The "zombie" (`/var/ossec` gone, daemons running from deleted inodes) turned out to be a symptom of
+a **disk that filled during install**: the Wazuh all-in-one installer got partway, hit
+`No space left on device` unpacking the dashboard, and its OWN failure-cleanup purged the packages
+and `/var/ossec` — leaving the earlier zombie. Root cause: **wazuh-01's root FS was 18 GB on a 60 GB
+disk.** Every Ubuntu template freezes its root partition at BUILD size; clones onto bigger disks
+never grow because cloud-init's growpart does not handle LVM.
+
+What was done:
+- Purged the broken partial install, **grew wazuh-01 root 18 GB → 58 GB** (growpart→pvresize→lvextend→resize2fs),
+  re-ran the hardened `40-wazuh-server` — clean. Then `50-wazuh-agents`: ubuntu-app-01, analyst-01,
+  dc-01 enrolled and **Active**.
+- **Fixed the root cause in IaC** so it can't recur: `tofu/templates/user-data-linux.tftpl` now
+  self-grows root to fill the disk on first boot (all future clones); `00-preflight.yml` gained a
+  non-fatal per-host "root FS vs disk" check; `40-wazuh-server.yml` raised its disk floor 5→10 GB and
+  now points a disk-full failure at the grow fix.
+- **Remediated every already-cloned running VM** (cloud-init only helps fresh clones): jumpbox 18→28,
+  analyst-01 28→38, ubuntu-app-01 18→38, wazuh-01 →58. **Still undersized (grow on next boot):** the
+  off VMs kali-01/untrusted-01/nlp-01. Windows dc-01 (60 GB) and OPNsense fw-01 use different disk
+  layouts — not covered by the Ubuntu grow; check separately if they ever run short.
+- Earlier repo bug also fixed: `ansible.cfg` used the removed `community.general.yaml` callback → now
+  `default` + `result_format = yaml`.
 
 ---
 
