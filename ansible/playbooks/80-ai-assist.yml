@@ -1,0 +1,186 @@
+# playbooks/80-ai-assist.yml
+#
+# Stand up the lab's local AI model: Ollama serving a small tool-calling chat model and an embedder
+# on nlp-01, entirely on CPU. This is the FOUNDATION every AI-assisted feature in docs/ai/README.md
+# builds on - alert triage, detection drafting, the docs-grounded assistant, and scenario coaching
+# all call this one endpoint. Nothing here needs a GPU, an API key, or the internet at run time.
+#
+# ---------------------------------------------------------------------------------------------
+# READ THIS BEFORE RUNNING IT: like 40-wazuh-server.yml, this is a BUILD-PLANE concern wearing a
+# configuration playbook's clothes.
+# ---------------------------------------------------------------------------------------------
+# Two steps need outbound internet, and nlp-01 is on the isolated segment (10.10.20.0/24) whose
+# whole premise is that it has none:
+#
+#   1. Installing Ollama - the official installer is fetched from ollama.com.
+#   2. Pulling the models - qwen2.5:3b (~2 GB) and nomic-embed-text come from the Ollama registry.
+#
+# The right long-term home for both is the Packer build of the nlp-01 template, on the build plane
+# (vmbr9), where outbound access exists by design and the ~2 GB of model weights get baked into the
+# image once instead of pulled on every rebuild. This playbook is kept for the same three reasons
+# the Wazuh one is: it documents exactly what that template must end up containing, it is how the
+# node is brought up when the template is not yet updated, and "the model download needs the
+# internet, but the box that runs it must not" is a constraint worth teaching, not hiding.
+#
+# If you run it as-is, fw-01 must permit nlp-01 outbound HTTPS for the duration, and be closed again
+# afterwards. Once the models are pulled, inference itself is fully offline.
+# ---------------------------------------------------------------------------------------------
+#
+# Usage:
+#   ansible-playbook playbooks/80-ai-assist.yml
+---
+- name: Stand up the local AI model on the analysis node
+  hosts: ai_host
+  gather_facts: true
+  become: true
+
+  vars:
+    ollama_bin: /usr/local/bin/ollama
+    ollama_install_script: /root/ollama-install.sh
+
+  handlers:
+    # A drop-in that changes the service environment is only live after a daemon-reload, so the
+    # handler does both. Restarting rather than reloading because Ollama re-reads OLLAMA_HOST only
+    # at process start.
+    - name: Restart ollama
+      ansible.builtin.systemd_service:
+        name: ollama
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # Is it already installed?
+    # -----------------------------------------------------------------------------------------
+    # The installer is safe to re-run, but fetching and re-running it every time turns a no-op play
+    # into a network round-trip on a segment that should not have the network. Guard on the binary.
+    - name: Check whether Ollama is already installed
+      ansible.builtin.stat:
+        path: "{{ ollama_bin }}"
+      register: ollama_installed
+
+    - name: Report the installation state
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Ollama is already installed - the installer will be skipped.'
+             if ollama_installed.stat.exists
+             else 'Ollama is not installed - the installer will run (needs outbound HTTPS).' }}
+
+    # -----------------------------------------------------------------------------------------
+    # Install
+    # -----------------------------------------------------------------------------------------
+    # The install script is downloaded to a file and then run, rather than piped straight from curl
+    # into a shell. Same result, but the script is on disk to read if the install misbehaves, and a
+    # partial download fails at get_url instead of feeding half a script to root's shell.
+    - name: Download the Ollama install script
+      ansible.builtin.get_url:
+        url: https://ollama.com/install.sh
+        dest: "{{ ollama_install_script }}"
+        mode: "0700"
+        owner: root
+        group: root
+      when: not ollama_installed.stat.exists
+
+    - name: Run the Ollama installer
+      ansible.builtin.command:
+        cmd: "sh {{ ollama_install_script }}"
+        creates: "{{ ollama_bin }}"
+      when: not ollama_installed.stat.exists
+
+    # -----------------------------------------------------------------------------------------
+    # Bind address
+    # -----------------------------------------------------------------------------------------
+    # Ollama listens on 127.0.0.1:11434 out of the box, which is the safe default: the model is
+    # reachable only from nlp-01 itself. A drop-in overrides OLLAMA_HOST when - and only when - the
+    # operator has set ai_ollama_bind to the segment IP because another host must call the model.
+    # Opening the bind without the matching fw-01 rule just makes it unreachable; opening the fw-01
+    # rule without this leaves it bound to loopback. Both are set together or neither is.
+    - name: Ensure the systemd drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/ollama.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Configure the Ollama API bind address
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ollama.service.d/10-bind.conf
+        mode: "0644"
+        owner: root
+        group: root
+        content: |
+          # Managed by Ansible - playbooks/80-ai-assist.yml
+          [Service]
+          Environment=OLLAMA_HOST={{ ai_ollama_bind }}:{{ ai_ollama_port }}
+      notify: Restart ollama
+
+    - name: Ensure Ollama is enabled and running
+      ansible.builtin.systemd_service:
+        name: ollama
+        state: started
+        enabled: true
+
+    # Apply a pending bind change now, before the model tasks query the API below.
+    - name: Apply any pending service changes
+      ansible.builtin.meta: flush_handlers
+
+    # -----------------------------------------------------------------------------------------
+    # Pull the models
+    # -----------------------------------------------------------------------------------------
+    # `ollama pull` is idempotent on the server side, but it still contacts the registry every time
+    # to check the digest, so it is guarded on the model already being listed. That keeps a re-run
+    # on the isolated segment from reaching for a network it does not have.
+    - name: List the models already present
+      ansible.builtin.command:
+        cmd: ollama list
+      register: ollama_models
+      changed_when: false
+
+    - name: Pull the tool-calling chat model
+      ansible.builtin.command:
+        cmd: "ollama pull {{ ai_chat_model }}"
+      when: ai_chat_model.split(':')[0] not in ollama_models.stdout
+      # A cold pull of a ~2 GB model over a lab uplink is minutes, not seconds. Run it detached so a
+      # dropped SSH session does not abandon a half-written blob.
+      async: 1800
+      poll: 20
+      changed_when: true
+
+    - name: Pull the embedding model
+      ansible.builtin.command:
+        cmd: "ollama pull {{ ai_embed_model }}"
+      when: ai_embed_model.split(':')[0] not in ollama_models.stdout
+      async: 600
+      poll: 15
+      changed_when: true
+
+    # -----------------------------------------------------------------------------------------
+    # Validation - prove the endpoint answers and the models are really there
+    # -----------------------------------------------------------------------------------------
+    - name: Confirm the Ollama API is answering
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ai_ollama_port }}/api/tags"
+        return_content: true
+      register: ollama_tags
+      retries: 5
+      delay: 5
+      until: ollama_tags.status == 200
+
+    - name: Assert both models are available
+      ansible.builtin.assert:
+        that:
+          - ai_chat_model.split(':')[0] in ollama_tags.content
+          - ai_embed_model.split(':')[0] in ollama_tags.content
+        fail_msg: >-
+          The API is up but a model is missing. Run `ollama list` on nlp-01; if the segment has no
+          outbound access the pull tasks above will have been skipped.
+        success_msg: "Ollama is serving {{ ai_chat_model }} and {{ ai_embed_model }} on nlp-01."
+
+    - name: Tell the operator how to reach the model
+      ansible.builtin.debug:
+        msg:
+          - "Local model is up on nlp-01: http://{{ ai_ollama_bind }}:{{ ai_ollama_port }}"
+          - "Chat model: {{ ai_chat_model }}   Embedder: {{ ai_embed_model }}"
+          - >-
+            Bound to {{ ai_ollama_bind }}. To let analyst-01 call it, set ai_ollama_bind to
+            10.10.20.30, re-run this play, and open a fw-01 rule for SOC LAN -> 10.10.20.30:{{ ai_ollama_port }}.

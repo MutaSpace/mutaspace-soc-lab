@@ -96,3 +96,26 @@ wazuh_api_user: >-
   {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_API_USER', default='wazuh') }}
 wazuh_api_password: >-
   {{ lookup('ansible.builtin.env', 'MUTASPACE_WAZUH_API_PASSWORD', default=Undefined) }}
+
+# ---------------------------------------------------------------------------------------------
+# AI assist - the local model
+# ---------------------------------------------------------------------------------------------
+# The lab runs one local, offline model for AI-assisted SOC work: alert triage, detection-rule
+# drafting, a docs-grounded analyst assistant, and incident-scenario coaching. It is Ollama serving
+# small models on CPU - no GPU, no API key, and nothing leaves the host. This mirrors the course's
+# Day 4 design decision: a 3B model is the floor for reliably-valid tool-call JSON on CPU (sub-2B
+# models emit malformed arguments), and a separate embedder powers retrieval over the lab's docs.
+#
+# WHERE IT RUNS: nlp-01, the lab's pre-existing "Analysis/NLP workload" node (see the ai_host group
+# in hosts.yml). It sits on the isolated segment, which keeps a CPU-heavy workload off the SOC LAN
+# but means SOC-LAN callers (the triage tooling on analyst-01) reach it only through a deliberate
+# firewall rule - a decision recorded in docs/ai/README.md, not one this file makes silently.
+ai_chat_model: "qwen2.5:3b"          # tool-calling chat model; 3B is the CPU floor for valid tool JSON
+ai_embed_model: "nomic-embed-text"   # embeddings for RAG over the lab's own documentation
+ai_ollama_port: 11434                # Ollama's default API port
+
+# Bind address for the Ollama API. Loopback keeps the model host-local, which is the safe default:
+# nothing off-box can reach it. Set this to nlp-01's segment IP (10.10.20.30) ONLY when another lab
+# host must call the model, and open the matching firewall rule at the same time - never one without
+# the other.
+ai_ollama_bind: "127.0.0.1"
