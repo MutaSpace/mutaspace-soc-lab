@@ -27,10 +27,10 @@
 # self-signed cert the jumpbox does not trust; the API host is a fixed lab-internal IP, so there is
 # no network path for anyone to interpose (the same scoped exception 70-detections documents).
 #
-# TODO(W4.0/W4.2): confirm the action-group name resolves as `oxlorg.opnsense.all` once the
-# collection is installed on the jumpbox (the ansibleguy->oxlorg rename could change it). If it does
-# not, either use the collection's documented group name or drop module_defaults and pass the four
-# params per task. The read-only spike (plan 4.0) verifies this before the first live run.
+# RESOLVED (2026-07-24, read-only on the jumpbox): the action group `oxlorg.opnsense.all` DOES
+# exist in the installed collection's meta/runtime.yml (alongside per-category groups ids, rule,
+# syslog, ...), so module_defaults on group/oxlorg.opnsense.all is valid and sets the four
+# connection params for every module below.
 #
 # ---------------------------------------------------------------------------------------------
 # WHY A raw-uri FALLBACK IS COMMENTED UNDER EACH MODULE TASK
@@ -62,9 +62,16 @@
 #   ansible-playbook playbooks/05-fw-config.yml --tags egress -e fw_egress_state=true
 #   ansible-playbook playbooks/05-fw-config.yml --tags suricata
 #
-# STATUS: DRAFT - written offline while the W2 template rebuild runs. Not yet run against a live
-# fw-01 (the new API is not live until the W2 cutover). Pending the W4.0 read-only spike:
-# fw_ids_ruleset filename and exact route casing. Do not run live before then.
+# STATUS (2026-07-24): the FULL EVE->Wazuh pipeline this play codifies has been PROVEN end-to-end on
+# the live lab (testmynids across fw-01 -> Suricata sid 2100498 -> EVE/syslog -> wazuh-01:514 ->
+# custom decoder -> Wazuh rule 86601). The live fw-01 was brought to that state by hand/API during
+# the W4.0 spike; the settings this play asserts (Suricata on, emerging-attack_response enabled +
+# downloaded, syslog_output/syslog_eve on, syslog dest -> 10.10.10.20:514) are all present live. The
+# W4.0 unknowns are now RESOLVED and folded in above (ruleset filename, the `all` action group,
+# syslog_output, updateRules-not-reloadRules). What has NOT yet been done: a clean idempotent RUN of
+# THIS PLAY via the oxlorg modules against the live box (expected changed~0). Do that from the
+# jumpbox with FW_API_KEY/FW_API_SECRET exported, `plan`-style caution, and the VM snapshot rollback
+# ready (resume-here) before trusting it for a from-scratch deploy.
 ---
 - name: Configure fw-01 (OPNsense) deltas over the REST API
   hosts: localhost
@@ -93,12 +100,11 @@
     # fw:egress-open / fw:egress-close pass true / false.
     fw_egress_state: "false"
 
-    # TODO(W4.0): the EXACT version-specific filename of the ET Open emerging-attack_response ruleset
-    # (it carries the testmynids verification signature). Discover it live, read-only, via
-    # GET /api/ids/settings/searchInstalledRulesets on the 26.7 box - do NOT guess it. Left empty so
-    # a suricata run without it set fails with a clear, named message (assert below) rather than
-    # enabling the wrong ruleset. e.g. "emerging-attack_response.rules".
-    fw_ids_ruleset: ""
+    # The ET Open emerging-attack_response ruleset - it carries sid 2100498 ("GPL ATTACK_RESPONSE id
+    # check returned root"), the signature testmynids trips. Filename confirmed live on the 26.7 box
+    # 2026-07-24 via GET /api/ids/settings/listRulesets (NOT searchInstalledRulesets - that route
+    # 404s on 26.7; listRulesets is the correct one). Override with -e fw_ids_ruleset=... if needed.
+    fw_ids_ruleset: "emerging-attack_response.rules"
 
     # The two lab /24s - Suricata's HOME_NET. Anything outside these is EXTERNAL_NET.
     fw_ids_homenet:
@@ -170,9 +176,13 @@
       oxlorg.opnsense.ids_general:
         enabled: true
         ips: false
-        # TODO(W4.0): confirm the EVE-syslog param NAME against the installed collection. The plan's
-        # spike calls it `syslog_output`; the ansibleguy lineage also exposed `syslog_eve`. If this
-        # key is rejected, switch to the collection's actual name (the raw-uri fallback is unaffected).
+        # syslog_output CONFIRMED (2026-07-24) as the correct param: the module's own doc string reads
+        # "Send alerts in eve format to syslog, using log level info" - i.e. it IS the seed's
+        # <syslog_eve> toggle. (The separate `syslog_alerts`/`syslog` param is the non-EVE fast-log
+        # output; not what we want.) The module carries RELOAD_MOD_ARG, so setting this reconfigures
+        # IDS and regenerates suricata.yaml with the `type: syslog` eve-log block - proven necessary
+        # live: setting syslog_eve WITHOUT a reconfigure leaves eve-log at filetype:regular and no EVE
+        # ever reaches syslog.
         syslog_output: true
         interfaces: ["lan", "opt1"]
         homenet: "{{ fw_ids_homenet }}"
@@ -207,13 +217,16 @@
     # POST /api/ids/settings/toggleRuleset/{filename}/1 then POST /api/ids/service/reconfigure.
     # Route casing re-confirmed in W4.0.
 
-    # ET Open must be DOWNLOADED once before its signatures (incl. the testmynids one) exist. No
-    # oxlorg module wraps this service action, so it is a raw uri call. It is heavy (downloads the
-    # ruleset), hence one-time; changed_when: true keeps it honest in the run summary.
-    # TODO(W4.0): confirm the reloadRules route casing read-only before the first live run.
-    - name: Download/update the ET Open ruleset so its signatures exist (one-time, heavy)
+    # ET Open must be DOWNLOADED before its signatures (incl. the testmynids one) exist. The endpoint
+    # is updateRules, NOT reloadRules: confirmed live 2026-07-24 that both return {"status":"OK"} but
+    # updateRules is the one that FETCHES from the rule sources (it is the GUI "Download & Update
+    # Rules" action); reloadRules only recompiles the already-installed set. Enabling a ruleset with
+    # ids_ruleset does not fetch it - without this call a from-scratch box has 0 rules on disk. No
+    # oxlorg module wraps this service action, so it is a raw uri call. It is heavy (downloads +
+    # recompiles); changed_when: true keeps it honest in the run summary.
+    - name: Download/update the ET Open ruleset so its signatures exist (heavy fetch)
       ansible.builtin.uri:
-        url: "https://{{ fw_api_host }}/api/ids/service/reloadRules"
+        url: "https://{{ fw_api_host }}/api/ids/service/updateRules"
         method: POST
         url_username: "{{ fw_api_key }}"
         url_password: "{{ fw_api_secret }}"

@@ -65,6 +65,11 @@ wazuh_indexer_port: 9200
 # collide with a shipped rule on the next ruleset update.
 wazuh_local_rules_file: local_rules.xml
 
+# Custom decoder shipped to the manager alongside the rules. This one lets Wazuh parse Suricata
+# EVE JSON that arrives framed as syslog (the built-in json decoder only matches logs that begin
+# with '{', which the syslog wrapper defeats). See files/wazuh-decoders/suricata-eve.xml.
+wazuh_local_decoders_file: suricata-eve.xml
+
 # ---------------------------------------------------------------------------------------------
 # Local paths
 # ---------------------------------------------------------------------------------------------

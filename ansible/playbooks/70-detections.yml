@@ -111,6 +111,39 @@
         msg: "{{ rules_upload.json.message | default('Rules file uploaded') }}"
 
     # -----------------------------------------------------------------------------------------
+    # Push the Suricata EVE-over-syslog decoder
+    # -----------------------------------------------------------------------------------------
+    # Same staged-then-uploaded pattern as the rules, but against the /decoders endpoint. This
+    # decoder is what makes the fw-01 Suricata syslog stream decode at all - without it the
+    # 86xxx Suricata rules never fire (Wazuh ships the rules but not a syslog-path decoder). See
+    # the header of files/wazuh-decoders/suricata-eve.xml for the full reasoning.
+    - name: Stage the Suricata decoder on the manager
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/wazuh-decoders/{{ wazuh_local_decoders_file }}"
+        dest: "/tmp/{{ wazuh_local_decoders_file }}"
+        mode: "0640"
+
+    - name: Upload the Suricata decoder through the API
+      ansible.builtin.uri:
+        url: >-
+          {{ wazuh_api_base }}/decoders/files/{{ wazuh_local_decoders_file }}?overwrite=true&relative_dirname=etc/decoders
+        method: PUT
+        src: "/tmp/{{ wazuh_local_decoders_file }}"
+        remote_src: true
+        headers:
+          Authorization: "Bearer {{ wazuh_auth.content }}"
+          Content-Type: application/octet-stream
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: decoder_upload
+      no_log: true
+
+    - name: Show the decoder upload result
+      ansible.builtin.debug:
+        msg: "{{ decoder_upload.json.message | default('Decoder file uploaded') }}"
+
+    # -----------------------------------------------------------------------------------------
     # Reload
     # -----------------------------------------------------------------------------------------
     - name: Reload analysisd so the new rules take effect
@@ -168,18 +201,26 @@
       loop_control:
         label: "rule {{ item.item }}"
 
-    - name: Remove the staged copy
+    - name: Remove the staged copies
       ansible.builtin.file:
-        path: "{{ wazuh_rules_staging_path }}"
+        path: "{{ item }}"
         state: absent
+      loop:
+        - "{{ wazuh_rules_staging_path }}"
+        - "/tmp/{{ wazuh_local_decoders_file }}"
 
 # ---------------------------------------------------------------------------------------------
 # SURICATA INGESTION - the Wazuh half of EVE -> Wazuh (fw half is 05-fw-config.yml)
 # ---------------------------------------------------------------------------------------------
 # fw-01's Suricata emits EVE JSON to a remote syslog destination (05-fw-config.yml, part c) aimed at
 # 10.10.10.20:514/udp. For the manager to ACCEPT that stream it needs a syslog <remote> listener in
-# ossec.conf, scoped to fw-01's address. Wazuh ships built-in Suricata decoders (the json decoder,
-# rule ids ~86xxx), so NO custom decoder is needed here - only the listener.
+# ossec.conf, scoped to fw-01's address.
+#
+# It ALSO needs the Suricata decoder deployed by the main play above (files/wazuh-decoders/
+# suricata-eve.xml). This was proven the hard way on 2026-07-24: Wazuh ships the Suricata *rules*
+# (86xxx) but NOT a decoder for the SYSLOG path - the built-in json decoder only matches logs that
+# begin with '{', which the syslog frame `suricata[pid]: {json}` defeats, so `wazuh-logtest`
+# reported "No decoder matched" and no alert was ever produced. The listener alone is NOT enough.
 #
 # WHY THIS DEVIATES FROM THE reload-only RULE AT THE TOP OF THIS FILE
 # ---------------------------------------------------------------------------------------------

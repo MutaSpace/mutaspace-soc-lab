@@ -1,0 +1,28 @@
+<!--
+  Suricata EVE-over-syslog decoder  (MutaSpace SOC lab, W4)
+
+  fw-01 (OPNsense) runs Suricata with syslog_eve enabled, so it emits its EVE JSON
+  alerts to syslog as program "suricata"; syslog-ng forwards that stream to the Wazuh
+  manager's syslog <remote> listener on 10.10.10.20:514/udp (see 70-detections.yml and
+  05-fw-config.yml).
+
+  WHY THIS FILE EXISTS (the non-obvious part, proven on the live box 2026-07-24):
+  Wazuh's built-in `json` decoder only fires on logs that BEGIN with '{'. A syslog-framed
+  Suricata event does not - it is `<pri>timestamp host suricata[pid]: {json}`, so after the
+  syslog pre-decoder extracts program_name="suricata" the built-in json decoder never
+  matches, and `wazuh-logtest` reports "No decoder matched". Wazuh ships Suricata *rules*
+  (0475-suricata_rules.xml, ids 86600+) but NO Suricata *decoder* for the syslog path - the
+  shipped 86xxx rules assume the localfile/eve.json ingestion route where the json decoder is
+  applied automatically. Forwarding EVE over syslog therefore needs this decoder.
+
+  It is deliberately named "json" (a variant, scoped by program_name) so the decoded event is
+  tagged `decoded_as json`, which is exactly the condition rule 86600 gates on:
+      <rule id="86600" level="0"><decoded_as>json</decoded_as>...
+  With this in place, testmynids across fw-01 produces rule 86601
+  ("Suricata: Alert - GPL ATTACK_RESPONSE id check returned root", sid 2100498) in the
+  Wazuh indexer. The program_name constraint keeps it from touching any non-Suricata log.
+-->
+<decoder name="json">
+  <program_name>^suricata$</program_name>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

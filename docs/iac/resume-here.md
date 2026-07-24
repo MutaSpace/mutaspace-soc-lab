@@ -5,7 +5,8 @@ overview; getting-started.md is the operator walkthrough.
 
 **Last updated: 2026-07-24 — the lab is DEPLOYED. jumpbox-01 is the Ansible control node.
 Scenario-runner MVP live-proven; fw-01 is now zero-touch Infrastructure-as-Code (opnsense-as-code,
-see below); nlp-01 Ollama is up. Suricata rule-download + W4/W5 tail remain.**
+see below); nlp-01 Ollama is up. **W4 Suricata EVE→Wazuh pipeline PROVEN end-to-end & codified**
+(2026-07-24); remaining: a clean idempotent 05-fw-config run + W5 `fw:*` verbs.**
 
 ---
 
@@ -26,15 +27,35 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
   applied. `-target` scopes it to fw-01 + 10 harmless snippet re-uploads (no running VM touched).
   Always `plan` and enumerate the replace set first. VM-level rollback:
   `qmrestore /var/lib/vz/dump/vzdump-qemu-100-*.vma.zst 100 --force`.
-- **W4 DRAFTS committed (15c7384), NOT yet run end-to-end:** `ansible/playbooks/05-fw-config.yml`
-  (oxlorg.opnsense:26.1.11, installed on jumpbox) + `task fw:egress-open/close`/`fw:suricata`.
-  Egress toggle proven; **Ollama models pulled on nlp-01**. REMAINING: Suricata ET Open
-  **rule-source config + download** (settings/get doesn't expose it, `reloadRules` alone won't fetch —
-  rulesets stay 0), then enable attack-response + `syslog_eve` on + syslog dest → wazuh-01 + the Wazuh
-  `<remote>` listener (already drafted in 70-detections) + a testmynids 86xxx verify. Fix the drafts'
-  `module_defaults` (no `oxlorg.opnsense.all` group → per-task auth) and the **ansible→nlp `-b`/sudo
-  hang** (direct SSH works) before `80-ai-assist` runs codified. Design note: seed allows
-  `opt1→internet` for the whole research plane — decide if untrusted-01 should be air-gapped too.
+- **W4 EVE→Wazuh pipeline is PROVEN END-TO-END live (2026-07-24).** `curl testmynids` from
+  ubuntu-app-01 across fw-01 → Suricata **sid 2100498** ("GPL ATTACK_RESPONSE id check returned
+  root") → EVE-over-syslog → wazuh-01:514 → **Wazuh rule 86601** (`ids,suricata`, level 3) in
+  alerts.json. Every hop was walked and captured on the wire. The non-obvious blockers found &
+  fixed:
+  - **Wazuh ships Suricata *rules* (86xxx) but NO decoder for the SYSLOG path.** The built-in `json`
+    decoder only matches logs starting with `{`; the syslog frame `suricata[pid]: {json}` defeats it
+    → `wazuh-logtest` said "No decoder matched" and the pipeline was silent. **Fix, now codified:**
+    `ansible/files/wazuh-decoders/suricata-eve.xml` — a `<decoder name="json">` scoped by
+    `program_name suricata` running `JSON_Decoder`, named `json` so `decoded_as json` fires rule
+    86600→86601. Deployed by 70-detections.yml (API upload, beside the rules) + placed live already;
+    local_decoder.xml hand-edit was reverted, box now matches code.
+  - **`syslog_eve=1` in config.xml is inert until an IDS reconfigure** regenerates suricata.yaml with
+    the second `eve-log` block (`type: syslog`, identity suricata, facility local5). ids_general
+    carries RELOAD_MOD_ARG so the module handles this; I triggered it by hand this session.
+  - **The download endpoint is `updateRules`, NOT `reloadRules`** (reloadRules only recompiles). Draft
+    fixed. `emerging-attack_response.rules` is the ruleset (enabled + on disk, 1627 rules).
+  - Resolved read-only: the `oxlorg.opnsense.all` action group **does** exist (module_defaults is
+    valid); `syslog_output` is the right param (== the syslog_eve toggle).
+  - fw-01 syslog **destination** (program suricata → 10.10.10.20:514/udp4) and the Wazuh `<remote>`
+    listener are both LIVE. syslog-ng forwards fine (ping/tcpdump confirmed; my early `-i any -c`
+    captures were racy — trust a foreground `-i eth0` capture).
+  - **STILL TODO:** a clean idempotent RUN of 05-fw-config.yml via the oxlorg modules against the live
+    box (expected changed~0) — never done; do it from the jumpbox with FW creds + snapshot rollback
+    ready. Also the **ansible→nlp `-b`/sudo hang** (direct SSH works) before `80-ai-assist`.
+    **Ollama models pulled on nlp-01.** Design note: seed allows `opt1→internet` for the whole
+    research plane — decide if untrusted-01 should be air-gapped too.
+  - **fw-01 SSH host key changed** after the W2 rebuild — clear the stale known_hosts line
+    (`ssh-keygen -R 10.10.10.1`) or use `-o UserKnownHostsFile=/dev/null`.
 
 ---
 
