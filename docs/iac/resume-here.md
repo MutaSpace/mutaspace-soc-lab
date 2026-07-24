@@ -51,9 +51,12 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
     captures were racy — trust a foreground `-i eth0` capture).
   - **STILL TODO:** a clean idempotent RUN of 05-fw-config.yml via the oxlorg modules against the live
     box (expected changed~0) — never done; do it from the jumpbox with FW creds + snapshot rollback
-    ready. Also the **ansible→nlp `-b`/sudo hang** (direct SSH works) before `80-ai-assist`.
-    **Ollama models pulled on nlp-01.** Design note: seed allows `opt1→internet` for the whole
-    research plane — decide if untrusted-01 should be air-gapped too.
+    ready. Design note: seed allows `opt1→internet` for the whole research plane — decide if
+    untrusted-01 should be air-gapped too.
+  - **ansible→nlp `-b`/sudo hang RESOLVED (2026-07-24):** it was stale ControlPersist SSH sockets
+    from the fw-01 rebuild, not sudo. `80-ai-assist.yml` now runs codified end-to-end (ok=11,
+    changed=3, failed=0, ~3.6s). If it recurs after a future fw-01 rebuild: `rm -f ~/.ansible/cp/*`
+    on the jumpbox (or wait 60s for ControlPersist to age out). **Ollama models present on nlp-01.**
   - **fw-01 SSH host key changed** after the W2 rebuild — clear the stale known_hosts line
     (`ssh-keygen -R 10.10.10.1`) or use `-o UserKnownHostsFile=/dev/null`.
 
@@ -143,8 +146,8 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 | 40-wazuh-server | **done (reinstalled 2026-07-23)** — healthy: manager+indexer+dashboard active, API :55000, dashboard :443. Hardened with preflight + diagnostics. |
 | 50-wazuh-agents | **done for powered-on hosts** — agents Active: ubuntu-app-01, analyst-01, dc-01 (+ wazuh-01 local). Off hosts (kali/untrusted/nlp) + unbuilt win-client-01 not enrolled → the playbook's final assert fails on those; re-run when they're up. |
 | 60-endpoints | pending (nginx on ubuntu-app-01; Sysmon needs win-client, not built) |
-| 70-detections | pending |
-| 80-ai-assist | pending — installs **Ollama on nlp-01** (start nlp-01 first). The `ai/` Python tooling (detection copilot, lab assistant) drives it |
+| 70-detections | Suricata half **done + proven** (decoder + syslog listener live, rule 86601 verified); a formal full idempotent run of the whole play not yet recorded |
+| 80-ai-assist | **done (ran clean 2026-07-24: ok=11, changed=3, failed=0)** — Ollama + models present on nlp-01, bound to 127.0.0.1. The `ai/` Python tooling (detection copilot, lab assistant) drives it |
 | 90-lab-seed | pending — creates test.user / lab.user02 (the incident scenarios need them) |
 
 Run pattern (now from the **jumpbox**, not the host):
