@@ -685,15 +685,17 @@ source "proxmox-iso" "win11-client" {
   #   2. One <down> moves the highlight HARDDISK -> "UEFI QEMU DVD-ROM QM00013", which
   #      is sata0, the Windows install media. (QM00015/17/19 are the other three SATA
   #      CDs.) <enter> commits to booting it.
-  #   3. Committing to QM00013 DISARMS the boot-menu hotkey, so the Windows
-  #      "Press any key to boot from CD" prompt that follows finally treats <enter> as
-  #      "any key" and boots WinPE. The spaced <enter>s cover that ~5 s window.
+  #   3. Committing to QM00013 lets the Windows "Press any key to boot from CD" prompt
+  #      that follows treat <enter> as "any key". That prompt is a ~5 s window at a
+  #      variable delay after the DVD is selected, so <enter> is repeated 30x at 1 s to
+  #      blanket ~30 s. NOTE: boot-catch still MISSED in live 2026-07-24 tests; if it
+  #      keeps missing, remaster the ISO with efisys_noprompt.bin so the CD boots
+  #      WITHOUT the prompt (the robust fix). See README.md.
   #
   # boot_wait 20 s starts phase 1 before the earliest POST; 55 spacebars at 2 s span
-  # t=20-130 s, covering the slow tail. The string is generated, not hand-typed --
-  # see the phaseA/B/C construction recorded in the commit for 2026-07-23.
+  # t=20-130 s, covering the slow tail.
   boot_wait    = "20s"
-  boot_command = ["<spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><down><wait1s><enter><wait2s><enter><wait2s><enter><wait2s><enter><wait2s><enter>"]
+  boot_command = ["<spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><down><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter>"]
 
   # --- communicator ---------------------------------------------------------
   #
