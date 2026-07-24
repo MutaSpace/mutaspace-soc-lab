@@ -607,6 +607,68 @@ tasks:
     cmds:
       - '{{.SCRIPTS_DIR}}/fw-rebuild-template.sh {{.CLI_ARGS}}'
 
+  # fw-01 config-as-code verbs (05-fw-config.yml). Like scenario:*, these run
+  # `ansible-playbook` directly - the oxlorg.opnsense modules are REST clients
+  # that run on this control node (the jumpbox) and talk to the fw API at
+  # 10.10.10.1; there is no `qm`/SSH-to-host step. They need FW_API_KEY /
+  # FW_API_SECRET in the environment (.envrc section 6); without them the play
+  # is a friendly no-op, so the precondition names the fix up front.
+
+  fw:egress-open:
+    desc: >-
+      Enable the research-plane egress rule on fw-01 so nlp-01 (10.10.20.30) can
+      reach the internet. The SOC LAN (10.10.10.0/24) STAYS blocked by
+      construction (the rule is content-scoped, not order-scoped). Reverse with
+      task fw:egress-close.
+    preconditions:
+      - sh: 'test -n "$FW_API_KEY" && test -n "$FW_API_SECRET"'
+        msg: >-
+          FW_API_KEY / FW_API_SECRET are not set. They are the plaintext API pair
+          baked into fw-01 --- see .envrc.example section 6.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/05-fw-config.yml
+        --tags egress -e fw_egress_state=true
+
+  fw:egress-close:
+    desc: >-
+      Disable the research-plane egress rule on fw-01 --- nlp-01 (10.10.20.30) loses
+      internet egress again. The SOC LAN is unreachable from the research plane in
+      both states. Opposite of task fw:egress-open.
+    preconditions:
+      - sh: 'test -n "$FW_API_KEY" && test -n "$FW_API_SECRET"'
+        msg: >-
+          FW_API_KEY / FW_API_SECRET are not set. They are the plaintext API pair
+          baked into fw-01 --- see .envrc.example section 6.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/05-fw-config.yml
+        --tags egress -e fw_egress_state=false
+
+  fw:suricata:
+    desc: >-
+      Configure Suricata on fw-01 (enable IDS, ET Open attack_response ruleset,
+      EVE -> wazuh-01:514) AND add the matching syslog listener to wazuh-01. The
+      second step RESTARTS wazuh-manager (out-of-class; briefly drops agents).
+      Needs FW_API_KEY/FW_API_SECRET and fw_ids_ruleset (discovered in W4.0).
+    preconditions:
+      - sh: 'test -n "$FW_API_KEY" && test -n "$FW_API_SECRET"'
+        msg: >-
+          FW_API_KEY / FW_API_SECRET are not set. They are the plaintext API pair
+          baked into fw-01 --- see .envrc.example section 6.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      # Firewall half: Suricata + the EVE syslog destination.
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/05-fw-config.yml
+        --tags suricata {{.CLI_ARGS}}
+      # Wazuh half: the <remote> syslog listener + the deliberate manager restart.
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/70-detections.yml
+        --tags suricata-ingest
+
   # =========================================================================
   # Classroom lifecycle
   # =========================================================================

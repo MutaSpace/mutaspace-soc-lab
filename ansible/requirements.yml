@@ -1,15 +1,17 @@
 # requirements.yml
 #
-# The Ansible collections this lab depends on, with the two Windows collections pinned exactly.
+# The Ansible collections this lab depends on, with the load-bearing collections pinned exactly.
 #
 # Install with:
 #   ansible-galaxy collection install -r requirements.yml
 #
-# Why the Windows collections are pinned and the others are not: `microsoft.ad` and
-# `ansible.windows` are doing the irreversible work in this lab - forest promotion, domain join,
-# DNS zone creation. A silent minor bump there changes behaviour on a domain controller that a
-# class depends on. The remaining collections are used for ordinary, easily-inspected tasks, so
-# they float on a minimum version instead.
+# Why some collections are pinned and the others are not: `microsoft.ad` and `ansible.windows` are
+# doing the irreversible work in this lab - forest promotion, domain join, DNS zone creation. A
+# silent minor bump there changes behaviour on a domain controller that a class depends on. The same
+# reasoning now covers `oxlorg.opnsense`: it drives fw-01, the single choke point every segment
+# routes through, so a silent behaviour change there is a lab-wide outage, not a local one - it is
+# pinned for the same load-bearing reason. The remaining collections are used for ordinary,
+# easily-inspected tasks, so they float on a minimum version instead.
 ---
 collections:
   # Active Directory objects: domain promotion, domain membership, OUs, users, groups.
@@ -37,6 +39,21 @@ collections:
   # POSIX helpers: the profile_tasks callback in ansible.cfg, plus sysctl/mount/firewalld modules.
   - name: ansible.posix
     version: ">=1.5.0"
+
+  # fw-01 (OPNsense) config-as-code: the API-driven rule / Suricata / syslog modules used by
+  # 05-fw-config.yml. This is the RENAMED, active successor of ansibleguy.opnsense (same modules,
+  # same params); the ansibleguy namespace is retired, so pin the new one and use oxlorg.* FQCNs.
+  #
+  # PINNED EXACTLY, and pinned for the same reason microsoft.ad / ansible.windows are: fw-01 is the
+  # one device every segment routes through, so a silent minor bump here is a lab-wide outage, not a
+  # local regression. Bump it deliberately, never by drift.
+  #
+  # 26.1.11 is the newest release and tracks OPNsense 26.1; this host runs 26.7, one minor ahead. The
+  # collection versions the REST API surface it targets, which is stable across the minor - verified
+  # by the read-only spike (plan Wave 4.0). RE-CHECK for a 26.7.x release at go-live and bump to it
+  # if one exists, so the collection and the box track the same minor.
+  - name: oxlorg.opnsense
+    version: "26.1.11"
 
 # NOTE - wazuh-ansible is deliberately NOT listed here.
 #

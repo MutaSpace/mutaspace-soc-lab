@@ -1,0 +1,249 @@
+# playbooks/05-fw-config.yml
+#
+# fw-01 (OPNsense 26.7, VMID 100) managed as code over its REST API. This is a NUMBERED PLAYBOOK,
+# not a role: per ansible/roles/README.md a role earns its place only when the same tasks run on
+# more than one host that differ - this runs against exactly one host, once, so it is a play. It
+# sits in the free 05 slot, after 00-preflight (which proves the gateway is up) and before every
+# routing-dependent play, because everything downstream reaches the lab THROUGH fw-01.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY THIS PLAY RUNS ON localhost, NOT OVER SSH INTO OPNsense
+# ---------------------------------------------------------------------------------------------
+# 70-detections SSHes into wazuh-01 and calls the Wazuh API on 127.0.0.1. This play cannot: the
+# oxlorg.opnsense.* modules are pure REST clients that RUN ON THE CONTROL NODE (the jumpbox, the
+# lab's Ansible control node) and speak to fw-01's HTTPS API at 10.10.10.1. There is no local API
+# on the box for them to reach over SSH, and the OPNsense root shell is csh with no Python to run a
+# module against. So the play targets localhost with connection local and passes the firewall's API
+# host as a MODULE PARAMETER. The jumpbox (10.10.10.5) already has a route to 10.10.10.1.
+#
+# ---------------------------------------------------------------------------------------------
+# AUTH - set ONCE via module_defaults, read from the environment
+# ---------------------------------------------------------------------------------------------
+# Every oxlorg.opnsense module takes the same four connection params (firewall / api_key /
+# api_secret / ssl_verify). Setting them per-task would repeat a secret four times; the collection's
+# action group lets module_defaults set them ONCE for the whole play. The credentials come from the
+# environment (FW_API_KEY / FW_API_SECRET, .envrc section 6) exactly like the Wazuh creds in
+# group_vars/all.yml - never written in the repo. ssl_verify is false because fw-01 serves a
+# self-signed cert the jumpbox does not trust; the API host is a fixed lab-internal IP, so there is
+# no network path for anyone to interpose (the same scoped exception 70-detections documents).
+#
+# TODO(W4.0/W4.2): confirm the action-group name resolves as `oxlorg.opnsense.all` once the
+# collection is installed on the jumpbox (the ansibleguy->oxlorg rename could change it). If it does
+# not, either use the collection's documented group name or drop module_defaults and pass the four
+# params per task. The read-only spike (plan 4.0) verifies this before the first live run.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY A raw-uri FALLBACK IS COMMENTED UNDER EACH MODULE TASK
+# ---------------------------------------------------------------------------------------------
+# The collection tracks OPNsense 26.1; this host is 26.7. If a module field is unsupported on 26.7,
+# the equivalent raw ansible.builtin.uri call (exact endpoint + method + body captured by the spike)
+# is ready to drop in. The endpoints are recorded from the plan's Wave 4.0 spike; their exact route
+# CASING is re-confirmed read-only in W4.0 before any write.
+#
+# ---------------------------------------------------------------------------------------------
+# THE ISOLATION-BYPASS FIX (spike finding, plan decision 6) - READ BEFORE TOUCHING THE EGRESS RULE
+# ---------------------------------------------------------------------------------------------
+# oxlorg.opnsense.rule manages OPNsense's AUTOMATION filter table, which is SEPARATE from the legacy
+# <filter> rules the seed ships - AND automation single-interface rules evaluate BEFORE legacy
+# single-interface rules. An automation `pass 10.10.20.30 -> any` on opt1 would therefore be
+# evaluated BEFORE the seed's legacy opt1->lan block and PUNCH THROUGH SOC-LAN isolation ("any"
+# includes 10.10.10.0/24). So the research-plane egress rule is CONTENT-scoped, never order-scoped:
+# it excludes the SOC LAN by CONTENT (destination_net 10.10.10.0/24 + destination_invert: true), so
+# isolation holds regardless of where the rule lands relative to the legacy block. NEVER relax this
+# to `destination_net: any` and rely on placement.
+#
+# NOTE (scope): the standing LEGACY scenario allow rules (plan 4.3a) are invisible to the REST API
+# and are asserted by reading /conf/config.xml over key SSH - that assertion is NOT in this draft
+# (deferred; not part of this wave's three deliverables). The seed remains their source of truth.
+#
+# Usage (run on the jumpbox, or via the Taskfile fw:* verbs):
+#   export FW_API_KEY=... FW_API_SECRET=...           # .envrc section 6
+#   ansible-playbook playbooks/05-fw-config.yml                       # full config (egress stays off)
+#   ansible-playbook playbooks/05-fw-config.yml --tags egress -e fw_egress_state=true
+#   ansible-playbook playbooks/05-fw-config.yml --tags suricata
+#
+# STATUS: DRAFT - written offline while the W2 template rebuild runs. Not yet run against a live
+# fw-01 (the new API is not live until the W2 cutover). Pending the W4.0 read-only spike:
+# fw_ids_ruleset filename and exact route casing. Do not run live before then.
+---
+- name: Configure fw-01 (OPNsense) deltas over the REST API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  # The four connection params, set once for every oxlorg.opnsense module in this play. See the AUTH
+  # header above for why this is module_defaults and not per-task.
+  module_defaults:
+    group/oxlorg.opnsense.all:
+      firewall: "{{ fw_api_host }}"
+      api_key: "{{ fw_api_key }}"
+      api_secret: "{{ fw_api_secret }}"
+      ssl_verify: false
+
+  vars:
+    fw_api_host: "10.10.10.1"
+    # Env-only, like every credential in group_vars/all.yml. default='' (NOT Undefined) on purpose:
+    # a missing pair is a friendly no-op below, not a crash - this play is safe to include in a run
+    # where the operator has not exported the firewall creds.
+    fw_api_key: "{{ lookup('ansible.builtin.env', 'FW_API_KEY', default='') }}"
+    fw_api_secret: "{{ lookup('ansible.builtin.env', 'FW_API_SECRET', default='') }}"
+    _fw_api_unset: "{{ (fw_api_key | length == 0) or (fw_api_secret | length == 0) }}"
+
+    # The research-plane egress rule is DISABLED by default and toggled per run. The Taskfile verbs
+    # fw:egress-open / fw:egress-close pass true / false.
+    fw_egress_state: "false"
+
+    # TODO(W4.0): the EXACT version-specific filename of the ET Open emerging-attack_response ruleset
+    # (it carries the testmynids verification signature). Discover it live, read-only, via
+    # GET /api/ids/settings/searchInstalledRulesets on the 26.7 box - do NOT guess it. Left empty so
+    # a suricata run without it set fails with a clear, named message (assert below) rather than
+    # enabling the wrong ruleset. e.g. "emerging-attack_response.rules".
+    fw_ids_ruleset: ""
+
+    # The two lab /24s - Suricata's HOME_NET. Anything outside these is EXTERNAL_NET.
+    fw_ids_homenet:
+      - "10.10.10.0/24"
+      - "10.10.20.0/24"
+
+  tasks:
+
+    # -----------------------------------------------------------------------------------------
+    # Friendly no-op guard - like the scenario verbs gating on the indexer password
+    # -----------------------------------------------------------------------------------------
+    # If the firewall API creds are not in the environment, do nothing and say so, rather than
+    # failing four tasks deep with an auth error. Tagged `always` so it runs under any --tags
+    # selection.
+    - name: Announce a friendly skip when the fw-01 API credentials are unset
+      ansible.builtin.debug:
+        msg: >-
+          FW_API_KEY / FW_API_SECRET are not set, so fw-01 API configuration is skipped (no-op).
+          Export them from .envrc section 6 to manage the firewall as code.
+      when: _fw_api_unset
+      tags: [always]
+
+    - name: End the play cleanly when the fw-01 API credentials are unset
+      ansible.builtin.meta: end_play
+      when: _fw_api_unset
+      tags: [always]
+
+    # -----------------------------------------------------------------------------------------
+    # (a) Research-plane egress rule - CONTENT-scoped, isolation-safe (see the header, decision 6)
+    # -----------------------------------------------------------------------------------------
+    # source 10.10.20.30 (nlp-01) -> everything EXCEPT the SOC LAN. destination_invert makes
+    # destination_net an EXCLUSION: pass to any destination that is NOT 10.10.10.0/24. This is the
+    # isolation-bypass FIX: even though this automation rule evaluates before the seed's legacy
+    # opt1->lan block, it cannot reach the SOC LAN because the SOC LAN is excluded by CONTENT.
+    # match_fields: [description] makes the description the idempotence key, so re-runs update this
+    # one rule instead of creating duplicates.
+    - name: Research-plane egress rule (10.10.20.30 -> internet, SOC-LAN excluded by content)
+      oxlorg.opnsense.rule:
+        description: "mutaspace-research-plane-egress"
+        match_fields: ["description"]
+        interface: "opt1"
+        direction: "in"
+        action: "pass"
+        ip_protocol: "inet"
+        protocol: "any"
+        source_net: "10.10.20.30"
+        destination_net: "10.10.10.0/24"
+        destination_invert: true
+        enabled: "{{ fw_egress_state | default('false') | bool }}"
+        state: present
+      no_log: false
+      tags: [egress]
+    # raw-uri FALLBACK (filter): add/update then apply. searchRule to find the uuid, then
+    # POST /api/firewall/filter/addRule (create) or /api/firewall/filter/setRule/{uuid} (update)
+    # with body {"rule": {"interface":"opt1","direction":"in","action":"pass","ipprotocol":"inet",
+    # "protocol":"any","source_net":"10.10.20.30","destination_net":"10.10.10.0/24",
+    # "destination_not":"1","enabled":"<0|1>","description":"mutaspace-research-plane-egress"}},
+    # toggle with POST /api/firewall/filter/toggleRule/{uuid}/{0|1}, then
+    # POST /api/firewall/filter/apply. Route casing re-confirmed in W4.0. Auth: basic
+    # FW_API_KEY:FW_API_SECRET, validate_certs:false, https://10.10.10.1.
+
+    # -----------------------------------------------------------------------------------------
+    # (b) Suricata - enable IDS (not IPS), EVE syslog output on, over lan + opt1
+    # -----------------------------------------------------------------------------------------
+    # syslog_output IS the seed's <syslog_eve> toggle (spike finding): it makes Suricata emit its
+    # EVE JSON to syslog, which the syslog destination in (c) ships to Wazuh. IPS stays OFF
+    # (suricata_ips_mode is false in the seed and here) - this lab detects, it does not block.
+    - name: Enable Suricata (IDS, EVE syslog output) on lan and opt1
+      oxlorg.opnsense.ids_general:
+        enabled: true
+        ips: false
+        # TODO(W4.0): confirm the EVE-syslog param NAME against the installed collection. The plan's
+        # spike calls it `syslog_output`; the ansibleguy lineage also exposed `syslog_eve`. If this
+        # key is rejected, switch to the collection's actual name (the raw-uri fallback is unaffected).
+        syslog_output: true
+        interfaces: ["lan", "opt1"]
+        homenet: "{{ fw_ids_homenet }}"
+      no_log: false
+      tags: [suricata]
+    # raw-uri FALLBACK (ids settings + apply):
+    # POST /api/ids/settings/set with body {"general": {"enabled":"1","ips":"0","syslog_eve":"1",
+    # "detect": {"Interfaces":"lan,opt1"}, "homenet":"10.10.10.0/24,10.10.20.0/24"}}, then
+    # POST /api/ids/service/reconfigure. Route casing re-confirmed in W4.0.
+
+    - name: Require the discovered ET Open ruleset filename before enabling it
+      ansible.builtin.assert:
+        that:
+          - fw_ids_ruleset | length > 0
+        fail_msg: >-
+          fw_ids_ruleset is empty. Discover the exact emerging-attack_response ruleset filename via
+          GET /api/ids/settings/searchInstalledRulesets on fw-01 (plan Wave 4.0), then set it (e.g.
+          -e fw_ids_ruleset=emerging-attack_response.rules). It carries the testmynids signature.
+        success_msg: "Enabling ET Open ruleset '{{ fw_ids_ruleset }}'"
+      tags: [suricata]
+
+    # ONE ruleset only - emerging-attack_response, which holds the testmynids verification
+    # signature. Broader ET Open curation is deferred to go-live/tuning (plan out-of-scope);
+    # ids_policy is unnecessary for a single ruleset.
+    - name: Enable the ET Open emerging-attack_response ruleset
+      oxlorg.opnsense.ids_ruleset:
+        name: "{{ fw_ids_ruleset }}"
+        enabled: true
+      no_log: false
+      tags: [suricata]
+    # raw-uri FALLBACK (ids ruleset):
+    # POST /api/ids/settings/toggleRuleset/{filename}/1 then POST /api/ids/service/reconfigure.
+    # Route casing re-confirmed in W4.0.
+
+    # ET Open must be DOWNLOADED once before its signatures (incl. the testmynids one) exist. No
+    # oxlorg module wraps this service action, so it is a raw uri call. It is heavy (downloads the
+    # ruleset), hence one-time; changed_when: true keeps it honest in the run summary.
+    # TODO(W4.0): confirm the reloadRules route casing read-only before the first live run.
+    - name: Download/update the ET Open ruleset so its signatures exist (one-time, heavy)
+      ansible.builtin.uri:
+        url: "https://{{ fw_api_host }}/api/ids/service/reloadRules"
+        method: POST
+        url_username: "{{ fw_api_key }}"
+        url_password: "{{ fw_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: fw_ids_reload
+      no_log: true
+      changed_when: true
+      tags: [suricata]
+
+    # -----------------------------------------------------------------------------------------
+    # (c) EVE -> Wazuh, firewall half: a remote syslog DESTINATION to wazuh-01
+    # -----------------------------------------------------------------------------------------
+    # The (b) syslog toggle alone is inert - it emits EVE to syslog but nothing forwards it off-box.
+    # This wires the destination: program suricata (only the EVE stream), to 10.10.10.20:514 over
+    # udp4, at info level. The Wazuh half (the matching <remote> syslog listener + a MANAGER RESTART)
+    # is in 70-detections.yml; Wazuh's built-in Suricata decoders (rule ids ~86xxx) do the parsing.
+    - name: Ship Suricata EVE to the Wazuh syslog listener (10.10.10.20:514/udp4)
+      oxlorg.opnsense.syslog:
+        target: "10.10.10.20"
+        port: 514
+        transport: "udp4"
+        program: ["suricata"]
+        level: ["info"]
+        enabled: true
+        state: present
+      no_log: false
+      tags: [suricata]
+    # raw-uri FALLBACK (syslog destination + apply):
+    # POST /api/syslog/settings/addDestination with body {"destination": {"transport":"udp4",
+    # "hostname":"10.10.10.20","port":"514","program":"suricata","level":"info","enabled":"1"}},
+    # then POST /api/syslog/service/reconfigure. Route casing re-confirmed in W4.0.

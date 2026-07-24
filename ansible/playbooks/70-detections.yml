@@ -172,3 +172,71 @@
       ansible.builtin.file:
         path: "{{ wazuh_rules_staging_path }}"
         state: absent
+
+# ---------------------------------------------------------------------------------------------
+# SURICATA INGESTION - the Wazuh half of EVE -> Wazuh (fw half is 05-fw-config.yml)
+# ---------------------------------------------------------------------------------------------
+# fw-01's Suricata emits EVE JSON to a remote syslog destination (05-fw-config.yml, part c) aimed at
+# 10.10.10.20:514/udp. For the manager to ACCEPT that stream it needs a syslog <remote> listener in
+# ossec.conf, scoped to fw-01's address. Wazuh ships built-in Suricata decoders (the json decoder,
+# rule ids ~86xxx), so NO custom decoder is needed here - only the listener.
+#
+# WHY THIS DEVIATES FROM THE reload-only RULE AT THE TOP OF THIS FILE
+# ---------------------------------------------------------------------------------------------
+# The detection-rules play above reloads analysisd on purpose, to avoid dropping agents. This play
+# CANNOT: a NEW <remote> listener opens a new UDP SOCKET, and only a full `systemctl restart
+# wazuh-manager` binds it - an analysisd reload does not touch remoted's sockets. A manager restart
+# briefly DROPS every agent (they buffer and reconnect), so this is an OUT-OF-CLASS step, run
+# deliberately in a maintenance moment, not mid-lesson. It is a separate play, and tagged
+# `suricata-ingest`, so the routine detection-rules run never triggers the restart.
+#
+# VERIFY (live, after the W2 cutover + 05-fw-config suricata run): from a lab VM, across fw-01,
+#   curl http://testmynids.org/uid/index.html
+# should produce a Suricata alert (an 86xxx-range rule) in the Wazuh indexer/dashboard.
+#
+# Usage:
+#   ansible-playbook playbooks/70-detections.yml --tags suricata-ingest
+- name: Add the fw-01 Suricata syslog listener to the Wazuh manager
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+  tags: [suricata-ingest]
+
+  vars:
+    wazuh_ossec_conf: /var/ossec/etc/ossec.conf
+
+  tasks:
+
+    # blockinfile is idempotent by its marker: the block is added once and left alone on re-runs.
+    # insertbefore inserts before the LAST </ossec_config>, so the <remote> block lands inside the
+    # configuration root. allowed-ips scopes the listener to fw-01 (10.10.10.1) so nothing else on
+    # the SOC LAN can inject syslog events as if they were the firewall.
+    - name: Ensure the Suricata syslog <remote> listener is in ossec.conf
+      ansible.builtin.blockinfile:
+        path: "{{ wazuh_ossec_conf }}"
+        marker: "<!-- {mark} MUTASPACE Suricata syslog listener (managed by 70-detections.yml) -->"
+        insertbefore: "</ossec_config>"
+        block: |
+          <remote>
+            <connection>syslog</connection>
+            <port>514</port>
+            <protocol>udp</protocol>
+            <allowed-ips>10.10.10.1</allowed-ips>
+          </remote>
+      register: wazuh_suricata_listener
+
+    # DELIBERATE full restart (see the play header): only a restart binds the new UDP listener
+    # socket, and it briefly drops agents. Gated on `changed` so a re-run that added nothing does
+    # NOT bounce the manager needlessly.
+    - name: Restart wazuh-manager to bind the new syslog listener (drops agents briefly)
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
+      when: wazuh_suricata_listener.changed
+
+    - name: Report the listener/restart outcome
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Added the fw-01 Suricata syslog listener and restarted wazuh-manager (agents will
+          reconnect).' if wazuh_suricata_listener.changed
+          else 'Suricata syslog listener already present; no restart needed.' }}
