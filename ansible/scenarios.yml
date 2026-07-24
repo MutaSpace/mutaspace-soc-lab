@@ -95,3 +95,35 @@ scenarios:
           agent.name: "ubuntu-app-01"
         min_count: 1
         latency_budget_seconds: 120
+
+  - id: web-dir-bruteforce
+    title: "Web directory/content brute force against the Nginx application"
+    attack: T1595.003          # ATT&CK: Active Scanning - Wordlist Scanning
+    origin: kali-01            # 10.10.20.10, isolated segment (vmbr2)
+    target: ubuntu-app-01      # 10.10.10.30, SOC LAN (vmbr1)
+    objective: >-
+      Sweep a wordlist of common paths from the attacker at 10.10.20.10 against the Nginx site on
+      ubuntu-app-01. Each miss is a 404, and a burst of them from one source reads as a content-
+      discovery scan - a repeatable T1595 alert to triage alongside the web-sqli one.
+    prereqs: >-
+      kali-01 powered on; the standing fw-01 allow rule permitting 10.10.20.0/24 -> 10.10.10.30:80;
+      Nginx serving on ubuntu-app-01 AND the agent forwarding /var/log/nginx/access.log (the Wave-2
+      localfile - without it 31101/31151 cannot fire). Instrumentation is Wave 2, not part of verify.
+    reset_targets: [106, 108]  # ubuntu-app-01, kali-01 - never wazuh-01 (104)
+    expected_alerts:
+      # CONFIRMED ON HOST (swc2026, 2026-07-24): a burst of requests for non-existent paths from
+      # kali-01 fires built-in rule 31101 ("Web server 400 error code") per 404 and, once enough land
+      # in the window, the correlated 31151 ("Multiple web server 400 error codes from same source
+      # ip") - the scan signal. Both attributable to srcip 10.10.20.10 / agent ubuntu-app-01.
+      - rule_id: 31151
+        match:
+          data.srcip: "10.10.20.10"
+          agent.name: "ubuntu-app-01"
+        min_count: 1
+        latency_budget_seconds: 120
+      - rule_id: 31101
+        match:
+          data.srcip: "10.10.20.10"
+          agent.name: "ubuntu-app-01"
+        min_count: 1
+        latency_budget_seconds: 120

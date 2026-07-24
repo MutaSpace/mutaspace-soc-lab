@@ -470,6 +470,77 @@
       ansible.builtin.debug:
         msg: "{{ scenario_web_curl.results | map(attribute='stdout') | map('trim') | list }}"
 
+- name: Run the web-dir-bruteforce attack from kali-01
+  hosts: kali-01
+  gather_facts: false
+  become: true
+  tags: [web-dir-bruteforce]
+
+  vars:
+    scenario_web_target: "http://10.10.10.30"
+    # A directory/content brute force: a burst of GETs for paths that do NOT exist on the static
+    # nginx site. nginx answers 404 to each and logs it; the Wave-2 access.log localfile forwards
+    # those lines to Wazuh, where the built-in web ruleset flags each 400 (31101) and, once enough
+    # land from one source inside the window, the correlated web scan (31151). These are the entries
+    # a real scanner's default wordlist hits first, so the pattern reads as a recognisable scan.
+    scenario_dirbrute_paths:
+      - admin
+      - login
+      - wp-admin
+      - wp-login.php
+      - phpmyadmin
+      - .env
+      - .git/config
+      - config.php
+      - backup.zip
+      - shell.php
+      - cmd.php
+      - administrator
+      - manager/html
+      - api
+      - private
+      - secret
+      - db.sql
+      - old
+      - backup
+      - server-status
+      - .htaccess
+      - robots.txt.bak
+      - uploads
+      - console
+
+  tasks:
+
+    - name: Record the attack start time (UTC)
+      ansible.builtin.set_fact:
+        scenario_run_started_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    - name: Announce the attack window
+      ansible.builtin.debug:
+        msg: >-
+          web-dir-bruteforce: {{ scenario_dirbrute_paths | length }} requests for non-existent
+          paths -> {{ scenario_web_target }} starting at {{ scenario_run_started_at }}.
+
+    # Each request is a normal GET for a path that returns 404. -o /dev/null discards the body and
+    # -w prints the status so the operator sees nginx answered 404; the point is the LOG line each
+    # request leaves. The count comfortably crosses the built-in "multiple 400s" scan threshold.
+    - name: Sweep the wordlist with curl
+      ansible.builtin.command:
+        cmd: >-
+          curl -s -o /dev/null -w '%{http_code}\n' --max-time 10
+          "{{ scenario_web_target }}/{{ item }}"
+      register: scenario_dirbrute_curl
+      changed_when: true
+      failed_when: scenario_dirbrute_curl.rc != 0
+      loop: "{{ scenario_dirbrute_paths }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report the response codes nginx returned
+      ansible.builtin.debug:
+        msg: >-
+          {{ scenario_dirbrute_curl.results | map(attribute='stdout') | map('trim') | list }}
+
 # ---------------------------------------------------------------------------------------------
 # LIST - print the catalogue (read-only, no host, no credentials)
 # ---------------------------------------------------------------------------------------------

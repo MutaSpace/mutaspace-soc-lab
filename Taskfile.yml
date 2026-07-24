@@ -152,6 +152,15 @@ tasks:
   packer:run:
     internal: true
     dir: '{{.PACKER_DIR}}/{{.TEMPLATE}}'
+    vars:
+      # Auto-include the per-template pkrvars (e.g. win11-client.pkrvars.hcl) when the
+      # operator has filled one in. Only win11-client needs it today --- its Windows 11
+      # ISO name and image index differ from the .pkr.hcl defaults, so without this the
+      # build silently used the default eval ISO name and failed with "volume does not
+      # exist". Any template that grows a <name>.pkrvars.hcl is picked up here instead
+      # of being ignored. Absolute path so it resolves regardless of the task `dir`.
+      TEMPLATE_PKRVARS:
+        sh: 'p={{.PACKER_DIR}}/{{.TEMPLATE}}/{{.TEMPLATE}}.pkrvars.hcl; [ -f "$p" ] && echo "-var-file=$p" || true'
     preconditions:
       - sh: 'test -d {{.PACKER_DIR}}/{{.TEMPLATE}}'
         msg: 'No such template directory: packer/{{.TEMPLATE}}'
@@ -165,8 +174,8 @@ tasks:
         msg: 'PKR_VAR_proxmox_token is not set. Packer wants the bare UUID, NOT the concatenated bpg form.'
     cmds:
       - packer init .
-      - packer validate -var-file={{.PKR_COMMON}} .
-      - packer build -var-file={{.PKR_COMMON}} .
+      - packer validate -var-file={{.PKR_COMMON}} {{.TEMPLATE_PKRVARS}} .
+      - packer build -var-file={{.PKR_COMMON}} {{.TEMPLATE_PKRVARS}} .
 
   build:ubuntu:
     desc: 'Build tpl-ubuntu-server-2404 (VMID 9000) --- wazuh-01, ubuntu-app-01, nlp-01'
