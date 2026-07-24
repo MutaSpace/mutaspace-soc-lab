@@ -18,7 +18,8 @@
 #        reachable through the jump. Any of these missing stops with an
 #        instruction, not a stack trace.
 #     2. apt-installs ansible, python3-winrm (pywinrm for the NTLM WinRM
-#        transport), git and rsync on the jumpbox.
+#        transport), python3-httpx (the oxlorg.opnsense collection's dep, used by
+#        05-fw-config against the fw-01 API), git and rsync on the jumpbox.
 #     3. rsyncs the ansible/ and ai/ trees to the jumpbox, with the same
 #        exclusions the .gitignore files declare (no secrets, no build
 #        artifacts).
@@ -26,8 +27,8 @@
 #        jumpbox as ~/.ssh/mutaspace_lab_ed25519 and
 #        <repo>/ansible/.secrets/env, both mode 600.
 #     5. Installs the pinned Ansible collections from requirements.yml.
-#     6. Verifies: ansible runs, pywinrm imports, the Windows collections are
-#        present, and (best-effort) the Linux hosts answer a ping.
+#     6. Verifies: ansible runs, pywinrm and httpx import, the Windows collections
+#        are present, and (best-effort) the Linux hosts answer a ping.
 #
 # WHY IT EXISTS
 #   The first lab bring-up ran Ansible from the Proxmox host: tooling installed
@@ -321,13 +322,18 @@ check_preconditions() {
 # python3-winrm  - pywinrm. The Windows groups use WinRM with the NTLM transport
 #                  (inventory/group_vars/*_windows.yml); the apt package pulls
 #                  python3-requests-ntlm, which NTLM needs.
+# python3-httpx  - the oxlorg.opnsense collection's ONE pip dependency (its
+#                  requirements.txt). 05-fw-config.yml's modules import httpx and
+#                  fail hard without it; the apt package avoids the PEP 668
+#                  externally-managed-environment wall that `pip install httpx` hits
+#                  on Ubuntu 24.04. Found the hard way running 05-fw-config live.
 # git, rsync     - rsync stages the repo (and must exist before the first sync);
 #                  git is here for the optional wazuh-ansible clone (roles/README).
 # =============================================================================
 install_packages() {
   section "packages on the jumpbox"
 
-  local pkgs="ansible python3-winrm git rsync"
+  local pkgs="ansible python3-winrm python3-httpx git rsync"
   log "  installing: ${pkgs}"
   log "  (apt is idempotent - already-present packages are left as they are)"
 
@@ -464,6 +470,12 @@ verify() {
     changed "pywinrm imports (WinRM/NTLM transport available)"
   else
     warn "python3 cannot import winrm - Windows plays will fail"
+  fi
+
+  if jb_ssh "python3 -c 'import httpx'" 2>/dev/null; then
+    changed "httpx imports (oxlorg.opnsense modules can run - 05-fw-config)"
+  else
+    warn "python3 cannot import httpx - 05-fw-config.yml (fw-01 API) will fail"
   fi
 
   local cols

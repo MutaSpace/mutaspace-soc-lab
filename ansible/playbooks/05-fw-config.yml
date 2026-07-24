@@ -67,11 +67,17 @@
 # custom decoder -> Wazuh rule 86601). The live fw-01 was brought to that state by hand/API during
 # the W4.0 spike; the settings this play asserts (Suricata on, emerging-attack_response enabled +
 # downloaded, syslog_output/syslog_eve on, syslog dest -> 10.10.10.20:514) are all present live. The
-# W4.0 unknowns are now RESOLVED and folded in above (ruleset filename, the `all` action group,
-# syslog_output, updateRules-not-reloadRules). What has NOT yet been done: a clean idempotent RUN of
-# THIS PLAY via the oxlorg modules against the live box (expected changed~0). Do that from the
-# jumpbox with FW_API_KEY/FW_API_SECRET exported, `plan`-style caution, and the VM snapshot rollback
-# ready (resume-here) before trusting it for a from-scratch deploy.
+# W4.0 unknowns are RESOLVED and folded in above. THIS PLAY HAS NOW BEEN RUN idempotently against the
+# live box (2026-07-24, from the jumpbox with FW creds): a re-run is `ok=6 changed=1 failed=0`, the one
+# change being the updateRules download, which is `changed_when: true` by design (a rule fetch is a
+# genuine stateful action - it is honest, not broken idempotency). Four real bugs were fixed in the
+# process, all against oxlorg.opnsense 26.1.11: (1) the collection needs `python3-httpx` on the control
+# node (now in bootstrap-jumpbox.sh); (2) ids_general takes `mode: pcap` + `local_networks`, NOT the
+# draft's `ips`/`homenet`; (3) ids_ruleset matches a ruleset by its DESCRIPTION ("ET open/
+# emerging-attack_response"), NOT its filename; (4) the syslog task needs `description` + `match_fields`
+# or it duplicates the destination. The pipeline was re-verified end-to-end after the run (testmynids ->
+# Wazuh rule 86601). Requires FW_API_KEY/FW_API_SECRET exported; keep the VM snapshot rollback in mind
+# for any FUTURE change to the module calls.
 ---
 - name: Configure fw-01 (OPNsense) deltas over the REST API
   hosts: localhost
@@ -101,10 +107,13 @@
     fw_egress_state: "false"
 
     # The ET Open emerging-attack_response ruleset - it carries sid 2100498 ("GPL ATTACK_RESPONSE id
-    # check returned root"), the signature testmynids trips. Filename confirmed live on the 26.7 box
-    # 2026-07-24 via GET /api/ids/settings/listRulesets (NOT searchInstalledRulesets - that route
-    # 404s on 26.7; listRulesets is the correct one). Override with -e fw_ids_ruleset=... if needed.
-    fw_ids_ruleset: "emerging-attack_response.rules"
+    # check returned root"), the signature testmynids trips. IMPORTANT: oxlorg.opnsense.ids_ruleset
+    # identifies a ruleset by its DESCRIPTION ("ET open/emerging-attack_response"), NOT its filename
+    # ("emerging-attack_response.rules"). The module errors with the full available-names list if this
+    # is wrong - confirmed live 2026-07-24. (The filename is what the raw toggleRuleset API uses; the
+    # human description is what listRulesets returns and what this module matches on.) Override with
+    # -e fw_ids_ruleset=... if needed.
+    fw_ids_ruleset: "ET open/emerging-attack_response"
 
     # The two lab /24s - Suricata's HOME_NET. Anything outside these is EXTERNAL_NET.
     fw_ids_homenet:
@@ -175,7 +184,11 @@
     - name: Enable Suricata (IDS, EVE syslog output) on lan and opt1
       oxlorg.opnsense.ids_general:
         enabled: true
-        ips: false
+        # IDS, not IPS: mode=pcap is the collection's way to say "no traffic is blocked" (its own doc).
+        # The draft's `ips: false` is NOT a param in oxlorg.opnsense.ids_general 26.1.x - mode is
+        # (choices pcap/netmap/divert; the latter two are the IPS modes). Confirmed against the module
+        # arg spec on the jumpbox 2026-07-24.
+        mode: pcap
         # syslog_output CONFIRMED (2026-07-24) as the correct param: the module's own doc string reads
         # "Send alerts in eve format to syslog, using log level info" - i.e. it IS the seed's
         # <syslog_eve> toggle. (The separate `syslog_alerts`/`syslog` param is the non-EVE fast-log
@@ -185,7 +198,9 @@
         # ever reaches syslog.
         syslog_output: true
         interfaces: ["lan", "opt1"]
-        homenet: "{{ fw_ids_homenet }}"
+        # HOME_NET. The canonical param is `local_networks` (alias `home_networks`); the draft's
+        # `homenet` is not accepted by this collection version.
+        local_networks: "{{ fw_ids_homenet }}"
       no_log: false
       tags: [suricata]
     # raw-uri FALLBACK (ids settings + apply):
@@ -247,6 +262,13 @@
     # is in 70-detections.yml; Wazuh's built-in Suricata decoders (rule ids ~86xxx) do the parsing.
     - name: Ship Suricata EVE to the Wazuh syslog listener (10.10.10.20:514/udp4)
       oxlorg.opnsense.syslog:
+        # description + match_fields make the description the idempotence key so re-runs UPDATE this one
+        # destination instead of creating duplicates - and it ADOPTS the destination first created live
+        # in the W4.0 spike (which carried exactly this description). Without match_fields the module
+        # would key on all mutable fields and add a second dest. Verified against the module arg spec
+        # (target/port/transport/level/program/facility/description/match_fields) on 2026-07-24.
+        description: "Suricata EVE -> wazuh-01 (W4)"
+        match_fields: ["description"]
         target: "10.10.10.20"
         port: 514
         transport: "udp4"

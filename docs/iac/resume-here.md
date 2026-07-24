@@ -49,10 +49,15 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
   - fw-01 syslog **destination** (program suricata → 10.10.10.20:514/udp4) and the Wazuh `<remote>`
     listener are both LIVE. syslog-ng forwards fine (ping/tcpdump confirmed; my early `-i any -c`
     captures were racy — trust a foreground `-i eth0` capture).
-  - **STILL TODO:** a clean idempotent RUN of 05-fw-config.yml via the oxlorg modules against the live
-    box (expected changed~0) — never done; do it from the jumpbox with FW creds + snapshot rollback
-    ready. Design note: seed allows `opt1→internet` for the whole research plane — decide if
-    untrusted-01 should be air-gapped too.
+  - **05-fw-config.yml now RUNS idempotently (2026-07-24):** re-run is `ok=6 changed=1 failed=0` (the
+    1 is the always-changed updateRules download). Four oxlorg.opnsense 26.1.11 bugs fixed doing it:
+    (1) needs **`python3-httpx`** on the jumpbox (now in bootstrap-jumpbox.sh); (2) ids_general wants
+    `mode: pcap` + `local_networks`, not `ips`/`homenet`; (3) ids_ruleset matches by DESCRIPTION
+    ("ET open/emerging-attack_response"), not filename; (4) syslog task needs `description` +
+    `match_fields` or it duplicates the dest. Live box reconciled to code (hand-made TEMP egress rule
+    deleted; only codified `mutaspace-research-plane-egress` remains, disabled). Pipeline re-verified
+    (86601) after the run. Design note: seed allows `opt1→internet` for the whole research plane —
+    decide if untrusted-01 should be air-gapped too.
   - **ansible→nlp `-b`/sudo hang RESOLVED (2026-07-24):** it was stale ControlPersist SSH sockets
     from the fw-01 rebuild, not sudo. `80-ai-assist.yml` now runs codified end-to-end (ok=11,
     changed=3, failed=0, ~3.6s). If it recurs after a future fw-01 rebuild: `rm -f ~/.ansible/cp/*`
