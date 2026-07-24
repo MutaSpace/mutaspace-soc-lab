@@ -566,10 +566,46 @@ tasks:
     desc: >-
       Verify the OPNsense root password/hash/SSH-key vars are consistent BEFORE
       rebuilding fw-01. Cross-checks crypt(root_password) == root_password_hash,
-      that the root SSH key is a real public key, and that config.xml renders to
-      well-formed XML. Runs offline; no Proxmox host needed.
+      that the root SSH key is a real public key, that the API key/secret-hash
+      pair is present and $6$-shaped, and that config.xml renders to well-formed
+      XML. Runs offline; no Proxmox host needed.
     cmds:
       - '{{.SCRIPTS_DIR}}/fw-preflight.sh {{.CLI_ARGS}}'
+
+  # THE ONLY SANCTIONED WAY TO REBUILD THE OPNSENSE TEMPLATE.
+  #
+  # Packer's proxmox-iso builder collides with an existing VMID, so rebuilding
+  # 9004 means destroying it first --- and tofu's template_exists gate fails
+  # EVERY `tofu apply` while it is gone. Loose manual steps (a hand-run
+  # `qm destroy 9004`, a stray build) leave that window open silently. This
+  # verb owns the whole sequence atomically: local gates -> lock markers
+  # (local + on-host; while they exist, NO tofu apply) -> destroy -> detached
+  # PID-captured build -> verify template on the host -> unlock. On any
+  # failure the locks STAY, because the window is still open.
+
+  fw:rebuild-template:
+    desc: >-
+      DESTRUCTIVE --- destroy tpl-opnsense-267 (VMID 9004) on the host and rebuild
+      it with Packer, atomically: fw-preflight + packer validate gates, lock
+      markers, qm destroy, detached PID-captured build, on-host verification,
+      unlock. While the lock exists, run NO `tofu apply` of any kind. Preview
+      with: task fw:rebuild-template -- --dry-run
+    preconditions:
+      - sh: 'test -x {{.SCRIPTS_DIR}}/fw-rebuild-template.sh'
+        msg: 'scripts/fw-rebuild-template.sh is missing or not executable.'
+      - sh: 'test -n "$LAB_HOST_SSH"'
+        msg: >-
+          LAB_HOST_SSH is not set. `qm` only exists on the Proxmox node, so the
+          destroy and the verification run there over SSH. Set it to
+          root@<LAB_MANAGEMENT_IP> --- see .envrc.example section 1.
+      - sh: 'test -n "$PKR_VAR_proxmox_url"'
+        msg: 'PKR_VAR_proxmox_url is not set. See .envrc.example section 1 --- Packer wants /api2/json on the end.'
+      - sh: 'test -n "$PKR_VAR_proxmox_token"'
+        msg: 'PKR_VAR_proxmox_token is not set. Packer wants the bare UUID, NOT the concatenated bpg form.'
+      - sh: 'test -f {{.PKR_COMMON}}'
+        msg: 'packer/common.pkrvars.hcl is missing. Copy packer/common.pkrvars.hcl.example and fill it in.'
+    cmds:
+      - '{{.SCRIPTS_DIR}}/fw-rebuild-template.sh {{.CLI_ARGS}}'
 
   # =========================================================================
   # Classroom lifecycle

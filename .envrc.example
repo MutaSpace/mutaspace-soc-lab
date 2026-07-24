@@ -272,6 +272,25 @@ export PKR_VAR_root_password_hash="<openssl-passwd-6-hash>"
 # above). fw-preflight.sh checks it looks like a real public key.
 export PKR_VAR_root_authorized_keys="$(cat ~/.ssh/mutaspace_lab_ed25519.pub)"
 
+# OPNsense API credential pair, baked into config.xml as <apikeys> so the
+# firewall API works on a from-scratch fw-01 with zero manual bootstrap.
+# Generate each half once with: openssl rand 60 | openssl base64 -A
+#
+# Four variables, two values:
+#   FW_API_KEY / FW_API_SECRET          the PLAINTEXT pair, env-only, for the
+#                                       API clients (curl, Ansible). The key is
+#                                       the public username-half; the secret is
+#                                       the real secret --- never commit it.
+#   PKR_VAR_fw_api_key                  the same key, for the Packer bake.
+#   PKR_VAR_fw_api_secret_hash          openssl passwd -6 of FW_API_SECRET ---
+#                                       config.xml stores the HASH, never the
+#                                       plaintext. fw-preflight.sh checks the
+#                                       shape before any rebuild.
+export FW_API_KEY="<openssl-rand-60-base64>"
+export FW_API_SECRET="<openssl-rand-60-base64>"
+export PKR_VAR_fw_api_key="$FW_API_KEY"
+export PKR_VAR_fw_api_secret_hash="$(openssl passwd -6 "$FW_API_SECRET")"
+
 # The resolver fw-01 uses during the build and afterwards. A public resolver,
 # so not a secret --- but it is a PACKER variable, not an OpenTofu one, because
 # it is baked into the seeded config.xml.

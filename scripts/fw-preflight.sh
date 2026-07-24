@@ -36,10 +36,16 @@
 #   4. PKR_VAR_root_authorized_keys is set and looks like a public key
 #      (an ssh-ed25519 / ssh-rsa / ecdsa-sha2-nistp{256,384,521} key type
 #      followed by a space, so a bare "ecdsa-junk" is rejected).
-#   5. RENDER: config.xml.pkrtpl.hcl renders to well-formed XML whose root
-#      <user> block has a non-empty <authorizedkeys> and <password>. Catches a
-#      template typo that packer validate would pass. Skips (does not fail) if
-#      packer is not on PATH; skippable with --no-render.
+#   5. PKR_VAR_fw_api_key is set and non-empty (the plaintext API key baked
+#      into <apikeys> --- the public username-half of the pair, not a secret).
+#   6. PKR_VAR_fw_api_secret_hash is set, non-empty, and looks like $6$ crypt
+#      (the sha512-crypt hash of FW_API_SECRET; the plaintext secret itself
+#      never reaches Packer, only its hash does).
+#   7. RENDER: config.xml.pkrtpl.hcl renders to well-formed XML whose root
+#      <user> block has a non-empty <authorizedkeys>, <password> and
+#      <apikeys><item><key>. Catches a template typo that packer validate
+#      would pass. Skips (does not fail) if packer is not on PATH; skippable
+#      with --no-render.
 #
 # WHERE IT IS WIRED
 #   `task fw:preflight` runs it directly, and `task build:opnsense` has it as a
@@ -80,6 +86,15 @@ fail() { printf '%s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; FAIL_N=$((FAIL_N
 die()  { printf '%s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 hint() { printf '         %s%s%s\n' "$C_DIM" "$*" "$C_RESET" >&2; }
 
+# The one hash shape this lab bakes: SHA-512 crypt, as produced by
+# `openssl passwd -6`. Used for both the root password hash and the API
+# secret hash --- OPNsense verifies both with password_verify(), which
+# accepts any random-salt $6$ hash.
+# Full SHA-512 crypt shape, not just the $6$ prefix: $6$ + salt (0-16 chars,
+# 0 = OPNsense's empty-salt form) + $ + the 86-char base64 digest. Rejects a
+# truncated value like `$6$bad` or a plaintext that merely starts with $6$.
+is_sha512_crypt() { [[ "$1" =~ ^\$6\$[./0-9A-Za-z]{0,16}\$[./0-9A-Za-z]{86}$ ]]; }
+
 usage() {
   cat <<EOF
 ${SCRIPT_NAME} - build-blocking preflight for the OPNsense template rebuild
@@ -101,6 +116,8 @@ READS (from the environment / .envrc)
   PKR_VAR_root_password         the firewall root password (console)
   PKR_VAR_root_password_hash    openssl passwd -6 of the SAME string
   PKR_VAR_root_authorized_keys  the root SSH PUBLIC key
+  PKR_VAR_fw_api_key            the OPNsense API key (plaintext, not secret)
+  PKR_VAR_fw_api_secret_hash    openssl passwd -6 of FW_API_SECRET
 
 SEE ALSO
   packer/opnsense-267/variables.pkr.hcl   the variables these feed
@@ -137,7 +154,7 @@ fi
 if [[ -z "$hash" ]]; then
   fail "PKR_VAR_root_password_hash is empty or unset."
   hint 'Set it with: export PKR_VAR_root_password_hash="$(openssl passwd -6 <same password>)"'
-elif [[ "$hash" != '$6$'* ]]; then
+elif ! is_sha512_crypt "$hash"; then
   fail "PKR_VAR_root_password_hash does not look like a SHA-512 crypt hash (it must start with \$6\$)."
   hint 'openssl passwd -6 produces $6$-prefixed hashes; a $1$/$5$/plain value here is wrong.'
 else
@@ -212,7 +229,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. RENDER: the seed renders to well-formed XML with a populated root <user>.
+# 5 + 6. The OPNsense API credential pair is present and hash-shaped.
+#    <apikeys> is baked into the same root <user> block: <key> is the
+#    PLAINTEXT key (the public username-half), <secret> is the $6$ crypt hash
+#    of FW_API_SECRET. A missing pair bakes an empty <apikeys> and every API
+#    client (Ansible, task fw:*) authenticates against nothing. Hard fails,
+#    same as the root password pair.
+# ---------------------------------------------------------------------------
+api_key="${PKR_VAR_fw_api_key:-}"
+api_secret_hash="${PKR_VAR_fw_api_secret_hash:-}"
+
+if [[ -z "$api_key" ]]; then
+  fail "PKR_VAR_fw_api_key is empty or unset."
+  hint 'Generate the pair once: openssl rand 60 | openssl base64 -A   (once for the key, once for the secret)'
+  hint "Set it in .envrc (section 6); without it the baked <apikeys> is empty and the fw API automation cannot authenticate."
+else
+  ok "PKR_VAR_fw_api_key is set."
+fi
+
+if [[ -z "$api_secret_hash" ]]; then
+  fail "PKR_VAR_fw_api_secret_hash is empty or unset."
+  hint 'Set it with: export PKR_VAR_fw_api_secret_hash="$(openssl passwd -6 "$FW_API_SECRET")"'
+  hint "The PLAINTEXT secret stays in .envrc as FW_API_SECRET; only its hash is baked."
+elif ! is_sha512_crypt "$api_secret_hash"; then
+  fail "PKR_VAR_fw_api_secret_hash does not look like a SHA-512 crypt hash (it must start with \$6\$)."
+  hint 'It must be openssl passwd -6 of the plaintext secret --- a raw/plain secret here would be BAKED IN THE CLEAR.'
+else
+  ok "PKR_VAR_fw_api_secret_hash is set and looks like a \$6\$ SHA-512 crypt hash."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. RENDER: the seed renders to well-formed XML with a populated root <user>.
 # ---------------------------------------------------------------------------
 render_check() {
   [[ -f "$SEED_TEMPLATE" ]] || { fail "Seed template not found: ${SEED_TEMPLATE}"; return; }
@@ -287,6 +334,16 @@ if not child_text(root_user, "authorizedkeys"):
 if not child_text(root_user, "password"):
     print("EMPTY-PASSWORD")
     sys.exit(5)
+# <apikeys><item><key> AND <secret> must both be present and non-empty under the
+# root user. The <secret> is sensitive, so its PRESENCE is asserted but its value
+# is never printed (only the boolean below leaves this parser).
+apikeys = root_user.getElementsByTagName("apikeys")
+if not apikeys or not child_text(apikeys[0], "key"):
+    print("EMPTY-APIKEY")
+    sys.exit(6)
+if not child_text(apikeys[0], "secret"):
+    print("EMPTY-APISECRET")
+    sys.exit(7)
 print("OK")
 PY
   )"; then
@@ -297,6 +354,8 @@ PY
       XML-NOT-WELLFORMED*) hint "A template edit broke the XML structure --- check config.xml.pkrtpl.hcl." ;;
       EMPTY-AUTHORIZEDKEYS) hint "PKR_VAR_root_authorized_keys rendered empty in <authorizedkeys>." ;;
       EMPTY-PASSWORD)       hint "PKR_VAR_root_password_hash rendered empty in <password>." ;;
+      EMPTY-APIKEY)         hint "PKR_VAR_fw_api_key rendered empty in <apikeys><item><key>." ;;
+      EMPTY-APISECRET)      hint "PKR_VAR_fw_api_secret_hash rendered empty in <apikeys><item><secret>." ;;
       NO-ROOT-USER)         hint "The root <user> block is missing from the rendered config." ;;
     esac
   fi
@@ -318,6 +377,6 @@ if (( FAIL_N > 0 )); then
     "$C_BLD" "$C_RED" "$FAIL_N" "$C_RESET" >&2
   exit 1
 fi
-printf '%s%sPreflight passed --- the fw-01 root password/hash/key are consistent.%s\n' \
+printf '%s%sPreflight passed --- the fw-01 root password/hash/key and API pair are consistent.%s\n' \
   "$C_BLD" "$C_GRN" "$C_RESET"
 exit 0

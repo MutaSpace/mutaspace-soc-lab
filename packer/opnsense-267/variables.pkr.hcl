@@ -264,6 +264,49 @@ variable "root_authorized_keys" {
   default     = ""
 }
 
+variable "fw_api_key" {
+  type = string
+  # NOT sensitive. The OPNsense API "key" is the HTTP-Basic username-equivalent
+  # of the credential pair --- a public identifier, like an access-key ID. The
+  # SECRET half is fw_api_secret_hash below. Env-driven per repo convention.
+  description = <<-EOT
+    OPNsense API key baked into config.xml as <apikeys><item><key>, so the
+    firewall API authenticates on a from-scratch clone with zero manual
+    bootstrap. Stored VERBATIM (plaintext) in config.xml --- OPNsense treats it
+    as the username half of HTTP Basic auth, not as a secret.
+
+    Intentionally EMPTY by default so `packer validate` runs offline (D-05).
+    A build that forgets it bakes an empty <apikeys> and the API automation
+    has nothing to authenticate with --- scripts/fw-preflight.sh catches that
+    before a rebuild.
+
+    Generate once (with its secret):  openssl rand 60 | openssl base64 -A
+    Set with:  export PKR_VAR_fw_api_key='<generated key>'
+  EOT
+  default     = ""
+}
+
+variable "fw_api_secret_hash" {
+  type        = string
+  sensitive   = true
+  description = <<-EOT
+    The sha512-crypt ($6$) hash of the OPNsense API SECRET, baked into
+    config.xml as <apikeys><item><secret>. OPNsense verifies the pair with
+    password_verify(), which accepts a random-salt `openssl passwd -6` hash
+    --- no per-install salt is needed, which is what makes baking it possible.
+
+    The PLAINTEXT secret never appears in this repository or in any Packer
+    variable: it lives only in the operator's gitignored .envrc (FW_API_SECRET,
+    for the API clients), and this variable carries only its hash:
+
+      export PKR_VAR_fw_api_secret_hash="$(openssl passwd -6 "$FW_API_SECRET")"
+
+    Intentionally EMPTY by default so `packer validate` runs offline (D-05).
+    scripts/fw-preflight.sh blocks a rebuild when it is empty or not $6$-shaped.
+  EOT
+  default     = ""
+}
+
 # ---------------------------------------------------------------------------
 # WAN (vmbr0) — the only address in the lab that is a real-world secret
 # ---------------------------------------------------------------------------

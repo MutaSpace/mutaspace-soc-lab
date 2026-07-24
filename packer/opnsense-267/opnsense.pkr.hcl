@@ -183,6 +183,11 @@ locals {
     # base64 done template-side, matching how OPNsense stores <authorizedkeys>.
     root_authorized_keys = base64encode(var.root_authorized_keys)
 
+    # NO base64 here --- unlike authorizedkeys, OPNsense stores <apikeys>
+    # verbatim: <key> plaintext, <secret> as a $6$ crypt hash.
+    fw_api_key         = var.fw_api_key
+    fw_api_secret_hash = var.fw_api_secret_hash
+
     upstream_dns = var.upstream_dns
 
     wan_if      = var.wan_if

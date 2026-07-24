@@ -114,6 +114,22 @@
         convention (PKR_VAR_root_authorized_keys).
       -->
       <authorizedkeys>${root_authorized_keys}</authorizedkeys>
+      <!--
+        API credential pair, baked so the OPNsense API works on a from-scratch
+        clone with zero manual bootstrap. root is in the admins group
+        (page-all), so this key carries full API privileges - which is what
+        the fw-01 config-as-code automation needs.
+
+        Format (observed OPNsense model): <key> is the PLAINTEXT key - it is
+        the HTTP-Basic username-equivalent, a public identifier, not a secret.
+        <secret> is the sha512-crypt ($6$) hash of the plaintext secret;
+        OPNsense verifies it with password_verify(), which accepts any
+        random-salt `openssl passwd -6` hash - no per-install salt needed.
+        Unlike <authorizedkeys> above, apikeys are stored VERBATIM (no base64).
+        The plaintext secret lives only in the operator's gitignored .envrc
+        (FW_API_SECRET); this file only ever sees the hash.
+      -->
+      <apikeys><item><key>${fw_api_key}</key><secret>${fw_api_secret_hash}</secret></item></apikeys>
       <uid>0</uid>
     </user>
     <nextuid>2000</nextuid>
