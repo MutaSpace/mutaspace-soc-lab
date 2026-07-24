@@ -104,6 +104,16 @@
         console prompt, once as a hash for this element.
       -->
       <password>${root_password_hash}</password>
+      <!--
+        Root SSH public key(s), base64-encoded. OPNsense stores authorizedkeys
+        as base64 in config.xml (it is decoded into ~root/.ssh/authorized_keys
+        on apply), so opnsense.pkr.hcl base64encode()s the plaintext key before
+        it reaches this element. With this baked in, key-based root SSH works on
+        a from-scratch clone with zero manual configuration; the value is a
+        PUBLIC key, so it is not a secret, but it is env-driven per repo
+        convention (PKR_VAR_root_authorized_keys).
+      -->
+      <authorizedkeys>${root_authorized_keys}</authorizedkeys>
       <uid>0</uid>
     </user>
     <nextuid>2000</nextuid>

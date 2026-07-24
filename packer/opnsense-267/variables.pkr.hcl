@@ -243,6 +243,27 @@ variable "root_password_hash" {
   default     = ""
 }
 
+variable "root_authorized_keys" {
+  type = string
+  # NOT sensitive. This is the root account's SSH PUBLIC key, which is not a
+  # secret --- but it is env-driven per the repo convention (README.md:347) so
+  # that no operator's key is committed and each host bakes its own.
+  description = <<-EOT
+    Root SSH PUBLIC key baked into config.xml as <authorizedkeys>, so that
+    key-based root SSH works on a from-scratch clone of this template with zero
+    manual configuration. Give it in the normal one-line authorized_keys form
+    (e.g. "ssh-ed25519 AAAA... comment"); opnsense.pkr.hcl base64-encodes it,
+    because OPNsense stores authorizedkeys base64-encoded in config.xml.
+
+    Intentionally EMPTY by default so `packer validate` runs offline. A build
+    that forgets this bakes an empty <authorizedkeys> and password SSH is the
+    only way in --- scripts/fw-preflight.sh catches that before a rebuild.
+
+    Set with:  export PKR_VAR_root_authorized_keys="$(cat ~/.ssh/mutaspace_lab_ed25519.pub)"
+  EOT
+  default     = ""
+}
+
 # ---------------------------------------------------------------------------
 # WAN (vmbr0) — the only address in the lab that is a real-world secret
 # ---------------------------------------------------------------------------

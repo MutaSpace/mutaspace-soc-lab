@@ -180,6 +180,9 @@ locals {
 
     root_password_hash = var.root_password_hash
 
+    # base64 done template-side, matching how OPNsense stores <authorizedkeys>.
+    root_authorized_keys = base64encode(var.root_authorized_keys)
+
     upstream_dns = var.upstream_dns
 
     wan_if      = var.wan_if

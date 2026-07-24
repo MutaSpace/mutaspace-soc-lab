@@ -209,6 +209,18 @@ tasks:
     desc: >-
       Build tpl-opnsense-267 (VMID 9004) --- fw-01. Needs the OPNsense 26.7 DVD
       image, DECOMPRESSED from .bz2, already uploaded to local:iso.
+    # HARD GATE. fw-01's config.xml bakes the root password from two variables
+    # that must agree (password + its crypt hash) plus the root SSH key. A hash
+    # that does not verify against the password is a SILENT console lockout, and
+    # neither Packer nor `packer validate` can catch it (HCL has no crypt()). So
+    # the build refuses to start until scripts/fw-preflight.sh is green.
+    preconditions:
+      - sh: '{{.SCRIPTS_DIR}}/fw-preflight.sh'
+        msg: >-
+          fw-preflight failed: the OPNsense root password/hash/SSH-key vars are
+          missing or inconsistent. Run `task fw:preflight` for the diagnosis and
+          fix .envrc section 6 before rebuilding fw-01 --- a bad hash is a silent
+          console lockout.
     cmds:
       - task: packer:run
         vars: {TEMPLATE: 'opnsense-267'}
@@ -538,6 +550,26 @@ tasks:
   # An earlier version of this file advertised a `60-suricata.yml` that never
   # existed. A task that names a missing playbook is worse than no task: it
   # implies a capability the repository does not have.
+
+  # =========================================================================
+  # Firewall (fw-01 / OPNsense) --- config-as-code
+  # =========================================================================
+  #
+  # fw-01 is a from-scratch clone of tpl-opnsense-267, whose config.xml is
+  # seeded entirely by packer/opnsense-267. The one input that cannot be
+  # defaulted is the root credential: config.xml bakes the password as a crypt
+  # hash AND the console types the plaintext, so the two `.envrc` variables must
+  # agree or the rebuilt firewall locks everyone out silently. `fw:preflight`
+  # proves they agree before any rebuild runs.
+
+  fw:preflight:
+    desc: >-
+      Verify the OPNsense root password/hash/SSH-key vars are consistent BEFORE
+      rebuilding fw-01. Cross-checks crypt(root_password) == root_password_hash,
+      that the root SSH key is a real public key, and that config.xml renders to
+      well-formed XML. Runs offline; no Proxmox host needed.
+    cmds:
+      - '{{.SCRIPTS_DIR}}/fw-preflight.sh {{.CLI_ARGS}}'
 
   # =========================================================================
   # Classroom lifecycle

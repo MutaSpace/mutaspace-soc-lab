@@ -252,9 +252,25 @@ export PKR_VAR_windows_admin_password="changeme"
 # OPNsense root, typed at the installer console by the boot_command, plus the
 # same password crypt-hashed for config.xml. Two variables for one password
 # because HCL has no crypt() function.
+#
+# ★ THE HASH MUST BE openssl passwd -6 OF THE *SAME* STRING AS THE PASSWORD ★
+#   These are your chosen lab-standard firewall root password and its SHA-512
+#   crypt hash. If the hash is of a DIFFERENT string, the build succeeds and the
+#   firewall boots, but the password you type at the console never matches the
+#   one baked into config.xml --- a silent console lockout with no way back in
+#   except a template rebuild. `task fw:preflight` (scripts/fw-preflight.sh)
+#   cryptographically cross-checks the pair and blocks the build before it can
+#   happen; do not skip it.
 #   PKR_VAR_root_password_hash="$(openssl passwd -6 '<same password>')"
 export PKR_VAR_root_password="changeme"
 export PKR_VAR_root_password_hash="<openssl-passwd-6-hash>"
+
+# OPNsense root SSH PUBLIC key, baked into config.xml as <authorizedkeys> so
+# that key-based root SSH works on a from-scratch fw-01 with zero manual setup.
+# A public key is not secret, but it is env-driven so no operator's key is
+# committed. Bare string, so a `cat` is safe (same idiom as PKR_VAR_ssh_public_key
+# above). fw-preflight.sh checks it looks like a real public key.
+export PKR_VAR_root_authorized_keys="$(cat ~/.ssh/mutaspace_lab_ed25519.pub)"
 
 # The resolver fw-01 uses during the build and afterwards. A public resolver,
 # so not a secret --- but it is a PACKER variable, not an OpenTofu one, because
