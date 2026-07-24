@@ -4,8 +4,37 @@ Scratch handoff for picking the work back up. docs/iac/session-handoff.md is the
 overview; getting-started.md is the operator walkthrough.
 
 **Last updated: 2026-07-24 — the lab is DEPLOYED. jumpbox-01 is the Ansible control node.
-Scenario-runner MVP is built AND live-proven end-to-end (see the scenario section just below);
-config playbooks 50–90 remain partially pending as noted further down.**
+Scenario-runner MVP live-proven; fw-01 is now zero-touch Infrastructure-as-Code (opnsense-as-code,
+see below); nlp-01 Ollama is up. Suricata rule-download + W4/W5 tail remain.**
+
+---
+
+## opnsense-as-code — fw-01 is now zero-touch IaC (2026-07-24)
+
+fw-01 (OPNsense) was rebuilt from scratch so its config.xml seed BAKES a root SSH key + an API
+key/secret — a from-scratch deploy now comes up API/SSH-ready with **zero manual firewall steps**.
+Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals/opnsense-as-code.md`.
+
+- **Reach fw-01 now (no more sshpass):** `ssh -J swc2026 -i ~/.ssh/id_ed25519_mutaspace_lab
+  -o StrictHostKeyChecking=no root@10.10.10.1 '<cmd>'` (root shell is **csh** — no bash redirects;
+  pipe bash syntax to `sh -c`). API creds `FW_API_KEY`/`FW_API_SECRET` in `.envrc`:
+  `curl -sk -u "$FW_API_KEY:$FW_API_SECRET" https://10.10.10.1/api/...` (verified 200). Root console
+  pw `***REMOVED-ROTATED-CREDENTIAL***` (now `PKR_VAR_root_password`+`_hash` in `.envrc`; fw-preflight crypt-checks it).
+- **⚠️ CRITICAL — to `tofu apply` anything touching fw-01, you MUST `-target='module.vm["fw-01"]
+  .proxmox_virtual_environment_vm.this'`.** A bare apply wants 21-add/21-destroy (recreates the whole
+  lab) because the committed disk-fill fix (ef27b65) changed `user-data-linux.tftpl` and was never
+  applied. `-target` scopes it to fw-01 + 10 harmless snippet re-uploads (no running VM touched).
+  Always `plan` and enumerate the replace set first. VM-level rollback:
+  `qmrestore /var/lib/vz/dump/vzdump-qemu-100-*.vma.zst 100 --force`.
+- **W4 DRAFTS committed (15c7384), NOT yet run end-to-end:** `ansible/playbooks/05-fw-config.yml`
+  (oxlorg.opnsense:26.1.11, installed on jumpbox) + `task fw:egress-open/close`/`fw:suricata`.
+  Egress toggle proven; **Ollama models pulled on nlp-01**. REMAINING: Suricata ET Open
+  **rule-source config + download** (settings/get doesn't expose it, `reloadRules` alone won't fetch —
+  rulesets stay 0), then enable attack-response + `syslog_eve` on + syslog dest → wazuh-01 + the Wazuh
+  `<remote>` listener (already drafted in 70-detections) + a testmynids 86xxx verify. Fix the drafts'
+  `module_defaults` (no `oxlorg.opnsense.all` group → per-task auth) and the **ansible→nlp `-b`/sudo
+  hang** (direct SSH works) before `80-ai-assist` runs codified. Design note: seed allows
+  `opt1→internet` for the whole research plane — decide if untrusted-01 should be air-gapped too.
 
 ---
 
