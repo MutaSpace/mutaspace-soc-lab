@@ -3,8 +3,36 @@
 Scratch handoff for picking the work back up. docs/iac/session-handoff.md is the durable
 overview; getting-started.md is the operator walkthrough.
 
-**Last updated: 2026-07-23 — the lab is DEPLOYED and mid-configuration. jumpbox-01 is now built
-and provisioned as the Ansible control node; config playbooks 50–90 still pending.**
+**Last updated: 2026-07-24 — the lab is DEPLOYED. jumpbox-01 is the Ansible control node.
+Scenario-runner MVP is built AND live-proven end-to-end (see the scenario section just below);
+config playbooks 50–90 remain partially pending as noted further down.**
+
+---
+
+## Scenario-runner — LIVE STATE (2026-07-24)
+
+The two-scenario incident runner is **built and proven on the live host**. Full instructor guide:
+[docs/scenarios/README.md](../scenarios/README.md). Non-obvious live facts the next operator inherits:
+
+- **Both scenarios verify end-to-end** (run from the jumpbox, `ansible/`):
+  `ssh-bruteforce` fires built-in rules 5710+**5712**, `web-sqli` fires **31164**+31106
+  (31164, *not* the proposal's guessed 31103). Attack path: kali-01 (10.10.20.10, vmbr2) →
+  ubuntu-app-01 (10.10.10.30, vmbr1) across fw-01.
+- **`scenario-baseline` snapshot EXISTS** on VMIDs **106 (ubuntu-app-01) and 108 (kali-01)** —
+  disk-only, taken 2026-07-24 after instrumentation was proven and the targets' logs truncated.
+  wazuh-01 (104) has **no** such snapshot and is never touched by reset (verified: uptime unbroken
+  through two full reset cycles). Re-take with `sudo ./scripts/scenario-snapshot.sh --replace`.
+- **The standing fw-01 allow rules are LIVE** (kali-01→ubuntu-app-01 tcp/22 and tcp/80), sitting
+  before the `block opt1→lan` rule. They are reconciled into the template at
+  `packer/opnsense-267/config/config.xml.pkrtpl.hcl` (search `scenario:`). No per-scenario firewall
+  mutation — this one rule set serves every run.
+- **`verify` credential gotcha:** export `MUTASPACE_WAZUH_INDEXER_PASSWORD` from
+  `ansible/.secrets/wazuh-passwords.txt`, but the value is **single-quoted** — strip the quotes or
+  the indexer 401s. One-liner:
+  `export MUTASPACE_WAZUH_INDEXER_PASSWORD=$(awk '/Admin user for the web/{f=1} f&&/indexer_password:/{print $2;exit}' .secrets/wazuh-passwords.txt | tr -d "\047\042")`.
+- **kali-01 (108) ships `started: false`** — `qm start 108` once per host boot before running.
+- kali-01 runs **no** Wazuh agent by design (it is the attacker, not a monitored endpoint); the
+  reset script now skips agent checks on it rather than warning.
 
 ---
 

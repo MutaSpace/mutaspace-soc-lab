@@ -635,6 +635,11 @@ tasks:
           MUTASPACE_WAZUH_INDEXER_PASSWORD is not set. The installer generates
           it --- read the indexer/admin password out of
           ansible/.secrets/wazuh-passwords.txt after `task ansible:wazuh-server`.
+          The value there is SINGLE-QUOTED --- strip the quotes or the indexer
+          401s: export MUTASPACE_WAZUH_INDEXER_PASSWORD=$(awk
+          '/Admin user for the web/{f=1} f&&/indexer_password:/{print $2;exit}'
+          ansible/.secrets/wazuh-passwords.txt | tr -d "\047\042").
+          See docs/scenarios/README.md.
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - >-
@@ -669,6 +674,11 @@ tasks:
           MUTASPACE_WAZUH_INDEXER_PASSWORD is not set. The installer generates
           it --- read the indexer/admin password out of
           ansible/.secrets/wazuh-passwords.txt after `task ansible:wazuh-server`.
+          The value there is SINGLE-QUOTED --- strip the quotes or the indexer
+          401s: export MUTASPACE_WAZUH_INDEXER_PASSWORD=$(awk
+          '/Admin user for the web/{f=1} f&&/indexer_password:/{print $2;exit}'
+          ansible/.secrets/wazuh-passwords.txt | tr -d "\047\042").
+          See docs/scenarios/README.md.
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       # Attack first (selected by the scenario-id tag), then the shared verify contract as a second

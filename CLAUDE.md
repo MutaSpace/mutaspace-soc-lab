@@ -111,6 +111,7 @@ docs/iac/decisions.md         the choices that override design.md
 docs/iac/prerequisites.md     tools to install, with commands
 docs/iac/resume-here.md       scratch state if a build was left mid-flight
 docs/proxmox/iso-shelf.md     the ISOs an operator must acquire by hand
+docs/scenarios/README.md      run/verify/reset incident scenarios — instructor-facing
 lab.yaml                      every VM, VMID, IP and MAC — the source of truth
 packer/                       one template dir per OS (9000–9005)
 tofu/                         OpenTofu; reads lab.yaml, has an offline test suite

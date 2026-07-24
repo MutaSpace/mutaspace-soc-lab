@@ -314,10 +314,19 @@ reset_correctness_checks() {
   fi
 
   # 3. Wazuh agent re-connected: client.keys non-empty AND the service active.
-  guest_probe "$vmid" "Wazuh agent is keyed (client.keys non-empty)" AGENT_KEYED \
-    /bin/sh -c '[ -s /var/ossec/etc/client.keys ] && echo AGENT_KEYED'
-  guest_probe "$vmid" "wazuh-agent service is active" AGENT_ACTIVE \
-    /bin/sh -c 'systemctl is-active wazuh-agent 2>/dev/null | grep -qx active && echo AGENT_ACTIVE'
+  #    Only the monitored TARGET (ubuntu-app-01) carries a Wazuh agent. The
+  #    ATTACKER (kali-01) is not a monitored endpoint and runs no agent by
+  #    design, so a missing agent there is expected, not a fault - skip the two
+  #    agent probes for it rather than warning about an agent that was never
+  #    meant to be present.
+  if [[ "$role" == "target" ]]; then
+    guest_probe "$vmid" "Wazuh agent is keyed (client.keys non-empty)" AGENT_KEYED \
+      /bin/sh -c '[ -s /var/ossec/etc/client.keys ] && echo AGENT_KEYED'
+    guest_probe "$vmid" "wazuh-agent service is active" AGENT_ACTIVE \
+      /bin/sh -c 'systemctl is-active wazuh-agent 2>/dev/null | grep -qx active && echo AGENT_ACTIVE'
+  else
+    ok "VM ${vmid} (${role}) runs no Wazuh agent by design - agent checks skipped"
+  fi
 
   # 4. Clock synchronised (Kerberos/correlation depend on it).
   guest_probe "$vmid" "guest clock reports NTP-synchronised" CLOCK_OK \
