@@ -26,12 +26,27 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
   `PKR_VAR_root_password`+`_hash` in `.envrc`; fw-preflight crypt-checks the pair). **Rotated
   2026-07-24** — the previous shared value leaked into this file and is burned; see
   `scripts/rotate-lab-credentials.sh`.
-- **⚠️ CRITICAL — to `tofu apply` anything touching fw-01, you MUST `-target='module.vm["fw-01"]
-  .proxmox_virtual_environment_vm.this'`.** A bare apply wants 21-add/21-destroy (recreates the whole
-  lab) because the committed disk-fill fix (ef27b65) changed `user-data-linux.tftpl` and was never
-  applied. `-target` scopes it to fw-01 + 10 harmless snippet re-uploads (no running VM touched).
-  Always `plan` and enumerate the replace set first. VM-level rollback:
-  `qmrestore /var/lib/vz/dump/vzdump-qemu-100-*.vma.zst 100 --force`.
+- **✅ RESOLVED 2026-07-24 — a bare `tofu apply` is safe again. `-target` is no longer needed.**
+  This entry used to carry a CRITICAL warning that a bare apply wanted 21-add/21-destroy and would
+  recreate the whole lab, so every apply had to be `-target`ed at
+  `module.vm["fw-01"].proxmox_virtual_environment_vm.this`. **That was stale.** The real pending diff
+  was `0 to add, 6 to change, 0 to destroy` — nothing destructive — and it has now been applied.
+  `tofu plan -detailed-exitcode` returns **0 (no changes)**; state matches configuration.
+  - What the 6 changes actually were: `started: true -> false` on the research plane (`kali-01`,
+    `untrusted-01`, `nlp-01` and the three `kali-l0*` clones — `lab.yaml` declares them off by
+    default, and they had been started by hand), plus the committed isolated-plane DNS change
+    (`10.10.20.1` → `1.1.1.1`, the OPNsense Unbound-in-chroot workaround), plus read-only computed
+    drift on `ipv4_addresses`/`ipv6_addresses`/`network_interface_names`.
+  - **The research plane is now STOPPED**, which is its declared state. `qm start 108` (and 109/110)
+    before running a scenario that needs an attacker or Ollama.
+  - Verified after the apply: fw-01, jumpbox-01, dc-01, analyst-01, wazuh-01 and ubuntu-app-01 all
+    still running, and `agent_control -l` still shows ubuntu-app-01, analyst-01 and dc-01 **Active**.
+    The SIEM was not disturbed.
+  - Still true and worth keeping: **`plan` first and read the replace set** before any apply. VM-level
+    rollback is `qmrestore /var/lib/vz/dump/vzdump-qemu-100-*.vma.zst 100 --force`.
+  - Lesson worth keeping: a warning like the one this replaced is itself a hazard once it goes stale.
+    It taught "always use `-target`", which suppresses exactly the whole-config plan that would have
+    shown the drift was harmless.
 - **W4 EVE→Wazuh pipeline is PROVEN END-TO-END live (2026-07-24).** `curl testmynids` from
   ubuntu-app-01 across fw-01 → Suricata **sid 2100498** ("GPL ATTACK_RESPONSE id check returned
   root") → EVE-over-syslog → wazuh-01:514 → **Wazuh rule 86601** (`ids,suricata`, level 3) in
