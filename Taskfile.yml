@@ -612,7 +612,28 @@ tasks:
   # that run on this control node (the jumpbox) and talk to the fw API at
   # 10.10.10.1; there is no `qm`/SSH-to-host step. They need FW_API_KEY /
   # FW_API_SECRET in the environment (.envrc section 6); without them the play
-  # is a friendly no-op, so the precondition names the fix up front.
+  # is a friendly no-op, so the precondition names the fix up front. The
+  # oxlorg.opnsense collection also needs python3-httpx on the control node ---
+  # bootstrap-jumpbox.sh installs it; if the play errors with "No module named
+  # 'httpx'", that step was skipped.
+
+  fw:config:
+    desc: >-
+      Apply the full fw-01 config-as-code (05-fw-config.yml): the research-plane
+      egress rule (disabled by default), Suricata (IDS + ET Open
+      emerging-attack_response + EVE syslog output) and the EVE -> wazuh-01:514
+      syslog destination. Idempotent --- a re-run reports only the always-changed
+      rule download. Does NOT touch wazuh-01 (that is the Wazuh half in
+      70-detections / task fw:suricata). Needs FW_API_KEY/FW_API_SECRET.
+    preconditions:
+      - sh: 'test -n "$FW_API_KEY" && test -n "$FW_API_SECRET"'
+        msg: >-
+          FW_API_KEY / FW_API_SECRET are not set. They are the plaintext API pair
+          baked into fw-01 --- see .envrc.example section 6.
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - >-
+        ansible-playbook -i {{.INVENTORY}} playbooks/05-fw-config.yml {{.CLI_ARGS}}
 
   fw:egress-open:
     desc: >-
@@ -668,6 +689,35 @@ tasks:
       - >-
         ansible-playbook -i {{.INVENTORY}} playbooks/70-detections.yml
         --tags suricata-ingest
+
+  fw:status:
+    desc: >-
+      Read-only fw-01 health: proves the API key/secret authenticate
+      (core/firmware/status) and reports whether the Suricata/IDS service is
+      running. Curls the fw API at 10.10.10.1 directly, so run it from the control
+      node (the jumpbox) that has a route there. Needs FW_API_KEY/FW_API_SECRET.
+    silent: true
+    preconditions:
+      - sh: 'test -n "$FW_API_KEY" && test -n "$FW_API_SECRET"'
+        msg: >-
+          FW_API_KEY / FW_API_SECRET are not set. They are the plaintext API pair
+          baked into fw-01 --- see .envrc.example section 6.
+    cmds:
+      # -f makes curl exit non-zero on an HTTP error (a bad key -> 401 -> the task
+      # fails loudly instead of printing an error body as if it were status). -k
+      # because fw-01 serves a self-signed cert on a fixed lab-internal IP.
+      - |
+        set -e
+        base="https://10.10.10.1/api"
+        auth="$FW_API_KEY:$FW_API_SECRET"
+        echo "== fw-01 firmware/version (API auth check) =="
+        curl -fsSk -u "$auth" "$base/core/firmware/status" \
+          | { python3 -c 'import sys,json;d=json.load(sys.stdin).get("product",{});print("  ",d.get("product_name","OPNsense"),d.get("product_version",""))' 2>/dev/null \
+              || echo "  (200 OK; install python3 for a parsed line)"; }
+        echo "== fw-01 IDS/Suricata service =="
+        curl -fsSk -u "$auth" "$base/ids/service/status" \
+          | { python3 -c 'import sys,json;print("  status:",json.load(sys.stdin).get("status","unknown"))' 2>/dev/null \
+              || echo "  (queried)"; }
 
   # =========================================================================
   # Classroom lifecycle

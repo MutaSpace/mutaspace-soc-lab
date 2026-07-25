@@ -5,8 +5,10 @@ overview; getting-started.md is the operator walkthrough.
 
 **Last updated: 2026-07-24 — the lab is DEPLOYED. jumpbox-01 is the Ansible control node.
 Scenario-runner MVP live-proven; fw-01 is now zero-touch Infrastructure-as-Code (opnsense-as-code,
-see below); nlp-01 Ollama is up. **W4 Suricata EVE→Wazuh pipeline PROVEN end-to-end & codified**
-(2026-07-24); remaining: a clean idempotent 05-fw-config run + W5 `fw:*` verbs.**
+see below); nlp-01 Ollama is up. **opnsense-as-code W4+W5 COMPLETE** (2026-07-24): EVE→Wazuh pipeline
+proven end-to-end, 05-fw-config idempotent, all `fw:*` Taskfile verbs shipped. 60-endpoints (Linux)
+and 90-lab-seed verified already-applied. Remaining: Win11 template (9003) + a formal 70-detections
+rules run.**
 
 ---
 
@@ -150,10 +152,10 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 | 20-dns-records | **done** (A + reverse zone + PTR resolve) |
 | 40-wazuh-server | **done (reinstalled 2026-07-23)** — healthy: manager+indexer+dashboard active, API :55000, dashboard :443. Hardened with preflight + diagnostics. |
 | 50-wazuh-agents | **done for powered-on hosts** — agents Active: ubuntu-app-01, analyst-01, dc-01 (+ wazuh-01 local). Off hosts (kali/untrusted/nlp) + unbuilt win-client-01 not enrolled → the playbook's final assert fails on those; re-run when they're up. |
-| 60-endpoints | pending (nginx on ubuntu-app-01; Sysmon needs win-client, not built) |
+| 60-endpoints | **Linux half done** (verified 2026-07-24: nginx 1.24 + openssh + landing page + wazuh nginx-localfile block on ubuntu-app-01; `--check --limit ubuntu-app-01` = ok=7 changed=0). Windows half (Sysmon + 4625 auditing on win-client-01) **blocked** — VM 105/template 9003 not built. Run scoped: `--limit ubuntu-app-01` (unscoped noisily fails on the unreachable win-client). |
 | 70-detections | Suricata half **done + proven** (decoder + syslog listener live, rule 86601 verified); a formal full idempotent run of the whole play not yet recorded |
 | 80-ai-assist | **done (ran clean 2026-07-24: ok=11, changed=3, failed=0)** — Ollama + models present on nlp-01, bound to 127.0.0.1. The `ai/` Python tooling (detection copilot, lab assistant) drives it |
-| 90-lab-seed | pending — creates test.user / lab.user02 (the incident scenarios need them) |
+| 90-lab-seed | **done** (verified 2026-07-24: test.user + lab.user02 both exist + enabled in `OU=Lab Users,OU=MutaSpace Lab`; a real re-run is changed=0, `update_password: on_create` won't reset them). ⚠️ NOT check-mode-clean: `--check` fails at the assert because `win_powershell` doesn't execute in check mode — gate on a REAL run, not `--check`. |
 
 Run pattern (now from the **jumpbox**, not the host):
 `ssh -J swc2026 labadmin@10.10.10.5 -i ~/.ssh/id_ed25519_mutaspace_lab` then
