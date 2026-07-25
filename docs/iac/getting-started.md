@@ -10,6 +10,30 @@ If you would rather drive it yourself, every step is here.
 
 ---
 
+## Step 0 — get the code
+
+**The Infrastructure as Code lives on a branch, not on `main`.** A plain clone gives you the
+documentation only: no `lab.yaml`, no `packer/`, no `tofu/`, no `ansible/`, no `Taskfile.yml`.
+If `cp .envrc.example .envrc` in Part 2 tells you the file does not exist, this is why.
+
+```
+git clone git@github.com:MutaSpace/mutaspace-soc-lab.git
+cd mutaspace-soc-lab
+git checkout feat/infrastructure-as-code
+```
+
+Confirm you are on the right branch before going further — everything below assumes it:
+
+```
+git branch --show-current      # -> feat/infrastructure-as-code
+ls lab.yaml Taskfile.yml       # both must exist
+```
+
+This is deliberate, not an oversight: the IaC is being kept off `main` for now. When it does
+land on `main`, this step goes away and a plain clone will be enough.
+
+---
+
 ## Before you start: which path are you on?
 
 **Ask one question first: do working templates already exist on the Proxmox host?**

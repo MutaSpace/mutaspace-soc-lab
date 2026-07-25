@@ -49,6 +49,19 @@ which VM sits on which network, instead of clicking through a hypervisor UI and 
 
 ---
 
+## ⚠️ This code is on a branch, not `main`
+
+The Infrastructure as Code is deliberately kept off `main` for now. A plain clone gives you
+documentation only. Before anything here works:
+
+```
+git checkout feat/infrastructure-as-code
+```
+
+[getting-started.md](getting-started.md) covers this as Step 0.
+
+---
+
 ## Documents
 
 | Document | Purpose |
