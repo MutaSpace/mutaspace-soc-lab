@@ -360,3 +360,14 @@ export MUTASPACE_WAZUH_API_PASSWORD="read-this-out-of-ansible/.secrets/wazuh-pas
 #
 # export TF_LOG="DEBUG"
 # export PACKER_LOG="1"
+
+# ---------------------------------------------------------------------------------------
+# Proxmox node name (portability)
+# ---------------------------------------------------------------------------------------
+# lab.yaml ships the node name of the machine this lab was developed on. Yours is
+# different. Set it here rather than editing lab.yaml, which is tracked and would
+# conflict on every pull.
+#
+#   hostname            # on the Proxmox host
+#   pvesh get /nodes    # or ask the API
+export TF_VAR_pve_node="CHANGEME-your-proxmox-node-name"

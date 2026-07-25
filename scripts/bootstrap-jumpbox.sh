@@ -85,7 +85,12 @@ readonly SCRIPT_NAME="${0##*/}"
 # the real management address is a secret under this repo's policy (README.md).
 # `ssh <alias>` already carries the User and IdentityFile, so ProxyJump inherits
 # them too.
-JUMP_HOST="swc2026"
+# Overridable, because "swc2026" is the alias on the machine this lab was
+# developed on and yours will be different:
+#     PVE_SSH_ALIAS=my-host ./scripts/bootstrap-jumpbox.sh
+# Same variable name that scripts/rotate-lab-credentials.sh uses, so one export
+# covers both.
+JUMP_HOST="${PVE_SSH_ALIAS:-swc2026}"
 
 # The jumpbox itself: lab.yaml gives it 10.10.10.5 on the SOC LAN with the
 # `labadmin` cloud-init user.

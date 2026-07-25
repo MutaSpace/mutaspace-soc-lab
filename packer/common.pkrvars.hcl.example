@@ -39,8 +39,19 @@
 # spellings of one URL. Getting it wrong produces a 501 or a 404 rather than a clear error.
 proxmox_url = "https://<LAB_MANAGEMENT_IP>:8006/api2/json"
 
-# The Proxmox node that runs the build. Single-node lab, so this is the only value there is.
-proxmox_node = "mutaspace-soc-node01"
+# The Proxmox node that runs the build, as PROXMOX knows it.
+#
+# ★ YOU MUST CHANGE THIS. ★ The value below is a placeholder and matches no real
+# machine, which is deliberate - a build that forgets it fails immediately with a
+# 404 naming this string, rather than doing something surprising on a host that
+# happens to share a name.
+#
+# Find yours:  hostname          (on the Proxmox host)
+#              pvesh get /nodes  (or ask the API)
+#
+# Note OpenTofu takes the same value separately, via TF_VAR_pve_node or
+# pve_node in terraform.tfvars. Packer and OpenTofu do not share variables.
+proxmox_node = "CHANGEME-your-proxmox-node-name"
 
 # Proxmox installs with a self-signed certificate. `true` is the honest setting for a lab
 # on a private management network; set it to false once a real certificate is installed and

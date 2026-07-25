@@ -86,3 +86,15 @@ lab_ssh_authorized_keys = [
 # learner's endpoint pair another 8 GB. Three learners fits with the research plane
 # (kali-01, untrusted-01, nlp-01) powered off. Raise this only after raising the RAM.
 learner_count = 3
+
+# ---------------------------------------------------------------------------------------
+# Proxmox node name
+# ---------------------------------------------------------------------------------------
+# The node name as PROXMOX knows it. Leave commented out to use `site.node` from
+# lab.yaml; set it if your host is named something else, which it will be.
+#
+# Find it with `hostname` on the host, or `pvesh get /nodes`.
+#
+# A wrong value fails at plan time with the real node names listed, rather than
+# 404-ing in a way that looks like an authentication problem.
+# pve_node = "my-proxmox-host"

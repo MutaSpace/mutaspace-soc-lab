@@ -59,6 +59,21 @@ variables {
 
 # What the host would report if every Packer build had been run. Declared once at
 # file level so every run block below inherits it.
+# The node-existence check in templates.tf asks the host what its nodes are
+# called. Under mock_provider that list comes back EMPTY, which fails the check
+# before any assertion below runs - so it has to be supplied here too.
+#
+# The name must match `site.node` in lab.yaml (or var.pve_node if the test sets
+# it). That coupling is deliberate: if someone changes the committed node name
+# without updating these mocks, the tests fail and say so, which is better than
+# the tests silently passing against a name the real host does not have.
+override_data {
+  target = data.proxmox_virtual_environment_nodes.available
+  values = {
+    names = ["swc2026"]
+  }
+}
+
 override_data {
   target = data.proxmox_virtual_environment_vms.templates
   values = {

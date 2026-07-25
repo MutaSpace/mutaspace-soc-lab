@@ -53,9 +53,21 @@ site:
   # Get it wrong and every API call 404s against a node that does not exist.
   # Confirm with `hostname` on the host, or `pvesh get /nodes`.
   #
-  # The earlier documentation refers to `mutaspace-soc-node01`, which was the
-  # planned name for the original Ryzen build. The host this lab actually runs on
-  # is a different machine - see docs/hardware/ for the discrepancy.
+  # ★ OTHER INSTRUCTORS: DO NOT EDIT THIS LINE. ★
+  #
+  # The value below is the node name of the machine this lab was developed on, so
+  # it is wrong for you. Override it without touching this tracked file:
+  #
+  #   export TF_VAR_pve_node=my-proxmox-host
+  #   # or, in the gitignored tofu/terraform.tfvars:  pve_node = "my-proxmox-host"
+  #
+  # Editing it here works, but it is a tracked file - you would get a merge
+  # conflict on every `git pull`, and the resolution is always "keep mine", which
+  # is the kind of chore that eventually gets resolved the wrong way.
+  #
+  # tofu/templates.tf asserts at PLAN time that the node exists and prints the
+  # real node names when it does not, so a wrong value fails clearly rather than
+  # as a 404 that looks like a broken API token.
   node: swc2026
 
   # LVM-thin pool that holds every VM disk.

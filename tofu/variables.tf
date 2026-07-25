@@ -222,3 +222,28 @@ variable "assume_all_enabled" {
   default     = false
   description = "Test-only. Ignore enabled:false in lab.yaml so invariants are checked against the complete declared lab."
 }
+
+# -----------------------------------------------------------------------------
+# Proxmox node name override
+# -----------------------------------------------------------------------------
+variable "pve_node" {
+  type    = string
+  default = ""
+
+  # The Proxmox node name, as PROXMOX knows it - not a name you choose.
+  #
+  # Leave empty to use `site.node` from lab.yaml. Set it when your host is named
+  # something else, which it will be: lab.yaml is committed with the node name of
+  # the machine this lab was developed on, and yours is different.
+  #
+  #   export TF_VAR_pve_node=my-proxmox-host
+  #   # or in terraform.tfvars:  pve_node = "my-proxmox-host"
+  #
+  # Get the value with `hostname` on the host, or `pvesh get /nodes`.
+  #
+  # Getting this wrong produces a 404 against a node that does not exist, which
+  # reads as "the API is broken" rather than "the name is wrong" - so
+  # tofu/templates.tf asserts at plan time that the node actually exists and says
+  # what the real node names are when it does not.
+  description = "Proxmox node name. Empty means use site.node from lab.yaml."
+}

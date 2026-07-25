@@ -105,3 +105,30 @@ resource "terraform_data" "template_exists" {
     }
   }
 }
+
+# -----------------------------------------------------------------------------
+# Does the node we were told to use actually exist?
+# -----------------------------------------------------------------------------
+# This check exists because of how the failure looks without it.
+#
+# lab.yaml is committed with the node name of the machine this lab was developed
+# on. On any other host that name is wrong, and every single API call 404s. The
+# provider surfaces that as a generic HTTP error against a URL containing the
+# node name, which reads as "Proxmox is broken" or "my token is wrong" rather
+# than "that machine is not called this".
+#
+# So: ask the host what its nodes are actually called, and if the configured name
+# is not among them, fail at PLAN time with the real list.
+data "proxmox_virtual_environment_nodes" "available" {}
+
+check "configured_node_exists" {
+  assert {
+    condition = contains(data.proxmox_virtual_environment_nodes.available.names, local.site.node)
+    error_message = join("", [
+      "Proxmox node '", local.site.node, "' does not exist on this host.\n",
+      "This host's nodes are: ", join(", ", data.proxmox_virtual_environment_nodes.available.names), "\n",
+      "Set it with:  export TF_VAR_pve_node=<name>   (or pve_node in terraform.tfvars)\n",
+      "Do NOT edit site.node in lab.yaml - that value is tracked and will conflict on every pull.",
+    ])
+  }
+}

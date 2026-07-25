@@ -22,7 +22,20 @@ locals {
   # path is wrong the failure is immediate and obvious, which is the good kind.
   lab = yamldecode(file("${path.module}/../lab.yaml"))
 
-  site     = local.lab.site
+  # The node name is the one value in lab.yaml that is guaranteed to be wrong on
+  # somebody else's hardware, so it can be overridden without editing a tracked
+  # file. `var.pve_node` wins when set; lab.yaml's value is the default.
+  #
+  # Why an override rather than "just edit lab.yaml": instructors are expected to
+  # pull updates to this repository. A host-specific value committed in a tracked
+  # file is a merge conflict on every pull, and the resolution is always "keep
+  # mine", which is exactly the kind of chore that eventually gets resolved the
+  # wrong way. Learner counts and VM sizing genuinely belong in lab.yaml; the
+  # name of one particular machine does not.
+  site = merge(local.lab.site, {
+    node = var.pve_node != "" ? var.pve_node : local.lab.site.node
+  })
+
   networks = local.lab.networks
 
   # Template name on the host is "tpl-" + the key in lab.yaml. Keeping the prefix
