@@ -262,12 +262,25 @@ variable "virtio_cd_letter" {
 variable "product_key" {
   type        = string
   description = <<-EOT
-    Leave empty for evaluation media (evaluation ISOs carry their own edition and
-    reject a key).
+    THREE media cases, and only two were documented here before - the missing one
+    cost a long debugging session.
 
-    Set the Windows 11 Enterprise GVLK here if you are building from Volume Licensing
-    media. That is the recommended path -- it removes the 90-day clock entirely. Empty
-    means the <ProductKey> element is omitted from the answer file.
+    1. EVALUATION media (single edition): leave EMPTY. Eval ISOs carry their own
+       edition and reject a key.
+
+    2. VOLUME LICENSING media: set the Enterprise GVLK. Recommended where available
+       - it removes the 90-day evaluation clock entirely.
+
+    3. CONSUMER MULTI-EDITION media (e.g. Win11_25H2_English_x64_v2.iso): you MUST
+       set a generic edition-selection key. install.wim carries 11 editions, and
+       /IMAGE/INDEX in the answer file is NOT enough to suppress Setup's interactive
+       "Product key" page - Setup stops there and the unattended build hangs at
+       "Waiting for WinRM" until it times out. Use the published generic key for the
+       edition matching windows_image_index (index 6 = Pro ->
+       VK7JG-NPHTM-C97JM-9MPGT-3V66T). A generic key selects the edition and does not
+       activate; the result is unactivated, same as evaluation media.
+
+    Empty means the <ProductKey> element is omitted from the answer file entirely.
   EOT
   default     = ""
 }

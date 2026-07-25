@@ -102,6 +102,26 @@ paths = [
   # that reports fifteen findings on a clean tree teaches people to ignore it.
   '''(^|/)\.terraform/''',
 ]
+# Values that are high-entropy but are not secrets, allowlisted globally because
+# more than one rule can match them (gitleaks' generic-api-key catches these on
+# entropy 3.77).
+#
+# Microsoft's PUBLISHED generic Windows keys. Their only function is telling
+# Windows Setup which edition to install from multi-edition media - they activate
+# nothing and grant no licence, so a machine installed with one is unactivated,
+# exactly as it would be from evaluation media. They live in
+# packer/*/*.pkrvars.hcl, tracked on purpose because both Windows templates
+# declare windows_iso_file with no default and a fresh clone needs them for
+# `task validate` to pass.
+#
+# Only these specific published strings are listed, so a real product key still
+# trips the scanner.
+regexes = [
+  '''VK7JG-NPHTM-C97JM-9MPGT-3V66T''',
+  '''W269N-WFGWX-YVC9B-4J6C9-T83GX''',
+  '''NPPR9-FWDCX-D2C8J-H872K-2YT43''',
+  '''XGVPP-NMH47-7TTHJ-W3FW7-8HV2C''',
+]
 
 # ---------------------------------------------------------------------------
 # Rule 1 --- public IPv4 literals

@@ -1,5 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
+      ⚠️ XML COMMENT RULE, AND IT COST A DAY: a double hyphen is ILLEGAL inside an
+      XML comment. Writing a command like `script.sh - -flag` (without the space)
+      anywhere in a comment in this file makes the whole answer file malformed.
+
+      Windows Setup does not tell you. It parses Autounattend.xml, fails, and
+      silently resets - so the VM boots WinPE, shows the Setup background with no
+      UI drawn, writes nothing to the disk, reboots, and loops forever. It looks
+      exactly like a driver or firmware problem and is neither.
+
+      This file had `- -variant` (unspaced) in a comment. Symptom was a permanent
+      boot loop; the whole answer file was being thrown away. Diagnosed by booting
+      the same ISO on the same firmware with NO answer file, at which point Setup
+      came up perfectly.
+
+      If you edit comments here, validate afterwards:
+        python3 -c "import xml.etree.ElementTree as E,re,sys;\
+          E.fromstring(re.sub(r'\$\{[^}]+\}','X',open(sys.argv[1]).read()))" \
+          packer/win11-client/cd/Autounattend.xml.pkrtpl
+    -->
+<!--
   packer/win11-client/cd/Autounattend.xml.pkrtpl
 
   WHAT THIS IS
@@ -94,7 +114,7 @@
       attached volume, which Windows Setup itself scans and drvloads (and stages for
       injection) before it draws the disk list. No answer-file involvement, so nothing
       here can reject it. That volume is built on the Proxmox host by
-      build-winpe-driver-iso.sh --variant w11 from the `w11` driver directories (not
+      build-winpe-driver-iso.sh (with the 'w11' variant flag) from the `w11` driver directories (not
       `2k22`), and attached as an extra CD (sata3) by this template.
     -->
 

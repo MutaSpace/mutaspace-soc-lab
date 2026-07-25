@@ -13,3 +13,18 @@ windows_iso_file = "local:iso/Win11_25H2_English_x64_v2-noprompt.iso"
 # the domain-capable edition a real endpoint runs. Verify if you re-fetch the media:
 #   1=Home 4=Education 6=Pro 8=Pro Education 10=Pro for Workstations
 windows_image_index = 6
+
+# Generic Windows 11 Pro key, for EDITION SELECTION ONLY.
+#
+# This ISO is CONSUMER MULTI-EDITION media - sources/install.wim carries 11
+# editions - so Setup cannot decide which one to install and stops at its
+# "Product key" page. /IMAGE/INDEX alone does not suppress that page.
+#
+# This is Microsoft's published generic key for Windows 11 Pro. It selects the
+# edition and does NOT activate: the installed system is unactivated, exactly as
+# it would be from evaluation media. It is not a licence and carries none.
+#
+# Must match windows_image_index above (6 = Windows 11 Pro).
+# If you switch to Enterprise EVALUATION media, REMOVE this line - eval media
+# carries its own edition and rejects a key.
+product_key = "VK7JG-NPHTM-C97JM-9MPGT-3V66T"
