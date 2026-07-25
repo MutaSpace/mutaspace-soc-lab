@@ -483,3 +483,24 @@ variable "suricata_interfaces" {
   default     = "lan,opt1"
   description = "OPNsense interface keys Suricata watches. WAN is excluded because everything interesting is already visible on the inside of the NAT, where addresses are still lab addresses."
 }
+
+# Declared but deliberately UNUSED.
+#
+# packer/common.pkrvars.hcl is shared by every template in this repository, and it
+# sets http_bind_address for the templates that serve an autoinstall seed over
+# Packer's built-in HTTP server (the two Ubuntu ones and Kali). This template does
+# not use that server - it seeds its answer file from an attached CD instead - but
+# a var file that sets a variable the template does not declare makes
+# `packer validate` emit:
+#
+#     Warning: Undefined variable
+#     The variable "http_bind_address" was set but was not declared...
+#
+# followed by a block of raw HCL. Validate still passes, but for anyone running
+# `task validate` on a fresh clone that reads as breakage. Declaring it here costs
+# nothing and keeps the shared var file genuinely shared.
+variable "http_bind_address" {
+  type        = string
+  default     = null
+  description = "Unused by this template. Declared so the shared common.pkrvars.hcl does not warn."
+}
