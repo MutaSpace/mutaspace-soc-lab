@@ -102,6 +102,45 @@ comments explain both:
 
 Your WAN addressing and how many learners. Small file; the comments cover it.
 
+**One value here is not optional: `pve_node`.** `lab.yaml` is committed with the node name of
+the machine this lab was developed on, so it is wrong for you, and a wrong node name makes
+every API call 404 in a way that looks like a broken token. Set it here (or as
+`TF_VAR_pve_node`) rather than editing `lab.yaml` — `lab.yaml` is tracked, so editing it means
+a merge conflict every time you pull.
+
+```
+hostname            # run on the Proxmox host
+pvesh get /nodes    # or ask the API
+```
+
+If you get it wrong, `tofu plan` tells you, and lists the node names your host actually has.
+
+### Turn on the pre-commit hook
+
+```
+pre-commit install
+```
+
+Do this once, now. It runs secret scanning and formatting checks on every commit.
+
+This is not optional hygiene advice — it is here because it was skipped once on the machine
+this lab was built on, and a shared password reached a public repository as a direct result.
+The scanner was configured correctly the whole time; nothing ran it. See
+[decisions.md](decisions.md).
+
+### Rotate the shared credential
+
+The `.example` files ship `changeme` placeholders. Once the lab is up, replace them with
+values only you know:
+
+```
+./scripts/rotate-lab-credentials.sh
+```
+
+It generates one new password, applies it to the firewall, the domain controller, your
+`.envrc` and the jumpbox, verifies each, and writes the value to a mode-600 file it tells you
+about. Never printed to your terminal.
+
 ### Check it before going further
 
 ```
@@ -137,6 +176,34 @@ a small driver ISO the repo builds for you:
 ssh root@<your-host> '/root/build-winpe-driver-iso.sh'          # for Server 2022
 task build:win-server
 ```
+
+**Windows 11 (9003) needs one extra step first, and it is not optional.** Windows install
+media prints
+
+```
+Press any key to boot from CD or DVD......
+```
+
+and gives you about five seconds. Nothing is there to press the key, so the firmware falls
+through to an empty disk and the build sits at "Waiting for WinRM" until it times out. Trying
+to have Packer press the key does not work reliably — it was attempted with a 130-second
+keystroke barrage and still missed, because a vTPM makes boot timing vary and QEMU drops
+keystrokes under load.
+
+The fix removes the prompt instead of racing it. Every Windows ISO contains a second UEFI boot
+image that does not prompt, and this script rebuilds your ISO around it:
+
+```
+scp scripts/remaster-windows-iso.sh root@<your-host>:/root/
+ssh root@<your-host> '/root/remaster-windows-iso.sh --src Win11_<your-iso>.iso'
+```
+
+Then point `packer/win11-client/win11-client.pkrvars.hcl` at the `-noprompt.iso` it produced
+and run `task build:win11`. Takes about 15 minutes and needs ~18 GB of temporary space on the
+host.
+
+The remastered ISO is a derivative of Microsoft evaluation media. It is for **your** host
+only — do not copy it to another instructor. Each of you remasters your own.
 
 Windows takes longer — 30–40 minutes including sysprep — and installs onto virtio hardware
 using a driver-injection trick the template handles for you. If a Windows build stalls at

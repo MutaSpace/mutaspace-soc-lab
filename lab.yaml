@@ -156,6 +156,45 @@ networks:
     dns: [10.99.0.1]
 
 # -----------------------------------------------------------------------------
+# iso_shelf - the media you must acquire BY HAND
+# -----------------------------------------------------------------------------
+#
+# scripts/preflight.sh checks that each of these exists on the `iso_store` above
+# before a build can start, so a missing file is caught in seconds rather than
+# after Packer has already created a VM.
+#
+# ★ THESE FILENAMES ARE YOURS TO CHANGE. ★ Microsoft's download names vary by
+# release, language and how you obtained the media, so there is no name this repo
+# can assume. Put whatever your files are actually called here, and keep
+# docs/proxmox/iso-shelf.md in step.
+#
+# Why each one is manual:
+#   Windows Server / Windows 11  registration-gated downloads. There is no URL to
+#                               automate, and the licence does not permit passing
+#                               a built image to another instructor - each of you
+#                               downloads and builds your own.
+#   Windows 11 "-noprompt"      produced by scripts/remaster-windows-iso.sh from
+#                               the ISO above. Without it the installer stalls at
+#                               "Press any key to boot from CD or DVD" and the
+#                               build times out. Also NOT redistributable.
+#   OPNsense                    published as .bz2, which Packer cannot boot;
+#                               decompress it first.
+#   virtio-win                  freely downloadable but must be uploaded to the
+#                               host. Pinned deliberately - see the notes in
+#                               packer/win11-client/win11-client.pkr.hcl.
+#
+# The Ubuntu and Kali ISOs are deliberately absent: those templates fetch them
+# from a pinned URL with a verified checksum, so there is nothing to acquire.
+#
+iso_shelf:
+  - SERVER_EVAL_x64FRE_en-us.iso            # packer/win-server-2022  (9002)
+  - Win11_25H2_English_x64_v2.iso           # packer/win11-client     (9003) source
+  - Win11_25H2_English_x64_v2-noprompt.iso  # packer/win11-client     (9003) remastered
+  - virtio-win-0.1.271.iso                  # installed-OS drivers
+  - virtio-win-0.1.285.iso                  # WinPE drivers: 0.1.271 crashes the 25H2 WinPE kernel
+  - OPNsense-26.7-dvd-amd64.iso             # packer/opnsense-267     (9004)
+
+# -----------------------------------------------------------------------------
 # templates - the golden images Packer produces
 # -----------------------------------------------------------------------------
 #
