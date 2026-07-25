@@ -135,3 +135,19 @@ wazuh-passwords.txt
 #
 # If you ever see .terraform.lock.hcl show up as untracked, commit it.
 !.terraform.lock.hcl
+
+# Dot-prefixed secret directories.
+#
+# The `secrets/` pattern above does NOT match `.secrets/` - the leading dot makes
+# it a different name. Both the repo root (scripts/rotate-lab-credentials.sh
+# writes here) and ansible/ use the dotted form, so it needs its own entry.
+.secrets/
+
+# Backups of .envrc.
+#
+# `.envrc` itself is ignored above, but a backup named `.envrc.bak-<timestamp>`
+# is a DIFFERENT filename and was not covered - so `git add -A` swept three of
+# them, containing the old password in plaintext, straight into a commit.
+# Caught before pushing. Any sibling of .envrc is a credential file too.
+.envrc.*
+!.envrc.example
