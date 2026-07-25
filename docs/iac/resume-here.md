@@ -31,8 +31,16 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
   `curl -sk -u "$FW_API_KEY:$FW_API_SECRET" https://10.10.10.1/api/...` (verified 200). Root console
   pw is in `.secrets/rotated-credential.txt` / your password manager (also
   `PKR_VAR_root_password`+`_hash` in `.envrc`; fw-preflight crypt-checks the pair). **Rotated
-  2026-07-24** — the previous shared value leaked into this file and is burned; see
+  2026-07-24** — the previous shared value leaked into this file, was rotated, and has since been
+  **PURGED FROM GIT HISTORY** (`git filter-repo --replace-text`, force-pushed 2026-07-25). It now
+  reads `***REMOVED-ROTATED-CREDENTIAL***` in the three commits that carried it. See
   `scripts/rotate-lab-credentials.sh`.
+
+  ⚠️ **Every commit SHA on this branch changed.** If you had a clone from before 2026-07-25 it has
+  diverged permanently and `git pull` will not reconcile it — re-clone, or
+  `git fetch && git reset --hard origin/feat/infrastructure-as-code` and lose local commits. The
+  old tip was `eec8ffe`; the rewritten tip is `16a78cf`. Commit count is unchanged at 98, and a
+  pre-rewrite backup bundle of every ref was taken before the operation.
 - **✅ RESOLVED 2026-07-24 — a bare `tofu apply` is safe again. `-target` is no longer needed.**
   This entry used to carry a CRITICAL warning that a bare apply wanted 21-add/21-destroy and would
   recreate the whole lab, so every apply had to be `-target`ed at
