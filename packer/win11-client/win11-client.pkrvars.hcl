@@ -1,7 +1,10 @@
 # Windows 11 25H2. NOT the "enterprise-eval" the variable default implies - same
 # installer and the same w11 VirtIO driver paths, only the filename differs.
 # Registration-gated, so there is no URL to pin. See docs/proxmox/iso-shelf.md.
-windows_iso_file = "local:iso/Win11_25H2_English_x64_v2.iso"
+# Remastered by scripts/remaster-windows-iso.sh so the CD boots without the
+# "Press any key to boot from CD or DVD" prompt. See the boot_command note in
+# win11-client.pkr.hcl. Do NOT point this back at the original ISO.
+windows_iso_file = "local:iso/Win11_25H2_English_x64_v2-noprompt.iso"
 
 # This is MULTI-EDITION CONSUMER media, not the single-image enterprise-eval the
 # variable default (index 1) assumes. `dism`-equivalent read of sources/install.wim

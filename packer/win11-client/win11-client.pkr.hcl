@@ -652,50 +652,48 @@ source "proxmox-iso" "win11-client" {
   # Read this before you touch the timing OR conclude the template works.
   #
   # THE CD-PROMPT IS A MOVING TARGET ON THIS OS. VM 9002 (server) and 9003 (this one)
-  # are byte-identical in firmware -- same OVMF, same q35, same 2023 Secure Boot certs,
-  # same boot order scsi0;sata0;net0 -- EXCEPT 9003 has a vTPM 2.0 (mandatory for Win11).
-  # The vTPM adds measured-boot work, so the "Press any key to boot from CD or DVD"
-  # prompt appears at a WILDLY VARIABLE time: observed anywhere from ~45s (host idle) to
-  # >120s (host running three other template builds at once). The server, with no vTPM,
-  # POSTs in a few seconds and catches the prompt with five spacebars; here five is
-  # hopeless. Miss the prompt and the firmware falls through:
-  #   Press any key to boot from CD or DVD......
-  #   BdsDxe: failed to start Boot0002 "UEFI QEMU DVD-ROM" ... Time out
-  #   >>Start PXE over IPv4 ... >>Start HTTP Boot ... No bootable option or device
+  # THE BOOT RACE IS GONE. THERE IS NO boot_command ANY MORE.
   #
-  # WITH the network-free boot order set above (see `boot = "order=scsi0;sata0"`),
-  # the CD "press any key" prompt recurs every few seconds after POST instead of
-  # once per ~50 s.
+  # This used to be the most fragile thing in the repository: a 55-spacebar burst
+  # followed by 30 repeated <enter>s, spanning ~130 seconds, trying to catch two
+  # separate prompts whose timing varies with host load. It is worth recording
+  # what it was fighting, because the reasoning is instructive and the conclusion
+  # is that the whole fight was avoidable.
   #
-  # THE PURE-SPACEBAR BURST DOES NOT ACTUALLY BOOT THE CD. FOUND BY SCREENDUMP 2026-07-23.
-  # On THIS firmware a spacebar at the "Press any key to boot from CD or DVD..." prompt
-  # is intercepted as the OVMF BOOT-MENU HOTKEY, not consumed as "any key": every
-  # spacebar opens (or, once open, re-holds) the "Please select boot device" menu. So
-  # the old burst just parked the VM in that menu forever, Packer then waited out its
-  # 2 h winrm_timeout, and the CD never booted. Screendumps showed the menu sitting on
-  # its default highlight "UEFI QEMU QEMU HARDDISK" with the install CD one row below.
+  # WHAT MADE IT HARD
+  #   * 9003 has a vTPM (mandatory for Win11). Measured boot makes POST duration
+  #     wildly variable - observed ~45 s on an idle host to >120 s under load.
+  #   * On this OVMF, SPACEBAR at the "Press any key to boot from CD or DVD"
+  #     prompt is intercepted as the boot-menu HOTKEY rather than consumed as
+  #     "any key", so a spacebar burst parked the VM in the boot-device menu
+  #     forever and Packer waited out its full 2 h winrm_timeout.
+  #   * Steering the menu (down, enter) then left a SECOND ~5 s window - the
+  #     Windows "press any key" prompt - at a variable delay.
+  #   * QEMU's sendkey drops keystrokes under load, so more keys is not more
+  #     reliable, just louder guessing.
   #
-  # THE DETERMINISTIC PATH THAT DOES WORK, verified by hand with `qm sendkey`:
-  #   1. The boot-device menu has NO timeout. Once open it stays put on HARDDISK, so a
-  #      spacebar burst spanning the whole POST-uncertainty window (~45-120 s, and it
-  #      IS that variable under vTPM + a busy host) leaves the menu deterministically
-  #      open on HARDDISK no matter WHEN POST finished. Extra spacebars are harmless:
-  #      spacebar is not a menu action key, so it neither moves the highlight nor
-  #      dismisses the menu (only up/down move, enter selects, esc exits).
-  #   2. One <down> moves the highlight HARDDISK -> "UEFI QEMU DVD-ROM QM00013", which
-  #      is sata0, the Windows install media. (QM00015/17/19 are the other three SATA
-  #      CDs.) <enter> commits to booting it.
-  #   3. Committing to QM00013 lets the Windows "Press any key to boot from CD" prompt
-  #      that follows treat <enter> as "any key". That prompt is a ~5 s window at a
-  #      variable delay after the DVD is selected, so <enter> is repeated 30x at 1 s to
-  #      blanket ~30 s. NOTE: boot-catch still MISSED in live 2026-07-24 tests; if it
-  #      keeps missing, remaster the ISO with efisys_noprompt.bin so the CD boots
-  #      WITHOUT the prompt (the robust fix). See README.md.
+  # WHAT ACTUALLY FIXED IT
+  #   scripts/remaster-windows-iso.sh rebuilds the install ISO with
+  #   efi/microsoft/boot/efisys_noprompt.bin as the UEFI El Torito boot image
+  #   instead of efisys.bin. Microsoft ships both inside every Windows ISO; the
+  #   second one boots without prompting at all.
   #
-  # boot_wait 20 s starts phase 1 before the earliest POST; 55 spacebars at 2 s span
-  # t=20-130 s, covering the slow tail.
+  #   With no prompt, and with `boot = "order=scsi0;sata0"` above, the sequence is
+  #   fully deterministic and needs no input whatsoever:
+  #
+  #     fresh build  -> scsi0 is an empty disk with no boot sector
+  #                  -> firmware falls through to sata0, the install DVD
+  #                  -> efisys_noprompt boots WinPE immediately
+  #     after install -> scsi0 is bootable and wins, so the installer does not loop
+  #
+  #   Deleting a race beats winning it. If you ever see
+  #   "Press any key to boot from CD or DVD" on this template again, the pkrvars
+  #   file is pointing at the ORIGINAL ISO rather than the remastered one.
+  #
+  # boot_wait still matters: it is how long Packer waits before it starts looking
+  # for the communicator, and the install has to get going first.
   boot_wait    = "20s"
-  boot_command = ["<spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><spacebar><wait2s><down><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter><wait1s><enter>"]
+  boot_command = []
 
   # --- communicator ---------------------------------------------------------
   #
