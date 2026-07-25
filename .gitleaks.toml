@@ -43,6 +43,31 @@
 #   gitleaks git .              # scan all of history
 #   pre-commit run gitleaks -a  # what CI and the hook do
 #
+# WHAT THIS CONFIG DOES *NOT* CATCH --- READ THIS
+#   A credential written into PROSE. The lab's shared password was committed as
+#
+#       Root console pw `<secret>`
+#
+#   and scanned clean. Rule 8 below wants key=value; that line is neither, and
+#   the value's entropy was above the threshold, so entropy was not the problem
+#   either --- the shape was.
+#
+#   A prose-matching rule was written, tested, and REMOVED. It could not be made
+#   to both catch the real leak and ignore legitimate lines like
+#   "pw is in `.secrets/rotated-credential.txt`" in this gitleaks version, and a
+#   scanner rule whose behaviour cannot be demonstrated is worse than none: it
+#   produces false confidence. The attempt is recorded here so the next person
+#   does not repeat it without knowing it was tried.
+#
+#   The mitigation is therefore PROCESS, not pattern:
+#     * Never write a credential into documentation. Reference where it lives
+#       (a password manager, .secrets/, an env var NAME) instead of its value.
+#     * `pre-commit install` so gitleaks actually runs. The leak that prompted
+#       all of this was committed on a machine where the hook was never
+#       installed, so nothing scanned anything.
+#     * scripts/rotate-lab-credentials.sh exists because a leaked credential can
+#       only be rotated, never unpublished.
+#
 # WHEN A FINDING IS WRONG
 #   Add a narrow allowlist entry to the specific rule. Do not add
 #   "gitleaks:allow" comments scattered through documentation --- they are
@@ -281,7 +306,11 @@ description = "High-entropy password/passphrase assignment (Wazuh, AD, cloud-ini
 # No leading \b: the keys in practice are wazuh_api_password,
 # domain_admin_password, TF_VAR_ci_password --- an underscore before
 # "password" is not a word boundary, so \b would miss every real case.
-regex = '''(?i)(?:password|passwd|passphrase)[A-Za-z0-9_]{0,16}\s*[:=]{1,2}\s*['"]?([A-Za-z0-9.*+?_/-]{16,64})['"]?'''
+# The quote class includes a BACKTICK. This repository is mostly Markdown, and
+# `MUTASPACE_WIN_ADMIN_PASSWORD` = `<value>` is how a credential actually got
+# committed - the backtick is not in ['"] so the capture never started and the
+# rule silently passed a real leak.
+regex = '''(?i)(?:password|passwd|passphrase)[A-Za-z0-9_]{0,16}\s*[:=]{1,2}\s*['"`]?([A-Za-z0-9.*+?_/-]{16,64})['"`]?'''
 secretGroup = 1
 entropy = 3.5
 tags = ["password", "mutaspace"]

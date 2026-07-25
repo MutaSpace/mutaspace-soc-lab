@@ -106,8 +106,8 @@ networks:
   lan:
     bridge: vmbr1
     cidr: 10.10.10.0/24
-    gateway: 10.10.10.1 # fw-01
-    dns: [10.10.10.10] # dc-01 is the only resolver domain members may use
+    gateway: 10.10.10.1  # fw-01
+    dns: [10.10.10.10]  # dc-01 is the only resolver domain members may use
     dhcp_pool: { start: 10.10.10.100, end: 10.10.10.200 }
 
   # The isolated / untrusted plane. Attack tooling and untrusted corpora live here
@@ -115,7 +115,7 @@ networks:
   isolated:
     bridge: vmbr2
     cidr: 10.10.20.0/24
-    gateway: 10.10.20.1 # fw-01's OPT leg
+    gateway: 10.10.20.1  # fw-01's OPT leg
     # This plane resolves via a public resolver directly, NOT through the firewall.
     # (Reverses the earlier "resolve through the firewall" note.) Standing up Unbound
     # on fw-01 hit a genuine OPNsense bug: its DNSBL python module fails to init in the
@@ -140,7 +140,7 @@ networks:
   build:
     bridge: vmbr9
     cidr: 10.99.0.0/24
-    gateway: 10.99.0.1 # the Proxmox host
+    gateway: 10.99.0.1  # the Proxmox host
     dns: [10.99.0.1]
 
 # -----------------------------------------------------------------------------
@@ -160,12 +160,12 @@ networks:
 # Fix Packer instead.
 #
 templates:
-  ubuntu-server-2404: 9000 # Ubuntu Server 24.04 LTS  -> wazuh-01, ubuntu-app-01, nlp-01
-  ubuntu-desktop-2404: 9001 # Ubuntu Desktop 24.04 LTS -> analyst-01
-  win-server-2022: 9002 # Windows Server 2022 Eval -> dc-01
-  win11-client: 9003 # Windows 11 Eval          -> win-client-01
-  opnsense-267: 9004 # OPNsense 26.7            -> fw-01
-  kali-rolling: 9005 # Kali Rolling             -> kali-01, untrusted-01
+  ubuntu-server-2404: 9000  # Ubuntu Server 24.04 LTS  -> wazuh-01, ubuntu-app-01, nlp-01
+  ubuntu-desktop-2404: 9001  # Ubuntu Desktop 24.04 LTS -> analyst-01
+  win-server-2022: 9002  # Windows Server 2022 Eval -> dc-01
+  win11-client: 9003  # Windows 11 Eval          -> win-client-01
+  opnsense-267: 9004  # OPNsense 26.7            -> fw-01
+  kali-rolling: 9005  # Kali Rolling             -> kali-01, untrusted-01
 
 # -----------------------------------------------------------------------------
 # vms - the nine core machines
@@ -276,7 +276,7 @@ vms:
     lifecycle: reprovisioned
     template: win-server-2022
     guest: windows
-    os_type: win11 # Proxmox's ostype for Server 2022/2025 and Windows 11
+    os_type: win11  # Proxmox's ostype for Server 2022/2025 and Windows 11
     cores: 2
     memory: { dedicated: 4096, floating: 0 }
     disk: { size: 60, interface: scsi0 }
@@ -306,7 +306,7 @@ vms:
     guest: linux
     os_type: l26
     cores: 2
-    memory: { dedicated: 4096, floating: 4096 } # ballooning on - a desktop idles a lot
+    memory: { dedicated: 4096, floating: 4096 }  # ballooning on - a desktop idles a lot
     disk: { size: 40, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:50" }
     ipv4: { mode: dhcp, reservation: 10.10.10.50 }
@@ -340,7 +340,7 @@ vms:
     guest: linux
     os_type: l26
     cores: 4
-    memory: { dedicated: 8192, floating: 0 } # NEVER balloon the indexer
+    memory: { dedicated: 8192, floating: 0 }  # NEVER balloon the indexer
     # 60 rather than the 100 the design asked for. The real host's thin pool is
     # 816 GiB, not the 1.74 TiB the design assumed, so every size here is sized
     # to fit rather than to be generous. This is the disk most likely to need
@@ -371,13 +371,13 @@ vms:
   # in-place conversion to a full edition. A rebuild is the only path out.
   win-client-01:
     vm_id: 105
-    enabled: false # template 9003 (Windows 11) not built - needs a registration-gated ISO
+    enabled: false  # template 9003 (Windows 11) not built - needs a registration-gated ISO
     lifecycle: reprovisioned
     template: win11-client
     guest: windows
     os_type: win11
     cores: 2
-    memory: { dedicated: 4096, floating: 0 } # Windows needs blnsvr.exe to balloon; assume not
+    memory: { dedicated: 4096, floating: 0 }  # Windows needs blnsvr.exe to balloon; assume not
     disk: { size: 64, interface: scsi0 }
     nic: { bridge: vmbr1, model: virtio, mac: "BC:24:11:10:10:51" }
     ipv4: { mode: dhcp, reservation: 10.10.10.51 }
@@ -471,7 +471,7 @@ vms:
     nic: { bridge: vmbr2, model: virtio, mac: "BC:24:11:10:20:10" }
     ipv4: { mode: static, address: 10.10.20.10/24, gateway: 10.10.20.1 }
     agent: true
-    started: false # research plane is off unless a lesson needs it
+    started: false  # research plane is off unless a lesson needs it
     startup_order: 20
     description: >-
       Kali Rolling on the isolated plane. Generates the attack traffic that inline
@@ -550,7 +550,7 @@ vms:
 learner_endpoints:
   win-client:
     vmid_offset: 5
-    enabled: false # template 9003 (Windows 11) not built yet
+    enabled: false  # template 9003 (Windows 11) not built yet
     # linked, not reprovisioned. This is the single biggest storage saving in the
     # file: a full clone per learner costs 50 GB each, so three learners is 150 GB
     # of a 816 GiB pool spent on three near-identical Windows boxes. A linked clone

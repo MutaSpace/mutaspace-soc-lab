@@ -138,7 +138,7 @@ variable "build_bridge" {
 # ---------------------------------------------------------------------------------------
 
 variable "iso_url" {
-  type        = string
+  type = string
   # Verified resolving 2026-07-23: cdimage.kali.org 302-redirects this to
   # https://kali.download/base-images/kali-2026.2/... The 2025.4 placeholder this
   # replaced had already aged out and 404'd - Kali keeps only recent releases, so
@@ -448,9 +448,9 @@ source "proxmox-iso" "kali-rolling" {
   ]
 
   # --- Communicator -----------------------------------------------------------------
-  communicator           = "ssh"
-  ssh_username           = var.ssh_username
-  ssh_private_key_file   = var.ssh_private_key_file
+  communicator         = "ssh"
+  ssh_username         = var.ssh_username
+  ssh_private_key_file = var.ssh_private_key_file
   # TEMPORARILY 15m while diagnosing the first-build SSH failure (see below). Restore to
   # 60m once the build is green: 60m is not padding, it covers the whole unattended install
   # plus apt fetching packages over the network before sshd is even reachable.

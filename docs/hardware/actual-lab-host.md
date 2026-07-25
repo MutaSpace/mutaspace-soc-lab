@@ -26,7 +26,7 @@ on, because several of its conclusions do not survive the change.
 | Item | Value |
 |---|---|
 | Hostname | `swc2026` |
-| Management address | `10.1.1.2/24` on `vmbr0` |
+| Management address | `<LAB_MANAGEMENT_IP>/24` on `vmbr0` (real value is gitignored, per the secrets policy) |
 | Proxmox VE | **9.2.0** (pve-manager 9.2.2) |
 | Base OS | Debian 13 (trixie) |
 | Kernel | 7.0.2-6-pve |
@@ -118,7 +118,7 @@ so `discard = "on"` is set on every disk and pool usage is worth watching.
 | Check | Finding |
 |---|---|
 | Existing VMs | **None.** Zero VMs, zero containers — genuinely greenfield |
-| Bridges | Only `vmbr0` (10.1.1.2/24 on `nic0`). `vmbr1`, `vmbr2`, `vmbr9` absent |
+| Bridges | Only `vmbr0` (`<LAB_MANAGEMENT_IP>/24` on `nic0`). `vmbr1`, `vmbr2`, `vmbr9` absent |
 | Snippets storage | **Not enabled** — `local` content is `iso,vztmpl,backup,import` |
 | Repositories | **Enterprise repos active** — `pve-enterprise.sources` and `ceph.sources` both point at `enterprise.proxmox.com` and will fail without a subscription |
 | NIC naming | The physical NIC really is called `nic0`, exactly as the earlier documentation said |
@@ -133,11 +133,11 @@ which is a useful confirmation that the script is solving real problems rather t
 
 ## Management Network
 
-The host sits on `10.1.1.0/24`, which does not overlap any lab network:
+The host sits on a management subnet that does not overlap any lab network:
 
 | Plane | Subnet |
 |---|---|
-| Management / WAN | `10.1.1.0/24` |
+| Management / WAN | `<LAB_MANAGEMENT_SUBNET>` (gitignored) |
 | SOC LAN | `10.10.10.0/24` |
 | Isolated | `10.10.20.0/24` |
 | Build plane | `10.99.0.0/24` |

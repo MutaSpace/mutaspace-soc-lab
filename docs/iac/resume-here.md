@@ -22,7 +22,10 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
   -o StrictHostKeyChecking=no root@10.10.10.1 '<cmd>'` (root shell is **csh** — no bash redirects;
   pipe bash syntax to `sh -c`). API creds `FW_API_KEY`/`FW_API_SECRET` in `.envrc`:
   `curl -sk -u "$FW_API_KEY:$FW_API_SECRET" https://10.10.10.1/api/...` (verified 200). Root console
-  pw `***REMOVED-ROTATED-CREDENTIAL***` (now `PKR_VAR_root_password`+`_hash` in `.envrc`; fw-preflight crypt-checks it).
+  pw is in `.secrets/rotated-credential.txt` / your password manager (also
+  `PKR_VAR_root_password`+`_hash` in `.envrc`; fw-preflight crypt-checks the pair). **Rotated
+  2026-07-24** — the previous shared value leaked into this file and is burned; see
+  `scripts/rotate-lab-credentials.sh`.
 - **⚠️ CRITICAL — to `tofu apply` anything touching fw-01, you MUST `-target='module.vm["fw-01"]
   .proxmox_virtual_environment_vm.this'`.** A bare apply wants 21-add/21-destroy (recreates the whole
   lab) because the committed disk-fill fix (ef27b65) changed `user-data-linux.tftpl` and was never
@@ -109,7 +112,7 @@ pushed except nothing — the tree is clean at the jumpbox commit.
 
 ## The host and how to reach things
 
-- **Proxmox host:** `swc2026` at `10.1.1.2`. SSH alias in `~/.ssh/config`, reached over
+- **Proxmox host:** `swc2026` at `<LAB_MANAGEMENT_IP>`. SSH alias in `~/.ssh/config`, reached over
   WireGuard from this workstation. Key: `~/.ssh/id_ed25519_proxmox`.
 - **The host was given management IPs on the lab bridges** (`10.10.10.2` on vmbr1, `10.10.20.2`
   on vmbr2, persisted via post-up in /etc/network/interfaces) so it can reach the lab VMs. This
@@ -120,7 +123,9 @@ pushed except nothing — the tree is clean at the jumpbox commit.
   then `cd /root/ansible`.
 
 ### Credentials (in /root/ansible/.secrets/env on the host)
-- `MUTASPACE_WIN_ADMIN_PASSWORD` = `***REMOVED-ROTATED-CREDENTIAL***` (also the domain admin password)
+- `MUTASPACE_WIN_ADMIN_PASSWORD` = the rotated shared credential (also the domain admin
+  password, because promotion converts the local account into the domain account). Never write
+  the value here — it lives in the jumpbox `.secrets/env` and your password manager.
 - `MUTASPACE_SAFE_MODE_PASSWORD`, `MUTASPACE_LAB_USER_PASSWORD` = generated, in the file
 - `MUTASPACE_LINUX_USER` = `labadmin`, `MUTASPACE_LINUX_SSH_KEY` = `/root/.ssh/lab_key`
   (a copy of `~/.ssh/id_ed25519_mutaspace_lab`)
@@ -223,7 +228,8 @@ then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
 1. **Windows admin password is non-deterministic after sysprep.** The Windows cloud-init snippet
    (`tofu/templates/user-data-windows.tftpl`) deliberately sets no password, and dc-01 uses
    `cicustom` so there is no `cipassword` — Cloudbase-Init leaves it random. Ansible could not
-   auth; fixed manually via `qm guest exec 102 -- net.exe user Administrator ***REMOVED-ROTATED-CREDENTIAL***`.
+   auth; fixed manually via `qm guest exec 102 -- net.exe user Administrator '<password>'`
+   (or, properly, `scripts/rotate-lab-credentials.sh`).
    **Fix:** have the snippet set a known password from a variable.
 2. **dc-promote reboot.** `microsoft.ad.domain` completed the forest but exited code 4 (reboot
    required) and the module's post-reboot re-auth failed (local admin → domain admin). `reboot:

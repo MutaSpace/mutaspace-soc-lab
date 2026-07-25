@@ -92,8 +92,14 @@ repos:
   # number of dotfiles at the repository root down.
   #
   # Relaxations, each with a reason:
-  #   line-length 120   --- the Taskfile's precondition messages are prose and
-  #                         are more readable long than wrapped.
+  #   line-length 200   --- the Taskfile's precondition messages and the
+  #                         playbooks' assert/fail messages are PROSE addressed to
+  #                         an operator mid-failure. Wrapping them to 120 makes
+  #                         them harder to read in a terminal, not easier, and
+  #                         splitting a message across YAML continuations is how
+  #                         you end up with a sentence that renders wrong. 200 is
+  #                         the honest limit for this repository; it still catches
+  #                         a genuinely runaway line.
   #   truthy off        --- Ansible playbooks legitimately use `yes`/`no`.
   #   comments-indentation off
   #                     --- the block comments in Taskfile.yml sit at column 0
@@ -109,7 +115,7 @@ repos:
           - |
             extends: default
             rules:
-              line-length: {max: 120, allow-non-breakable-words: true}
+              line-length: {max: 200, allow-non-breakable-words: true}
               truthy: disable
               comments-indentation: disable
               document-start: disable
