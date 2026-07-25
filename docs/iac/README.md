@@ -111,11 +111,25 @@ infrastructure code is committed:
 | Host preparation & lifecycle | `scripts/` | Bootstrap, preflight, and the classroom snapshot/reset pair |
 | One entrypoint | `Taskfile.yml` | Every operation named once |
 
-**None of it has been run against hardware.** Decision D-05 required it to be authored offline, so
-what is verified is exactly this: `tofu fmt`, `tofu validate`, `tofu test`, `packer fmt` and
-`packer validate` all pass with no Proxmox host in existence, and every shell script and YAML file
-parses. That is a claim about internal consistency, not about whether the lab builds. Each area's
-own README carries its "what has not been verified" section, and those are the honest ones.
+**It has now been run against hardware, and the lab is deployed.** This paragraph used to say
+"none of it has been run against hardware" — correct when the code was authored offline under
+decision D-05, and badly wrong since. Verified on the live host (`swc2026`):
+
+| | |
+|---|---|
+| Core lab | 6 VMs running: `fw-01`, `jumpbox-01`, `dc-01`, `analyst-01`, `wazuh-01`, `ubuntu-app-01` |
+| Research plane | `kali-01`, `untrusted-01`, `nlp-01` + 3 learner clones — stopped, which is their declared state |
+| Golden templates | **5 of 6** built (9000, 9001, 9002, 9004, 9005) |
+| `tofu plan` | No drift — state matches configuration |
+| `tofu test` | 14/14, offline against a mocked provider |
+| `pre-commit` | 7 hooks, 0 failures |
+| Wazuh | 4 agents Active; the Suricata EVE→Wazuh pipeline proven to rule 86601 |
+
+**The one gap is the Windows 11 template (9003).** Its boot-prompt failure is fixed; a second,
+separate failure — Setup starting but never writing to disk — is isolated and documented with a
+concrete next step in [resume-here.md](resume-here.md). It blocks `win-client-01`, Sysmon/4625
+auditing and the Windows agent enrolment. Nothing else depends on it, including both incident
+scenarios, which run Linux-to-Linux.
 
 ---
 
