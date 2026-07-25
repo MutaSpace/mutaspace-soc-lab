@@ -7,8 +7,15 @@ overview; getting-started.md is the operator walkthrough.
 Scenario-runner MVP live-proven; fw-01 is now zero-touch Infrastructure-as-Code (opnsense-as-code,
 see below); nlp-01 Ollama is up. **opnsense-as-code W4+W5 COMPLETE** (2026-07-24): EVE→Wazuh pipeline
 proven end-to-end, 05-fw-config idempotent, all `fw:*` Taskfile verbs shipped. 60-endpoints (Linux)
-and 90-lab-seed verified already-applied. Remaining: Win11 template (9003) + a formal 70-detections
-rules run.**
+and 90-lab-seed verified already-applied.
+
+**2026-07-24 (later) — distribution-readiness pass.** The leaked shared password is ROTATED (it was
+public in git history) and `scripts/rotate-lab-credentials.sh` now exists; pre-commit is installed so
+the scanner actually runs; `var.pve_node` + a plan-time node check make the repo work on another
+instructor's host; the stale "21-add/21-destroy" tofu warning was false and the real drift is now
+APPLIED (`plan` returns no changes); getting-started.md gained the three steps a fresh instructor
+cannot skip. Remaining: **Win11 template (9003)** — boot prompt FIXED, but Setup still writes nothing
+to disk (see below) — and a formal recorded `70-detections` run.**
 
 ---
 
@@ -259,16 +266,70 @@ then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
 
 ---
 
-## Win11 (9003) — NOT built, well-diagnosed
+## Win11 (9003) — NOT built. TWO failures; the first is FIXED, the second is isolated.
 
-Boot-catch **solved** (spacebar is OVMF's menu hotkey; drive the menu: spam spacebar to park on
-HARDDISK, `<down>` to the install DVD, `<enter>`, then answer the CD prompt — in the template's
-boot_command now). The install then **silently resets at the WinPE→Setup handoff** — NOT a compat
-check (no dialog). Root cause: **virtio-win 0.1.271 crashes the Windows 11 25H2 WinPE kernel**,
-plus a deeper vTPM/media reset. **Fix (outside packer/win11-client/):** rebuild
-`virtio-winpe-drivers-w11.iso` from a virtio-win that supports 25H2 (build 26100); optionally a
-one-off diagnostic build with `tpm_config` removed to isolate the deeper reset. Everything else
-in the E2E works without it.
+Updated 2026-07-24. The previous note treated this as one problem. It is two, and separating
+them is most of the progress.
+
+### Failure 1 — the boot prompt. FIXED, verified, committed.
+
+Windows media prints `Press any key to boot from CD or DVD......` and gives ~5 seconds. Nothing
+pressed it, the firmware fell through to the empty disk, and the run died at
+`BdsDxe: No bootable option or device was found.` — after which Packer waited its full 2 h
+`winrm_timeout` for a machine that never started installing.
+
+The template had been fighting this with 55 spacebars + 30 `<enter>`s spanning ~130 s. It kept
+missing: a vTPM makes POST vary from ~45 s to >120 s, spacebar on this OVMF is the boot-menu
+hotkey rather than "any key", and QEMU's `sendkey` drops keystrokes under load.
+
+**Fix: `scripts/remaster-windows-iso.sh`** rebuilds the ISO with
+`efi/microsoft/boot/efisys_noprompt.bin` as the UEFI El Torito image instead of `efisys.bin`.
+Microsoft ships both in every Windows ISO. `boot_command` is now `[]` — with
+`boot = "order=scsi0;sata0"` the whole sequence is deterministic and needs no input:
+
+```
+BdsDxe: failed to load Boot0003 "UEFI QEMU QEMU HARDDISK" : Not Found   <- empty disk
+BdsDxe: loading  Boot0002 "UEFI QEMU DVD-ROM QM00013"                   <- falls through
+BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00013"                   <- boots, no prompt
+```
+
+Two tool facts, both now in the script: **xorriso cannot do this** (`install.wim` is ~7 GB so
+the image needs UDF, and xorriso has no UDF support — `-as mkisofs: Unsupported option '-udf'`);
+and genisoimage has **no `-eltorito-platform`** (its `-e` *is* `-efi-boot` and already implies
+the EFI platform id; passing the flag gives `Invalid node - 'efi'`).
+
+### Failure 2 — Setup never writes to the disk. NOT fixed. This is where to start.
+
+With failure 1 fixed the build gets materially further and then loops:
+
+1. Boots WinPE from the DVD — **no prompt, confirmed on the console.**
+2. Reaches Windows Setup — the indigo Setup background appears (~11 min in).
+3. **Writes nothing.** `vm-9003-disk-1` (64 GB) sits at **0.01 % used** after 26 minutes.
+4. Resets and boots the DVD again. Console frames are byte-identical 75 s apart.
+
+So this is **not** the boot prompt and **not** a WinPE driver crash — WinPE boots fine now.
+Setup starts and fails at or before partitioning. The earlier note's "virtio-win 0.1.271 crashes
+the 25H2 WinPE kernel" diagnosis is superseded for this stage: the WinPE driver ISO is already
+built from **0.1.285** (`DriverVer 100.101.104.28500`, vs `...27100` in the `.271bak`), and WinPE
+now boots.
+
+**The 285/271 split on the host is deliberate — leave it.** `virtio-winpe-drivers-w11.iso` is
+0.1.285 (fixes the 25H2 WinPE kernel); `virtio_win_iso_file` stays 0.1.271 for the installed OS
+(0.1.285/0.1.292 regress vioscsi). Each version is used where it belongs.
+
+**Next step, in order:**
+
+1. Read Setup's own log rather than guessing. Boot the ISO, `<shift><F10>` at the Setup screen
+   for a console, and read `X:\Windows\Panther\setupact.log` and `setuperr.log`. That file
+   names the actual failure; everything above this line is inference from outside the guest.
+2. Check whether Setup can see the disk at all: `diskpart` → `list disk` in that same console.
+   Empty means the vioscsi driver is not loaded in the **Setup** phase (a different phase from
+   WinPE, and `$WinPEDriver$` only covers the latter).
+3. If the disk IS visible, suspect the `Autounattend.xml` `DiskConfiguration` block.
+4. Only then try the one-off diagnostic build with `tpm_config` removed, to rule out the vTPM.
+
+Everything else in the lab works without 9003. What it blocks: `win-client-01` (VMID 105), the
+Windows half of `60-endpoints` (Sysmon + 4625 auditing), and `50-wazuh-agents` for that host.
 
 ---
 
