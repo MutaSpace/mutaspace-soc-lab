@@ -274,70 +274,81 @@ then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
 
 ---
 
-## Win11 (9003) — NOT built. TWO failures; the first is FIXED, the second is isolated.
+## Win11 (9003) — FOUR bugs fixed, install now works, sysprep is the last hang
 
-Updated 2026-07-24. The previous note treated this as one problem. It is two, and separating
-them is most of the progress.
+Updated 2026-07-26. This went from "boots and loops forever" to "installs Windows, connects WinRM,
+runs every provisioner" — and stops at the final step. Each fix is committed; the remaining problem
+is narrow and well-characterised.
 
-### Failure 1 — the boot prompt. FIXED, verified, committed.
+### FIXED — 1. The boot prompt (`scripts/remaster-windows-iso.sh`)
 
-Windows media prints `Press any key to boot from CD or DVD......` and gives ~5 seconds. Nothing
-pressed it, the firmware fell through to the empty disk, and the run died at
-`BdsDxe: No bootable option or device was found.` — after which Packer waited its full 2 h
-`winrm_timeout` for a machine that never started installing.
+`Press any key to boot from CD or DVD` timed out unanswered, the firmware fell through to an empty
+disk, and Packer waited out its 2 h timeout. Keystroke-spraying could not win the race (vTPM makes
+POST vary 45→120 s; spacebar is the OVMF menu hotkey, not "any key"; `sendkey` drops keys).
+Remastering the ISO with `efi/microsoft/boot/efisys_noprompt.bin` deletes the race instead.
+`boot_command` is now `[]`. Two tool facts: **xorriso cannot do this** (needs UDF for the ~7 GB
+`install.wim`; it has none), and genisoimage has **no `-eltorito-platform`** (its `-e` *is*
+`-efi-boot`).
 
-The template had been fighting this with 55 spacebars + 30 `<enter>`s spanning ~130 s. It kept
-missing: a vTPM makes POST vary from ~45 s to >120 s, spacebar on this OVMF is the boot-menu
-hotkey rather than "any key", and QEMU's `sendkey` drops keystrokes under load.
+### FIXED — 2. A double hyphen in an XML comment made `Autounattend.xml` malformed ★ the real blocker
 
-**Fix: `scripts/remaster-windows-iso.sh`** rebuilds the ISO with
-`efi/microsoft/boot/efisys_noprompt.bin` as the UEFI El Torito image instead of `efisys.bin`.
-Microsoft ships both in every Windows ISO. `boot_command` is now `[]` — with
-`boot = "order=scsi0;sata0"` the whole sequence is deterministic and needs no input:
+The file contained, inside a COMMENT, a command line with an unspaced `--` before "variant". That is
+illegal in an XML comment, so the whole answer file was invalid. **Setup does not report this** — it
+parses, fails, and silently resets. Symptom: boots WinPE, draws the Setup background with no UI,
+writes nothing, reboots, loops forever. Looks exactly like a driver or firmware fault.
 
-```
-BdsDxe: failed to load Boot0003 "UEFI QEMU QEMU HARDDISK" : Not Found   <- empty disk
-BdsDxe: loading  Boot0002 "UEFI QEMU DVD-ROM QM00013"                   <- falls through
-BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00013"                   <- boots, no prompt
-```
+Found by bisection: the same ISO on the same firmware **with no answer file** gave a perfect stable
+interactive Setup, leaving the answer file as the only variable. A warning now sits at the top of
+that file, because the next person to paste a command line into a comment will reintroduce it.
 
-Two tool facts, both now in the script: **xorriso cannot do this** (`install.wim` is ~7 GB so
-the image needs UDF, and xorriso has no UDF support — `-as mkisofs: Unsupported option '-udf'`);
-and genisoimage has **no `-eltorito-platform`** (its `-e` *is* `-efi-boot` and already implies
-the EFI platform id; passing the flag gives `Invalid node - 'efi'`).
+Four hypotheses were eliminated and should not be re-tested:
+- **WIM index** — index 6 really is Windows 11 Pro (`wiminfo`)
+- **vTPM** — a build with `tpm_config` removed loops IDENTICALLY, refuting the old note's theory
+- **the remastered ISO** — `install.wim` sha256 matches the original across all 7.06 GB
+- **WinPE drivers** — WinPE boots fine on 0.1.285
 
-### Failure 2 — Setup never writes to the disk. NOT fixed. This is where to start.
+### FIXED — 3. No product key for consumer multi-edition media
 
-With failure 1 fixed the build gets materially further and then loops:
+With valid XML, Setup consumed the answer file and stopped at its interactive **Product key** page.
+`product_key` defaulted to empty and the docs covered only evaluation media and Volume Licensing.
+The third case is the one in use: consumer multi-edition media carries 11 editions and
+`/IMAGE/INDEX` alone does **not** suppress that page. Set the published generic Pro key (selects the
+edition, does not activate), matched to `windows_image_index = 6`. Allowlisted in `.gitleaks.toml` —
+the pre-commit hook correctly blocked the commit first time.
 
-1. Boots WinPE from the DVD — **no prompt, confirmed on the console.**
-2. Reaches Windows Setup — the indigo Setup background appears (~11 min in).
-3. **Writes nothing.** `vm-9003-disk-1` (64 GB) sits at **0.01 % used** after 26 minutes.
-4. Resets and boots the DVD again. Console frames are byte-identical 75 s apart.
+### FIXED — 4. `90-cleanup.ps1` deleted Packer's own provisioner scripts
 
-So this is **not** the boot prompt and **not** a WinPE driver crash — WinPE boots fine now.
-Setup starts and fails at or before partitioning. The earlier note's "virtio-win 0.1.271 crashes
-the 25H2 WinPE kernel" diagnosis is superseded for this stage: the WinPE driver ISO is already
-built from **0.1.285** (`DriverVer 100.101.104.28500`, vs `...27100` in the `.271bak`), and WinPE
-now boots.
+An unconditional `Remove-Item 'C:\Windows\Temp\*'`. Packer stages **both**
+`packer-ps-env-vars-<uuid>.ps1` *and* `script-<uuid>.ps1` — the provisioner script itself — in that
+directory. So cleanup deleted the next script; `99-sysprep.ps1` never ran, the VM never shut down,
+and Packer waited on a shutdown that was never coming. Now excludes `packer-*` and `script-*`.
+`win-server-2022` already excluded `packer-*` (which is why Server built and Win11 did not) and has
+been hardened the same way so the two stop diverging.
 
-**The 285/271 split on the host is deliberate — leave it.** `virtio-winpe-drivers-w11.iso` is
-0.1.285 (fixes the 25H2 WinPE kernel); `virtio_win_iso_file` stays 0.1.271 for the installed OS
-(0.1.285/0.1.292 regress vioscsi). Each version is used where it belongs.
+### ⚠️ REMAINING — sysprep hangs
 
-**Next step, in order:**
+Current state, verified: Windows installs (disk 0.01% → 25.66%), WinRM connects, and all four
+provisioners run in order — `00-virtio-guest-tools`, `10-cloudbase-init`, `90-cleanup` (clean, no
+CommandNotFoundException), `99-sysprep`. Then it stops:
 
-1. Read Setup's own log rather than guessing. Boot the ISO, `<shift><F10>` at the Setup screen
-   for a console, and read `X:\Windows\Panther\setupact.log` and `setuperr.log`. That file
-   names the actual failure; everything above this line is inference from outside the guest.
-2. Check whether Setup can see the disk at all: `diskpart` → `list disk` in that same console.
-   Empty means the vioscsi driver is not loaded in the **Setup** phase (a different phase from
-   WinPE, and `$WinPEDriver$` only covers the latter).
-3. If the disk IS visible, suspect the `Autounattend.xml` `DiskConfiguration` block.
-4. Only then try the one-off diagnostic build with `tpm_config` removed, to rule out the vTPM.
+- `99-sysprep.ps1` runs for 25+ minutes with **no output**
+- disk static at 25.66% for the last 9 of those
+- console fully black (luma 0), VM still `running`, guest burning only ~5% CPU
+- no error in the Packer log; the `(1115) A system shutdown is in progress` line is at log line 38,
+  from the FIRST WinRM attempt during the post-install reboot — not from sysprep
 
-Everything else in the lab works without 9003. What it blocks: `win-client-01` (VMID 105), the
-Windows half of `60-endpoints` (Sysmon + 4625 auditing), and `50-wazuh-agents` for that host.
+**Next step:** read sysprep's own log, which is on the now-non-empty disk at
+`C:\Windows\System32\Sysprep\Panther\setupact.log` and `setuperr.log`. Options: let a build
+reach this state and attach the disk to a working VM (or `guestmount` it read-only on the host) and
+read those two files — the disk has real content now, unlike when Setup was failing. Failing that,
+run `99-sysprep.ps1`'s body by hand over WinRM before Packer's copy runs, and watch it.
+
+Suspect worth checking first: the script may be invoking sysprep in a way that returns before
+generalize completes, or Cloudbase-Init's `SetupComplete`/unattend interaction may be blocking it.
+
+What 9003 still blocks: `win-client-01` (VMID 105), the Windows half of `60-endpoints` (Sysmon +
+4625 auditing), and `50-wazuh-agents` for that host. Nothing else depends on it — both incident
+scenarios run Linux-to-Linux.
 
 ---
 
