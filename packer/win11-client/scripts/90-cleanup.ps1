@@ -65,8 +65,40 @@ foreach ($logName in (Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
     }
 }
 
-Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -Path 'C:\Windows\Temp\*' -Recurse -Force -ErrorAction SilentlyContinue
+# Clear the temp directories, but NEVER Packer's own scaffolding.
+#
+# This ran as an unconditional `Remove-Item 'C:\Windows\Temp\*'` and broke the
+# NEXT provisioner. Packer stages a per-provisioner env-vars script at
+# C:\Windows\Temp\packer-ps-env-vars-<uuid>.ps1 and dot-sources it, so wiping
+# that directory mid-build deletes a file the following script is about to run:
+#
+#   The term 'c:/Windows/Temp/packer-ps-env-vars-....ps1' is not recognized as
+#   the name of a cmdlet, function, script file, or operable program.
+#
+# It was non-fatal here only because the failing dot-source did not stop sysprep.
+# That is luck, not design - and the error looks like a Packer bug rather than
+# something this script did.
+#
+# TWO name patterns must survive, not one. Packer stages BOTH
+#   packer-ps-env-vars-<uuid>.ps1   the env-vars it dot-sources, and
+#   script-<uuid>.ps1               THE PROVISIONER SCRIPT ITSELF
+# in C:\Windows\Temp. Excluding only packer-* still deletes the next script, so
+# sysprep never ran, the VM never shut down, and Packer waited on a shutdown that
+# was never coming - a silent 20-minute hang with a black console.
+#
+# Note $env:TEMP for the SYSTEM account IS C:\Windows\Temp, so both lines were
+# hitting the same directory.
+#
+# Sysprep /generalize clears temp itself, so anything missed here is handled a
+# moment later anyway.
+Get-ChildItem -Path 'C:\Windows\Temp\*' -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike 'packer-*' -and $_.Name -notlike 'script-*' } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+if ($env:TEMP -and $env:TEMP -ne 'C:\Windows\Temp') {
+    Get-ChildItem -Path "$env:TEMP\*" -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike 'packer-*' -and $_.Name -notlike 'script-*' } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
 Remove-Item -Path 'C:\Windows\SoftwareDistribution\Download\*' -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host '--- Disk hygiene ---'

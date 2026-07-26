@@ -80,8 +80,14 @@ Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
 #
 # Packer removes its own files when the build ends, so nothing is left behind by
 # skipping them here.
+# Excludes script-* as well as packer-*. Packer stages the provisioner script
+# ITSELF as C:\Windows\Temp\script-<uuid>.ps1, not just the env-vars file, so a
+# packer-*-only exclusion still deletes the next script. That cost a silent
+# 20-minute hang on the win11 template (sysprep never ran, the VM never shut
+# down, Packer waited forever). Fixed here too rather than leaving the two
+# templates to diverge again.
 Get-ChildItem -Path 'C:\Windows\Temp' -Force -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -notlike 'packer-*' } |
+  Where-Object { $_.Name -notlike 'packer-*' -and $_.Name -notlike 'script-*' } |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path 'C:\Windows\SoftwareDistribution\Download\*' -Recurse -Force -ErrorAction SilentlyContinue
 
