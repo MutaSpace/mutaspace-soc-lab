@@ -302,6 +302,49 @@
   <!-- ==================================================================== -->
   <settings pass="specialize">
 
+    <!--
+      PREVENT AUTOMATIC BITLOCKER DEVICE ENCRYPTION. Do not remove this.
+
+      Windows 11 turns device encryption ON BY ITSELF during OOBE on a clean install
+      when the firmware and a TPM support it - which describes this template exactly
+      (q35 + OVMF + vTPM 2.0, all required for Win11). Nothing in the answer file asks
+      for it.
+
+      Sysprep /generalize CANNOT run on a BitLocker-encrypted volume. What that looks
+      like from outside: the install completes, WinRM connects, every provisioner runs,
+      then 99-sysprep.ps1 sits for 20+ minutes producing no output, the disk goes
+      static, the console stays black and the VM never shuts down - so Packer waits on
+      a shutdown that is never coming. No error is logged anywhere.
+
+      Diagnosed by mounting the disk: `losetup` with partition scanning showed the Windows partition
+      as FSTYPE "BitLocker" and its first sector carries the -FVE-FS- Full Volume
+      Encryption signature, while the plain-NTFS recovery partition beside it mounted
+      fine.
+
+      This is also why the vTPM looked guilty earlier and why removing tpm_config
+      "changed nothing": the vTPM IS involved, but as the trigger for auto-encryption,
+      not as a reset. Removing it alone still left the build broken for the other
+      reasons that were live at the time.
+
+      PreventDeviceEncryption must be set BEFORE OOBE, which is why it lives in
+      specialize rather than in a provisioner - by the time a provisioner could run,
+      encryption has already begun and would have to be reversed with `manage-bde` in its off mode
+      plus a wait for full decryption.
+    -->
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /t REG_DWORD /d 1 /f</Path>
+          <Description>Prevent automatic BitLocker device encryption (blocks sysprep)</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+
     <component name="Microsoft-Windows-Shell-Setup"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35"

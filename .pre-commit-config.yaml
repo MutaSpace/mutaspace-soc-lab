@@ -85,6 +85,19 @@ repos:
         pass_filenames: false
         files: ^packer/.*\.(pkr\.hcl|pkrvars\.hcl|pkrtpl\.hcl)$
 
+      - id: validate-answer-files
+        name: Windows answer files are valid XML
+        description: >-
+          A malformed Autounattend.xml makes Windows Setup reset silently in a loop
+          with no error, no UI and nothing written to disk. A double hyphen inside an
+          XML comment is enough to cause it, and that has happened twice - once in a
+          real command line and once in the comment written to warn about it. Hence a
+          machine check rather than a note asking people to be careful.
+        entry: scripts/validate-answer-files.sh
+        language: system
+        pass_filenames: false
+        files: ^packer/.*Autounattend\.xml.*$
+
   # -------------------------------------------------------------------------
   # YAML linting
   # -------------------------------------------------------------------------
