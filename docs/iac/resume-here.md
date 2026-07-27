@@ -337,11 +337,53 @@ CommandNotFoundException), `99-sysprep`. Then it stops:
 - no error in the Packer log; the `(1115) A system shutdown is in progress` line is at log line 38,
   from the FIRST WinRM attempt during the post-install reboot — not from sysprep
 
-**Next step:** read sysprep's own log, which is on the now-non-empty disk at
-`C:\Windows\System32\Sysprep\Panther\setupact.log` and `setuperr.log`. Options: let a build
-reach this state and attach the disk to a working VM (or `guestmount` it read-only on the host) and
-read those two files — the disk has real content now, unlike when Setup was failing. Failing that,
-run `99-sysprep.ps1`'s body by hand over WinRM before Packer's copy runs, and watch it.
+**Next step: read sysprep's own log off the disk. The procedure is below and the one
+non-obvious prerequisite is `-on-error=abort`.**
+
+⚠️ **Packer DESTROYS the VM when a build is interrupted or fails.** `qm destroy` runs in its
+cleanup path, so killing a hung build always takes the disk — and therefore the logs — with it.
+This was learned twice in a row: the VM was stopped to mount the disk and the disk had already
+been deleted. Nothing can be recovered afterwards.
+
+The fix is a Packer flag, not a repo change:
+
+```bash
+# -on-error=abort exits WITHOUT cleanup, leaving VM 9003 and its disk in place.
+packer build -on-error=abort \
+  -var-file=packer/common.pkrvars.hcl \
+  -var-file=packer/win11-client/win11-client.pkrvars.hcl \
+  packer/win11-client/
+```
+
+Let it reach `99-sysprep.ps1`, wait for the hang (disk static, console black, ~8 min of no
+output), then interrupt it. The VM survives. Then, ON THE HOST:
+
+```bash
+qm stop 9003                                   # stop, do NOT destroy
+lvchange -ay /dev/pve/vm-9003-disk-1
+partx -a /dev/pve/vm-9003-disk-1               # expose the GPT partitions
+lsblk -o NAME,SIZE,FSTYPE /dev/pve/vm-9003-disk-1
+
+# the Windows partition is the large ntfs one (p3 on this layout)
+mkdir -p /mnt/w11disk
+mount -t ntfs-3g -o ro /dev/pve/vm-9003-disk-1p3 /mnt/w11disk
+
+# THE FILES THAT ANSWER THE QUESTION
+sed -n '1,200p' /mnt/w11disk/Windows/System32/Sysprep/Panther/setuperr.log
+grep -iE 'error|fail|abort' /mnt/w11disk/Windows/System32/Sysprep/Panther/setupact.log | tail -40
+
+umount /mnt/w11disk; partx -d /dev/pve/vm-9003-disk-1
+```
+
+`ntfs-3g` is already installed on the host (`apt-get install -y ntfs-3g`, done 2026-07-26).
+`guestmount` is NOT installed; `partx` + `ntfs-3g` is enough and avoids pulling in libguestfs.
+
+**Also seen on the last attempt: a SECOND, different hang.** One run stalled for 30+ minutes
+between provisioner 1 and 2 — after `00-virtio-guest-tools.ps1` printed "virtio guest tools
+complete" and before `10-cloudbase-init.ps1` produced any output. That script downloads the
+Cloudbase-Init MSI from the internet, so a slow or hanging fetch is the obvious suspect. It is
+NOT the sysprep hang and may be intermittent; the earlier run got past this point cleanly. Worth
+adding a timeout and a retry to that download regardless.
 
 Suspect worth checking first: the script may be invoking sysprep in a way that returns before
 generalize completes, or Cloudbase-Init's `SetupComplete`/unattend interaction may be blocking it.
