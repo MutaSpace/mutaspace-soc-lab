@@ -24,13 +24,33 @@ $ErrorActionPreference = 'Continue'
 
 Write-Host '--- Credential hygiene ---'
 
-$winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-foreach ($name in @('AutoAdminLogon', 'DefaultUserName', 'DefaultPassword', 'DefaultDomainName', 'AutoLogonCount')) {
-    if (Get-ItemProperty -Path $winlogon -Name $name -ErrorAction SilentlyContinue) {
-        Write-Host "Removing Winlogon\$name"
-        Remove-ItemProperty -Path $winlogon -Name $name -Force -ErrorAction SilentlyContinue
-    }
-}
+# ⚠️ THE AUTOLOGON REGISTRY VALUES ARE NOT DELETED HERE. Do not move them back.
+#
+# They are deleted at the top of 99-sysprep.ps1 instead, and the reason is not
+# stylistic: deleting them here BREAKS THE BUILD.
+#
+# On client Windows, the built-in Administrator is enabled for the duration of the
+# OOBE autologon. Take the autologon configuration away and, at the next session
+# boundary a few minutes later, Windows finalises it and DISABLES the account -
+# Security event 4725, subject and target both the built-in Administrator,
+# followed by a burst of logon-triggered scheduled tasks that gives the boundary
+# away. Every WinRM shell Packer opens after that is rejected:
+#
+#   Couldn't create shell: http response error: 401 - invalid content type
+#
+# So this script would delete the values, finish, report the account still
+# enabled - and then the upload of the NEXT provisioner would fail. Measured at
+# roughly t+21m in two consecutive builds, about four minutes after this script
+# deleted them.
+#
+# 99-sysprep.ps1 is the right home for them because it is the last thing that
+# needs WinRM at all: there is no shutdown_command in the template, so Packer
+# stops the VM through the Proxmox API afterwards. Deleting the values there means
+# nothing has to authenticate again.
+#
+# The credential is still gone from the finished template, which is the point of
+# the exercise - it is removed a minute later than it used to be, inside the same
+# build.
 
 # Windows Setup caches the answer file -- including the plaintext password -- here.
 Write-Host 'Scrubbing C:\Windows\Panther'

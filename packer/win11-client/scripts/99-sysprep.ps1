@@ -54,6 +54,36 @@ if (-not (Test-Path $sysprepExe)) {
 }
 
 # ---------------------------------------------------------------------------
+# CREDENTIAL HYGIENE - deliberately here, in the LAST provisioner, and not in
+# 90-cleanup.ps1 where it used to live and where it looks like it belongs.
+#
+# The answer file's autologon leaves the build password in the registry in
+# PLAINTEXT (Winlogon\DefaultPassword). It must not survive into a template that
+# is cloned for every learner workstation. sysprep /generalize does NOT remove
+# these values, so something has to.
+#
+# It cannot be 90-cleanup: on client Windows the built-in Administrator is enabled
+# only for the OOBE autologon, so removing the autologon configuration makes
+# Windows finalise it at the next session boundary and DISABLE the account. Every
+# WinRM shell afterwards then fails with
+#   Couldn't create shell: http response error: 401 - invalid content type
+# and Packer dies uploading the next script. Measured at about four minutes after
+# the delete, twice.
+#
+# Here it is safe: nothing needs to authenticate again. The template has no
+# shutdown_command, so Packer stops the VM through the Proxmox API once this
+# script returns.
+# ---------------------------------------------------------------------------
+Write-Host '--- Credential hygiene (autologon values) ---'
+$winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+foreach ($name in @('AutoAdminLogon', 'DefaultUserName', 'DefaultPassword', 'DefaultDomainName', 'AutoLogonCount')) {
+    if (Get-ItemProperty -Path $winlogon -Name $name -ErrorAction SilentlyContinue) {
+        Write-Host "Removing Winlogon\$name"
+        Remove-ItemProperty -Path $winlogon -Name $name -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Hand sysprep the Cloudbase-Init answer file if it is there.
 #
 # That file adds a specialize-pass command that runs Cloudbase-Init on the first boot

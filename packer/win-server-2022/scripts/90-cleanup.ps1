@@ -24,13 +24,21 @@ $ErrorActionPreference = 'Continue'
 
 Write-Host '--- Credential hygiene ---'
 
-$winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-foreach ($name in @('AutoAdminLogon', 'DefaultUserName', 'DefaultPassword', 'DefaultDomainName', 'AutoLogonCount')) {
-    if (Get-ItemProperty -Path $winlogon -Name $name -ErrorAction SilentlyContinue) {
-        Write-Host "Removing Winlogon\$name"
-        Remove-ItemProperty -Path $winlogon -Name $name -Force -ErrorAction SilentlyContinue
-    }
-}
+# ⚠️ THE AUTOLOGON REGISTRY VALUES ARE NOT DELETED HERE. Do not move them back.
+#
+# They are deleted at the top of 99-sysprep.ps1 instead. On CLIENT Windows,
+# deleting them here breaks the build outright: the built-in Administrator is
+# enabled only for the OOBE autologon, so removing the autologon configuration
+# makes Windows disable the account at the next session boundary, and every WinRM
+# shell Packer opens afterwards fails with
+#   Couldn't create shell: http response error: 401 - invalid content type
+#
+# Server is not known to do that, so this move is not strictly required here. It
+# is made anyway to keep the two Windows templates identical - they have twice now
+# had the same bug fixed in only one of them, and the divergence is what cost the
+# time both times. 99-sysprep.ps1 is a correct home for it either way: it is the
+# last thing needing WinRM, since there is no shutdown_command and Packer stops
+# the VM through the Proxmox API.
 
 # Windows Setup caches the answer file -- including the plaintext password -- here.
 Write-Host 'Scrubbing C:\Windows\Panther'
