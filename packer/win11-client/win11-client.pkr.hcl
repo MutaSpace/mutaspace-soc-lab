@@ -774,49 +774,25 @@ build {
 
   # A reboot here shakes out anything that only takes effect on restart while we can
   # still see the failure.
-  provisioner "windows-restart" {
-    only                  = ["proxmox-iso.win11-client"]
-    restart_timeout       = "30m"
-    check_registry        = true
-    restart_check_command = "powershell -command \"Write-Output 'restarted'\""
-  }
-
-  # RUN AGAIN AFTER THE REBOOT. The watchdog is a scheduled task; the restart above
-  # stops whatever was running, and a build once lost it entirely across the reboot.
-  # The script is idempotent and self-testing - it disables the account on purpose and
-  # fails the build if the watchdog does not put it back - so this second run is what
-  # guarantees protection during the half of the build where Windows disables it.
-  provisioner "powershell" {
-    only   = ["proxmox-iso.win11-client"]
-    script = "${path.root}/scripts/05-keep-admin-enabled.ps1"
-  }
-
   # ###########################################################################
-  # # THE LAST TWO SCRIPTS ARE STAGED TO DISK FIRST AND THEN RUN FROM ONE      #
-  # # PROVISIONER. Do not "simplify" this back into two script provisioners.   #
+  # # STAGED BEFORE THE REBOOT ON PURPOSE. Measured deadline, do not reorder.  #
   # #                                                                          #
   # # Windows disables the built-in Administrator - the account Packer          #
-  # # authenticates as - about 21 to 25 minutes into the build. WinRM comes up  #
-  # # at roughly 11 minutes, so there is a usable window and then there is not. #
-  # # Six builds died the same way: 90-cleanup ran fine, took four or five      #
-  # # minutes over Optimize-Volume, and then the UPLOAD of 99-sysprep landed on #
-  # # the far side of the disable and failed with                              #
+  # # authenticates as - about EIGHT MINUTES after the post-restart boot. Not a #
+  # # fixed offset from the start of the build: build 9 rebooted at 19:02:49    #
+  # # and the account went at 19:11:09, Security event 4725, with the Windows   #
+  # # Search service start type flipping in the same second - the same          #
+  # # signature every time.                                                     #
   # #                                                                          #
-  # #   Couldn't create shell: http response error: 401 - invalid content type  #
+  # # So everything that needs WinRM after the reboot has to fit inside eight   #
+  # # minutes, and the way to make that safe is to need almost nothing. Both    #
+  # # scripts are uploaded HERE, before the restart, where there is no deadline #
+  # # at all. They are plain files on disk and survive the reboot.              #
   # #                                                                          #
-  # # Every attempt to stop the account being disabled failed - see the notes   #
-  # # in scripts/05-keep-admin-enabled.ps1 for the four theories that were      #
-  # # tested against the running guest and disproved. This does not try. It     #
-  # # removes the dependency: both scripts are uploaded back-to-back within     #
-  # # seconds of the reboot, and the single provisioner that runs them opens    #
-  # # its shell at the same time. After that the build needs no WinRM at all -  #
-  # # there is no shutdown_command, so Packer stops the VM through the Proxmox  #
-  # # API - and it does not matter what Windows does to the account.            #
-  # #                                                                          #
-  # # The staged names MUST begin with `packer-`: 90-cleanup.ps1 empties        #
-  # # C:\Windows\Temp except for `packer-*` and `script-*`, so anything else    #
-  # # would delete 99-sysprep.ps1 before it ran. That exact bug cost a build    #
-  # # once already - see the note in 90-cleanup.ps1.                           #
+  # # Build 9 did these two uploads AFTER the reboot. They succeeded - at       #
+  # # boot+7m - and the provisioner that followed them failed at boot+8m. One   #
+  # # minute of margin. This is the same change with the margin turned into     #
+  # # about seven.                                                              #
   # ###########################################################################
   provisioner "file" {
     only        = ["proxmox-iso.win11-client"]
@@ -828,6 +804,13 @@ build {
     only        = ["proxmox-iso.win11-client"]
     source      = "${path.root}/scripts/99-sysprep.ps1"
     destination = "C:/Windows/Temp/packer-99-sysprep.ps1"
+  }
+
+  provisioner "windows-restart" {
+    only                  = ["proxmox-iso.win11-client"]
+    restart_timeout       = "30m"
+    check_registry        = true
+    restart_check_command = "powershell -command \"Write-Output 'restarted'\""
   }
 
   # LAST. Everything after sysprep /generalize runs on a machine whose identity has
