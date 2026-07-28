@@ -364,6 +364,42 @@
           <Description>Allow OOBE to complete without a network or a Microsoft account</Description>
           <Path>reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
+        <!--
+          STAGE THE WinRM BOOTSTRAP AS SetupComplete.cmd. This is why Packer can
+          connect at all, and WHEN it connects is the whole point.
+
+          It used to run from FirstLogonCommands, which fires during OOBE. That is
+          what made fifteen builds fail. Windows does its end-of-OOBE housekeeping
+          several minutes after Packer has already connected and started working,
+          and that housekeeping:
+
+            * disables the built-in Administrator,
+            * deletes the accounts OOBE was using - including, apparently, one the
+              answer file created,
+            * scrubs C:\Windows\Panther,
+            * removes scheduled tasks and directories created during the window.
+
+          After it, no new WinRM shell can be created: every attempt returns
+          "Couldn't create shell: http response error: 401". A shell already open
+          survives, which is why the failure always landed on whichever upload came
+          next rather than on the work in flight.
+
+          The marker in the Security log is event 4726 deleting `defaultuser0` -
+          Windows' own "OOBE is finished" signal. In build 15 that landed at
+          21:55:45, about a minute before Packer's next upload was refused.
+
+          SetupComplete.cmd runs AFTER Setup and OOBE have finished, as SYSTEM. So
+          WinRM does not exist until the machine has stopped rearranging itself, and
+          Packer connects to something stable instead of racing it.
+
+          No & < or > characters in the command below - they are XML metacharacters
+          and would need entity-escaping. This file has been broken that way twice.
+        -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Stage the WinRM bootstrap to run after OOBE completes</Description>
+          <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq '${seed_cd_label}' } | Select-Object -First 1; New-Item -Path 'C:\Windows\Setup\Scripts' -ItemType Directory -Force | Out-Null; Copy-Item -Path ($v.DriveLetter + ':\setup.ps1') -Destination 'C:\Windows\Setup\Scripts\packer-setup.ps1' -Force; Set-Content -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -Value 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\packer-setup.ps1'"</Path>
+        </RunSynchronousCommand>
       </RunSynchronous>
     </component>
 
@@ -487,8 +523,9 @@
         the template or in any learner clone.
 
         AdministratorPassword still sets the built-in account's password, because
-        that is what enables it for the OOBE autologon that runs FirstLogonCommands -
-        and FirstLogonCommands is what turns WinRM on in the first place.
+        that is what enables the account for the OOBE autologon and stops OOBE
+        demanding that a new user be created. It is not how WinRM gets turned on any
+        more - that is SetupComplete.cmd, staged in the specialize pass above.
       -->
       <UserAccounts>
         <AdministratorPassword>
@@ -510,9 +547,12 @@
       </UserAccounts>
 
       <!--
-        Autologon exists for exactly one reason: FirstLogonCommands do not run until
-        somebody logs on, and the thing they run is the WinRM bootstrap that lets
-        Packer connect at all.
+        Autologon exists to get OOBE to complete without a human at the console. It
+        used to matter more than that: FirstLogonCommands do not run until somebody
+        logs on, and they used to carry the WinRM bootstrap. That bootstrap now runs
+        from SetupComplete.cmd instead - see the specialize pass - because running it
+        at first logon meant Packer connected DURING OOBE and got cut off by
+        Windows' end-of-OOBE housekeeping a few minutes later.
 
         ⚠️ LogonCount MUST NOT be reached during the build. Do not lower it back to 2.
 
@@ -566,14 +606,23 @@
         of answer files that parse but do nothing. Dot-sourcing runs the script in the
         current session without needing the call operator.
       -->
-      <FirstLogonCommands>
-        <SynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Description>Bootstrap WinRM and the QEMU guest agent for Packer</Description>
-          <RequiresUserInput>false</RequiresUserInput>
-          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq '${seed_cd_label}' } | Select-Object -First 1; . ($v.DriveLetter + ':\setup.ps1')"</CommandLine>
-        </SynchronousCommand>
-      </FirstLogonCommands>
+      <!--
+        THERE IS NO FirstLogonCommands HERE ANY MORE. Do not add the WinRM bootstrap
+        back into it.
+
+        It used to run setup.ps1 from here, at first logon, which happens DURING
+        OOBE. Packer would connect while Windows was still finishing setup, and a few
+        minutes later the end-of-OOBE housekeeping would disable the built-in
+        Administrator, delete the build account and refuse every further WinRM shell
+        with a 401. That cost fifteen builds. The same script is now staged as
+        C:\Windows\Setup\Scripts\SetupComplete.cmd by the specialize pass above, so
+        WinRM only comes up once Windows has finished.
+
+        If WinRM never appears and the build sits at "Waiting for WinRM to become
+        available", the staging command in specialize is the first thing to check:
+        read C:\Windows\Temp\packer-bootstrap.log and see whether
+        C:\Windows\Setup\Scripts\ contains both files.
+      -->
     </component>
   </settings>
 </unattend>
