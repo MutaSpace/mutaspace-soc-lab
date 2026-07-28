@@ -274,13 +274,13 @@ then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
 
 ---
 
-## Win11 (9003) — SIX bugs fixed; a build is in flight
+## Win11 (9003) — SEVEN bugs fixed; sysprep's real cause is now known
 
-Updated 2026-07-28. This went from "boots and loops forever" to a full install that connects WinRM
-and runs every provisioner, then hit two further faults — automatic BitLocker (which was the sysprep
-hang) and a duplicate component in the answer file. Both are fixed and committed. **A build is
-running now; nobody has yet watched it reach `qm template`.** Do not mark 9003 done until you have
-seen a `template: 1` line in `/etc/pve/qemu-server/9003.conf`.
+Updated 2026-07-28 (second pass). This went from "boots and loops forever" to a full install that
+completes OOBE, connects WinRM and runs every provisioner. The last hang — sysprep — was finally
+read off the disk rather than guessed at: a malformed `/unattend:` argument, bug 7 below. Every fix
+is committed. **Nobody has yet watched a build reach `qm template`.** Do not mark 9003 done until
+you have seen a `template: 1` line in `/etc/pve/qemu-server/9003.conf`.
 
 ### FIXED — 1. The boot prompt (`scripts/remaster-windows-iso.sh`)
 
@@ -327,7 +327,18 @@ and Packer waited on a shutdown that was never coming. Now excludes `packer-*` a
 `win-server-2022` already excluded `packer-*` (which is why Server built and Win11 did not) and has
 been hardened the same way so the two stop diverging.
 
-### FIXED — 5. Windows 11 encrypted its own disk, which is what hung sysprep
+### FIXED — 5. Windows 11 encrypted its own disk (real, but NOT the sysprep hang)
+
+⚠️ **The commit that made this fix (`82b4916`) named it as the cause of the sysprep hang. That
+was wrong** — see bug 7. Preventing auto-encryption is still correct and still required, and it is
+now *proven* to work: a build that ran all the way through OOBE on 2026-07-28 left the Windows
+partition as plain NTFS (`blkid` → `TYPE="ntfs"`, no `-FVE-FS-` signature) where the earlier one
+showed `BitLocker`. Keep it. It was simply not what hung sysprep.
+
+Also worth recording, because it wasted time: the *first* NTFS reading proved nothing. That build
+died in the specialize pass, and auto-encryption happens during **OOBE** — so it never got far
+enough to encrypt anything either way. Only a build that completes OOBE can test this fix.
+
 
 Win11 turns device encryption ON BY ITSELF during OOBE when the firmware and a TPM support it —
 which is exactly this template (q35 + OVMF + vTPM 2.0, all mandatory for Win11). Nothing in the
@@ -367,11 +378,49 @@ comment, twice; a duplicate component, once). Every one of them looked like a di
 fault from the console. When Setup misbehaves, suspect the answer file first and run the validator
 before theorising.
 
+### FIXED — 7. `/unattend:` with spaces in it — ★ the real sysprep hang
+
+`99-sysprep.ps1` passed `'/unattend:"C:\Program Files\Cloudbase Solutions\...\Unattend.xml"` as one
+element of a `-ArgumentList` **array**. PowerShell re-quotes every array element, so sysprep
+actually received `/unattend:C:\Program` and then a bare `Files\Cloudbase`, and threw the whole
+command line out:
+
+```
+SYSPRP ParseCommands:Found supported command line option 'UNATTEND'
+SYSPRP ParseCommands:Malformed command line detected; no dash or slash present in option
+SYSPRP WinMain: Unable to parse command-line arguments to sysprep; GLE = 0x0
+```
+
+Sysprep then raised a **modal error dialog**. The script runs over WinRM on a non-interactive
+session, so nothing could dismiss it and `Start-Process -Wait` waited forever. That is the entire
+hang: no output, black console, idle guest, VM never shuts down, Packer waiting on a shutdown that
+is never coming.
+
+It cost about two days and was misdiagnosed twice — as the vTPM, then as BitLocker — because from
+outside, every one of those looks the same. **The answer was always in
+`Windows\System32\Sysprep\Panther\setuperr.log`**, which is four lines long and says exactly what is
+wrong. Read that file FIRST next time; it needs `-on-error=abort` and the mount procedure below.
+
+Fixed in **both** `packer/win11-client/scripts/99-sysprep.ps1` and
+`packer/win-server-2022/scripts/99-sysprep.ps1` — the Server template carried the identical bug and
+had simply not tripped it. Three changes each:
+1. the answer file is copied to `C:\Windows\Temp\cloudbase-unattend.xml` (no spaces, so no quoting
+   question at all) and passed from there;
+2. the argument list is joined into ONE string before `Start-Process`, so PowerShell hands it over
+   verbatim instead of re-quoting;
+3. **`-Wait` is gone.** It now waits with a 15-minute deadline, then kills sysprep, prints
+   setuperr.log and throws. A future dialog costs 15 minutes and a readable error instead of an
+   unbounded hang.
+
+Both scripts were parse-checked with `[Parser]::ParseFile` on dc-01 (real Windows PowerShell 5.1)
+before committing — there is no `pwsh` on the workstation.
+
 ### Current state — a build is in flight (2026-07-28)
 
-Launched 09:24 from the workstation, detached, `-on-error=abort`. At T+3m the console showed
-*"Installing Windows 11 — 28% complete"* and the disk was climbing (5.45% → 17.31%); the failed
-build never got past ~18% total. Log and pidfile are in the launching session's scratchpad.
+The 09:24 build proved bugs 1-6 fixed: it installed, completed OOBE (leaving the disk unencrypted),
+connected WinRM at T+11m and ran all four provisioners. It then hung on sysprep, which is how bug 7
+was found; it was aborted at T+40m and VM 9003 destroyed. A build with the bug-7 fix is what should
+run next. Log and pidfile live in the launching session's scratchpad.
 
 ⚠️ **There is no `direnv` on this workstation.** `.envrc` must be sourced by hand or packer dies in
 three seconds with `401 Authentication failed`:

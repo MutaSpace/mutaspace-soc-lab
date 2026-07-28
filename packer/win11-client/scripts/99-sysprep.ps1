@@ -77,9 +77,49 @@ $sysprepArgs = @('/generalize', '/oobe')
 # noticeable amount of time off first boot.
 $sysprepArgs += '/mode:vm'
 
+$errLog = 'C:\Windows\System32\Sysprep\Panther\setuperr.log'
+function Show-SysprepErrorLog {
+    if (Test-Path $errLog) {
+        Write-Host '--- setuperr.log ---'
+        Get-Content $errLog | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "(no $errLog on disk)"
+    }
+}
+
 if (Test-Path $cbUnattend) {
+    # -----------------------------------------------------------------------
+    # STAGE THE ANSWER FILE AT A PATH WITH NO SPACES. Do not "simplify" this.
+    #
+    # The obvious form - adding '/unattend:"C:\Program Files\..."' as one element
+    # of a -ArgumentList ARRAY - does not work. PowerShell re-quotes every array
+    # element, so sysprep receives `/unattend:C:\Program` followed by a bare
+    # `Files\Cloudbase`, and rejects the entire command line:
+    #
+    #   SYSPRP ParseCommands:Found supported command line option 'UNATTEND'
+    #   SYSPRP ParseCommands:Malformed command line detected; no dash or slash present in option
+    #   SYSPRP WinMain: Unable to parse command-line arguments to sysprep
+    #
+    # Sysprep then raises a MODAL ERROR DIALOG. This script runs over WinRM on a
+    # non-interactive session, so there is nobody to dismiss it and
+    # `Start-Process -Wait` waits forever. From outside that looks like: not one
+    # line of output from this script, a black console, an idle guest, and a VM
+    # that never shuts down - so Packer waits on a shutdown that is never coming.
+    #
+    # That symptom was misdiagnosed twice, first as the vTPM and then as
+    # automatic BitLocker. (Preventing BitLocker is still correct and still in
+    # the answer file - it just was not this.) The proof is in
+    # Windows\System32\Sysprep\Panther\setuperr.log, on a disk Packer deletes
+    # unless the build was started with -on-error=abort.
+    #
+    # Copying to a space-free path removes the quoting question entirely.
+    # 90-cleanup.ps1 has already run by this point, so nothing will delete it.
+    # -----------------------------------------------------------------------
+    $stagedUnattend = 'C:\Windows\Temp\cloudbase-unattend.xml'
+    Copy-Item -LiteralPath $cbUnattend -Destination $stagedUnattend -Force
     Write-Host "Using the Cloudbase-Init answer file: $cbUnattend"
-    $sysprepArgs += ('/unattend:"{0}"' -f $cbUnattend)
+    Write-Host "Staged for sysprep at:                $stagedUnattend"
+    $sysprepArgs += "/unattend:$stagedUnattend"
 } else {
     Write-Host "WARNING: $cbUnattend not found."
     Write-Host 'WARNING: running sysprep without /unattend. Cloudbase-Init will still run as a'
@@ -89,16 +129,31 @@ if (Test-Path $cbUnattend) {
 # See the banner above. This is the load-bearing argument.
 $sysprepArgs += '/quit'
 
-Write-Host "Running: $sysprepExe $($sysprepArgs -join ' ')"
-$p = Start-Process -FilePath $sysprepExe -ArgumentList $sysprepArgs -Wait -PassThru
+# Pass ONE pre-joined string rather than the array, so PowerShell hands the
+# command line to sysprep verbatim instead of re-quoting each element.
+$argLine = $sysprepArgs -join ' '
+Write-Host "Running: $sysprepExe $argLine"
+
+# Deliberately NOT -Wait. A sysprep stopped on a dialog never returns, and an
+# unbounded wait turns that into a build that hangs until someone notices hours
+# later. Wait with a deadline instead, then kill it and print the log that says
+# what happened. Generalize on this template takes a couple of minutes; 15 is
+# slack, not a target.
+$sysprepTimeoutSec = 900
+$p = Start-Process -FilePath $sysprepExe -ArgumentList $argLine -PassThru
+
+if (-not $p.WaitForExit($sysprepTimeoutSec * 1000)) {
+    Write-Host "ERROR: sysprep has not exited after $sysprepTimeoutSec seconds."
+    Write-Host 'ERROR: it is almost certainly waiting on a dialog nobody can see.'
+    Show-SysprepErrorLog
+    try { $p.Kill() } catch { Write-Host "(could not kill sysprep: $_)" }
+    throw "Sysprep timed out after $sysprepTimeoutSec seconds."
+}
+
 Write-Host "Sysprep exit code: $($p.ExitCode)"
 
 if ($p.ExitCode -ne 0) {
-    $errLog = 'C:\Windows\System32\Sysprep\Panther\setuperr.log'
-    if (Test-Path $errLog) {
-        Write-Host '--- setuperr.log ---'
-        Get-Content $errLog | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
-    }
+    Show-SysprepErrorLog
     throw "Sysprep failed with exit code $($p.ExitCode)."
 }
 
