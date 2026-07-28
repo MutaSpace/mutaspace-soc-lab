@@ -90,6 +90,15 @@ Two things to check, in this order:
 # ---------------------------------------------------------------------------
 # Install silently.
 #
+# RUN_SERVICE_AS_LOCAL_SYSTEM=1 stops the installer creating a `cloudbase-init` LOCAL
+# ADMINISTRATOR account and running the service as it. On win11-client that account is
+# the leading suspect for Windows disabling the built-in Administrator mid-build (see
+# that template's copy of this script). Server is not known to do that and this template
+# built fine without the flag, but the extra local admin would be baked into the
+# template either way, and the two Windows templates are kept identical on purpose.
+#
+# Takes effect on the next rebuild of 9002; it does not alter the existing template.
+#
 # /qn matters for more than quietness: the interactive installer offers to run Sysprep
 # for you at the end, and letting an MSI generalise the machine in the middle of a
 # Packer build would strand the WinRM connection. We run sysprep ourselves, last, in
@@ -97,7 +106,7 @@ Two things to check, in this order:
 # ---------------------------------------------------------------------------
 Write-Host 'Installing Cloudbase-Init'
 $p = Start-Process -FilePath 'msiexec.exe' `
-    -ArgumentList '/i', ('"{0}"' -f $msiPath), '/qn', '/norestart', '/l*v', 'C:\Windows\Temp\cloudbase-init-install.log' `
+    -ArgumentList '/i', ('"{0}"' -f $msiPath), '/qn', '/norestart', 'RUN_SERVICE_AS_LOCAL_SYSTEM=1', '/l*v', 'C:\Windows\Temp\cloudbase-init-install.log' `
     -Wait -PassThru
 
 if ($p.ExitCode -notin @(0, 3010)) {

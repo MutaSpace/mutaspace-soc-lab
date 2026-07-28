@@ -74,6 +74,30 @@ if (-not (Test-Path $sysprepExe)) {
 # shutdown_command, so Packer stops the VM through the Proxmox API once this
 # script returns.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# STOP THE ADMINISTRATOR WATCHDOG registered by 05-keep-admin-enabled.ps1.
+#
+# It must not survive into the template: a scheduled task that re-enables the built-in
+# Administrator every three seconds is a backdoor in every learner clone, and this is
+# the last chance to remove it. Nothing after this point needs WinRM, so nothing needs
+# the account kept alive any more.
+# ---------------------------------------------------------------------------
+Write-Host '--- Removing the Administrator watchdog ---'
+$watchdogDir = 'C:\ProgramData\mutaspace'
+New-Item -Path $watchdogDir -ItemType Directory -Force | Out-Null
+Set-Content -Path (Join-Path $watchdogDir 'stop-watchdog.flag') -Value 'stop' -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+Unregister-ScheduledTask -TaskName 'MutaSpaceKeepAdminEnabled' -Confirm:$false -ErrorAction SilentlyContinue
+Get-Process -Name 'powershell' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Id -ne $PID -and $_.CommandLine -like '*keep-admin-enabled*' } |
+    ForEach-Object { try { $_.Kill() } catch { } }
+Remove-Item -Path $watchdogDir -Recurse -Force -ErrorAction SilentlyContinue
+
+if (Get-ScheduledTask -TaskName 'MutaSpaceKeepAdminEnabled' -ErrorAction SilentlyContinue) {
+    throw 'The Administrator watchdog task is still registered. It must not ship in the template.'
+}
+Write-Host 'Watchdog task removed and its files deleted.'
+
 Write-Host '--- Credential hygiene (autologon values) ---'
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 foreach ($name in @('AutoAdminLogon', 'DefaultUserName', 'DefaultPassword', 'DefaultDomainName', 'AutoLogonCount')) {

@@ -94,10 +94,25 @@ Two things to check, in this order:
 # for you at the end, and letting an MSI generalise the machine in the middle of a
 # Packer build would strand the WinRM connection. We run sysprep ourselves, last, in
 # 99-sysprep.ps1.
+#
+# RUN_SERVICE_AS_LOCAL_SYSTEM=1 stops the installer creating a `cloudbase-init` LOCAL
+# ADMINISTRATOR account and running the service as it. Two reasons:
+#
+#   1. That account would otherwise be baked into the template and therefore into every
+#      learner clone - a second local admin nobody asked for, which is a finding in a
+#      lab whose whole subject is spotting exactly that.
+#   2. It is the leading suspect for the build's 401 failures. Client Windows disables
+#      the built-in Administrator once another enabled local admin exists, and the
+#      account vanished at t+21m in three consecutive builds, shortly after this
+#      installer ran. Every WinRM shell afterwards failed with
+#      "Couldn't create shell: http response error: 401".
+#
+# LocalSystem is strictly more privileged than the account it replaces, so nothing
+# Cloudbase-Init does on first boot loses access.
 # ---------------------------------------------------------------------------
-Write-Host 'Installing Cloudbase-Init'
+Write-Host 'Installing Cloudbase-Init (service runs as LocalSystem, no extra local admin)'
 $p = Start-Process -FilePath 'msiexec.exe' `
-    -ArgumentList '/i', ('"{0}"' -f $msiPath), '/qn', '/norestart', '/l*v', 'C:\Windows\Temp\cloudbase-init-install.log' `
+    -ArgumentList '/i', ('"{0}"' -f $msiPath), '/qn', '/norestart', 'RUN_SERVICE_AS_LOCAL_SYSTEM=1', '/l*v', 'C:\Windows\Temp\cloudbase-init-install.log' `
     -Wait -PassThru
 
 if ($p.ExitCode -notin @(0, 3010)) {

@@ -750,6 +750,15 @@ build {
   # So `file("cd/setup.ps1")` is correct as written, and `script = "scripts/x.ps1"`
   # would only work if you ran Packer from inside this directory.
 
+  # MUST STAY FIRST. Client Windows disables the built-in Administrator - the account
+  # Packer authenticates as - partway through the build, and every WinRM shell after
+  # that fails with "Couldn't create shell: 401". This watchdog puts it back. See the
+  # long note in the script; 99-sysprep.ps1 removes it before generalising.
+  provisioner "powershell" {
+    only   = ["proxmox-iso.win11-client"]
+    script = "${path.root}/scripts/05-keep-admin-enabled.ps1"
+  }
+
   provisioner "powershell" {
     only   = ["proxmox-iso.win11-client"]
     script = "${path.root}/scripts/00-virtio-guest-tools.ps1"
