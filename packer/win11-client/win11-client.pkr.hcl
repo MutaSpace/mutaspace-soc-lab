@@ -791,16 +791,60 @@ build {
     script = "${path.root}/scripts/05-keep-admin-enabled.ps1"
   }
 
-  provisioner "powershell" {
-    only   = ["proxmox-iso.win11-client"]
-    script = "${path.root}/scripts/90-cleanup.ps1"
+  # ###########################################################################
+  # # THE LAST TWO SCRIPTS ARE STAGED TO DISK FIRST AND THEN RUN FROM ONE      #
+  # # PROVISIONER. Do not "simplify" this back into two script provisioners.   #
+  # #                                                                          #
+  # # Windows disables the built-in Administrator - the account Packer          #
+  # # authenticates as - about 21 to 25 minutes into the build. WinRM comes up  #
+  # # at roughly 11 minutes, so there is a usable window and then there is not. #
+  # # Six builds died the same way: 90-cleanup ran fine, took four or five      #
+  # # minutes over Optimize-Volume, and then the UPLOAD of 99-sysprep landed on #
+  # # the far side of the disable and failed with                              #
+  # #                                                                          #
+  # #   Couldn't create shell: http response error: 401 - invalid content type  #
+  # #                                                                          #
+  # # Every attempt to stop the account being disabled failed - see the notes   #
+  # # in scripts/05-keep-admin-enabled.ps1 for the four theories that were      #
+  # # tested against the running guest and disproved. This does not try. It     #
+  # # removes the dependency: both scripts are uploaded back-to-back within     #
+  # # seconds of the reboot, and the single provisioner that runs them opens    #
+  # # its shell at the same time. After that the build needs no WinRM at all -  #
+  # # there is no shutdown_command, so Packer stops the VM through the Proxmox  #
+  # # API - and it does not matter what Windows does to the account.            #
+  # #                                                                          #
+  # # The staged names MUST begin with `packer-`: 90-cleanup.ps1 empties        #
+  # # C:\Windows\Temp except for `packer-*` and `script-*`, so anything else    #
+  # # would delete 99-sysprep.ps1 before it ran. That exact bug cost a build    #
+  # # once already - see the note in 90-cleanup.ps1.                           #
+  # ###########################################################################
+  provisioner "file" {
+    only        = ["proxmox-iso.win11-client"]
+    source      = "${path.root}/scripts/90-cleanup.ps1"
+    destination = "C:/Windows/Temp/packer-90-cleanup.ps1"
+  }
+
+  provisioner "file" {
+    only        = ["proxmox-iso.win11-client"]
+    source      = "${path.root}/scripts/99-sysprep.ps1"
+    destination = "C:/Windows/Temp/packer-99-sysprep.ps1"
   }
 
   # LAST. Everything after sysprep /generalize runs on a machine whose identity has
   # already been erased, so nothing may follow it.
+  #
+  # `-File` rather than dot-sourcing, so each script keeps its own scope and its own
+  # $ErrorActionPreference exactly as it had when they were separate provisioners.
+  # $LASTEXITCODE is checked between them so a failing cleanup still fails the build.
   provisioner "powershell" {
-    only   = ["proxmox-iso.win11-client"]
-    script = "${path.root}/scripts/99-sysprep.ps1"
+    only = ["proxmox-iso.win11-client"]
+    inline = [
+      "$ErrorActionPreference = 'Stop'",
+      "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\packer-90-cleanup.ps1",
+      "if ($LASTEXITCODE -ne 0) { throw \"90-cleanup.ps1 exited $LASTEXITCODE\" }",
+      "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\packer-99-sysprep.ps1",
+      "if ($LASTEXITCODE -ne 0) { throw \"99-sysprep.ps1 exited $LASTEXITCODE\" }"
+    ]
   }
 
   post-processor "manifest" {
