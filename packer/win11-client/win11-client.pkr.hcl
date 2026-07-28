@@ -750,50 +750,57 @@ build {
   # So `file("cd/setup.ps1")` is correct as written, and `script = "scripts/x.ps1"`
   # would only work if you ran Packer from inside this directory.
 
-  # MUST STAY FIRST. Client Windows disables the built-in Administrator - the account
-  # Packer authenticates as - partway through the build, and every WinRM shell after
-  # that fails with "Couldn't create shell: 401". This watchdog puts it back. See the
-  # long note in the script; 99-sysprep.ps1 removes it before generalising.
-  provisioner "powershell" {
-    only   = ["proxmox-iso.win11-client"]
-    script = "${path.root}/scripts/05-keep-admin-enabled.ps1"
-  }
-
-  provisioner "powershell" {
-    only   = ["proxmox-iso.win11-client"]
-    script = "${path.root}/scripts/00-virtio-guest-tools.ps1"
-  }
-
-  provisioner "powershell" {
-    only   = ["proxmox-iso.win11-client"]
-    script = "${path.root}/scripts/10-cloudbase-init.ps1"
-    environment_vars = [
-      "CLOUDBASE_INIT_MSI_URL=${var.cloudbase_init_msi_url}"
-    ]
-  }
-
-  # A reboot here shakes out anything that only takes effect on restart while we can
-  # still see the failure.
   # ###########################################################################
-  # # STAGED BEFORE THE REBOOT ON PURPOSE. Measured deadline, do not reorder.  #
+  # # EVERY SCRIPT IS STAGED TO DISK FIRST AND RUN FROM ONE PROVISIONER.       #
+  # # This is the whole design, not a tidy-up. Do not split it back into one   #
+  # # provisioner per script - that is what failed twelve builds in a row.     #
   # #                                                                          #
-  # # Windows disables the built-in Administrator - the account Packer          #
-  # # authenticates as - about EIGHT MINUTES after the post-restart boot. Not a #
-  # # fixed offset from the start of the build: build 9 rebooted at 19:02:49    #
-  # # and the account went at 19:11:09, Security event 4725, with the Windows   #
-  # # Search service start type flipping in the same second - the same          #
-  # # signature every time.                                                     #
+  # # THE DEADLINE: Windows disables the built-in Administrator - the account   #
+  # # Packer authenticates as - about TEN MINUTES after Setup's final boot,     #
+  # # and WinRM is not usable until roughly five. Measured:                     #
   # #                                                                          #
-  # # So everything that needs WinRM after the reboot has to fit inside eight   #
-  # # minutes, and the way to make that safe is to need almost nothing. Both    #
-  # # scripts are uploaded HERE, before the restart, where there is no deadline #
-  # # at all. They are plain files on disk and survive the reboot.              #
+  # #   build 13:  boot 21:01:55 -> disabled 21:12:20   (boot + 10m25s)         #
+  # #   build 12:  boot 20:41:34 -> disabled 20:46:18   (boot +  4m44s)         #
+  # #   build 11:  boot 20:13:54 -> disabled 20:18:42   (boot +  4m48s)         #
   # #                                                                          #
-  # # Build 9 did these two uploads AFTER the reboot. They succeeded - at       #
-  # # boot+7m - and the provisioner that followed them failed at boot+8m. One   #
-  # # minute of margin. This is the same change with the margin turned into     #
-  # # about seven.                                                              #
+  # # After that moment NO NEW WinRM SHELL CAN BE OPENED - every attempt is     #
+  # # "Couldn't create shell: http response error: 401". Adding a reboot makes  #
+  # # it worse, not better: WinRM comes back later than the account dies, so    #
+  # # the window is negative. That was tried and measured too.                  #
+  # #                                                                          #
+  # # THE PROPERTY THAT SAVES US: a shell that is ALREADY OPEN keeps working.   #
+  # # Build 10 ran cleanup and sysprep for about twenty minutes straight        #
+  # # through the disable inside one provisioner and finished both.             #
+  # #                                                                          #
+  # # So all four scripts are uploaded within a minute of WinRM appearing, and  #
+  # # ONE provisioner runs them from disk. Every WinRM operation in the build   #
+  # # happens inside the safe window; the slow work - the MSI download, the     #
+  # # trim, sysprep - happens in a shell that was opened before the deadline    #
+  # # and does not care that it has passed.                                     #
+  # #                                                                          #
+  # # The names MUST begin with `packer-`: 90-cleanup.ps1 empties               #
+  # # C:\Windows\Temp except `packer-*` and `script-*`, so any other name would #
+  # # delete the scripts queued behind it. That bug cost a build once already.  #
+  # #                                                                          #
+  # # scripts/05-keep-admin-enabled.ps1 is NOT in this list any more. It works  #
+  # # - it was proven to re-enable the account on demand - but something in     #
+  # # Windows removes its scheduled task and C:\ProgramData\mutaspace partway   #
+  # # through every build, and with all WinRM use now inside the safe window,   #
+  # # nothing depends on it. The script and its findings are kept for whoever   #
+  # # meets this next.                                                          #
   # ###########################################################################
+  provisioner "file" {
+    only        = ["proxmox-iso.win11-client"]
+    source      = "${path.root}/scripts/00-virtio-guest-tools.ps1"
+    destination = "C:/Windows/Temp/packer-00-virtio-guest-tools.ps1"
+  }
+
+  provisioner "file" {
+    only        = ["proxmox-iso.win11-client"]
+    source      = "${path.root}/scripts/10-cloudbase-init.ps1"
+    destination = "C:/Windows/Temp/packer-10-cloudbase-init.ps1"
+  }
+
   provisioner "file" {
     only        = ["proxmox-iso.win11-client"]
     source      = "${path.root}/scripts/90-cleanup.ps1"
@@ -806,48 +813,25 @@ build {
     destination = "C:/Windows/Temp/packer-99-sysprep.ps1"
   }
 
-  # ###########################################################################
-  # # THERE IS NO windows-restart PROVISIONER HERE ANY MORE, AND THAT IS       #
-  # # DELIBERATE. Adding one back will break the build. Read this first.       #
-  # #                                                                          #
-  # # Windows disables the built-in Administrator - the account Packer          #
-  # # authenticates as - about five minutes after the SECOND boot, and WinRM    #
-  # # does not answer again until about eight. Measured on three builds:        #
-  # #                                                                          #
-  # #   build 12:  boot 20:41:34 -> disabled 20:46:18 -> Packer reconnects      #
-  # #              20:49:33 and fails. Account died 3 minutes before Packer     #
-  # #              could have used it.                                          #
-  # #   build 11:  boot 20:13:54 -> disabled 20:18:42  (boot + 4m48s)           #
-  # #   build  9:  boot 19:02:49 -> disabled 19:11:09  (boot + 8m20s)           #
-  # #                                                                          #
-  # # So the post-reboot window is not small, it is usually NEGATIVE. Build 10  #
-  # # got through only because its window was the long kind - a coin toss.      #
-  # # check_registry = false was tried and did not help: the wait is WinRM      #
-  # # coming back, not the registry poll.                                       #
-  # #                                                                          #
-  # # The FIRST session has never shown the disable - it has run 15 minutes     #
-  # # past WinRM without one. So everything now happens there, in one session,  #
-  # # and the build never reconnects to anything.                              #
-  # #                                                                          #
-  # # What the reboot was for: letting the virtio drivers and Cloudbase-Init    #
-  # # settle after 10-cloudbase-init. That is not load-bearing here, because    #
-  # # sysprep /generalize is about to reseal the image and every clone boots    #
-  # # fresh from it anyway.                                                     #
-  # ###########################################################################
-  # LAST. Everything after sysprep /generalize runs on a machine whose identity has
-  # already been erased, so nothing may follow it.
+  # THE ONLY REMAINING SHELL. Everything the build does happens in here, in order,
+  # from the files staged above. Nothing may follow it: sysprep /generalize has
+  # erased the machine's identity by the time it returns.
   #
-  # `-File` rather than dot-sourcing, so each script keeps its own scope and its own
-  # $ErrorActionPreference exactly as it had when they were separate provisioners.
-  # $LASTEXITCODE is checked between them so a failing cleanup still fails the build.
+  # `-File` per script rather than dot-sourcing, so each keeps the scope and the
+  # $ErrorActionPreference it had when they were separate provisioners.
+  # $LASTEXITCODE is checked after each so a failure still fails the build.
   provisioner "powershell" {
     only = ["proxmox-iso.win11-client"]
+    environment_vars = [
+      "CLOUDBASE_INIT_MSI_URL=${var.cloudbase_init_msi_url}"
+    ]
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\packer-90-cleanup.ps1",
-      "if ($LASTEXITCODE -ne 0) { throw \"90-cleanup.ps1 exited $LASTEXITCODE\" }",
-      "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\packer-99-sysprep.ps1",
-      "if ($LASTEXITCODE -ne 0) { throw \"99-sysprep.ps1 exited $LASTEXITCODE\" }"
+      "foreach ($s in @('packer-00-virtio-guest-tools', 'packer-10-cloudbase-init', 'packer-90-cleanup', 'packer-99-sysprep')) {",
+      "  Write-Host \"=== running $s.ps1 ===\"",
+      "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Windows\\Temp\\$s.ps1\"",
+      "  if ($LASTEXITCODE -ne 0) { throw \"$s.ps1 exited $LASTEXITCODE\" }",
+      "}"
     ]
   }
 
