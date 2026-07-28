@@ -330,6 +330,23 @@
       specialize rather than in a provisioner - by the time a provisioner could run,
       encryption has already begun and would have to be reversed with `manage-bde` in its off mode
       plus a wait for full decryption.
+
+      BOTH specialize-pass commands live in this ONE component, and they must stay that
+      way. A settings pass may name a component only once: a second
+      Microsoft-Windows-Deployment block in the same pass makes the whole answer file
+      invalid, and Setup fails with "The computer restarted unexpectedly or encountered
+      an unexpected error" long before it reaches anything the file asks for. That is
+      exactly what happened when PreventDeviceEncryption was first added as its own
+      component - Windows named the fault precisely in Panther\setuperr.log ("The same
+      namespace should not appear twice in a single settings section",
+      hrResult = 0x8022001b), but nothing on the console or in the Packer log did.
+      validate-answer-files.sh now checks for this.
+
+      Command 2 (BypassNRO): Windows 11 22H2 and later push hard toward a Microsoft
+      account during OOBE, and 24H2 removed the oobe\BypassNRO.cmd script people used to
+      rely on. The unattend settings in the oobeSystem pass below (a local Administrator
+      password plus AutoLogon) are what actually keep OOBE local; this registry value is
+      the belt-and-braces version of the same thing, written before OOBE runs.
     -->
     <component name="Microsoft-Windows-Deployment"
                processorArchitecture="amd64"
@@ -341,6 +358,11 @@
           <Order>1</Order>
           <Path>reg add "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /t REG_DWORD /d 1 /f</Path>
           <Description>Prevent automatic BitLocker device encryption (blocks sysprep)</Description>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>Allow OOBE to complete without a network or a Microsoft account</Description>
+          <Path>reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
@@ -367,27 +389,6 @@
       -->
       <ComputerName>${computer_name}</ComputerName>
       <TimeZone>UTC</TimeZone>
-    </component>
-
-    <!--
-      Windows 11 22H2 and later push hard toward a Microsoft account during OOBE, and
-      24H2 removed the oobe\BypassNRO.cmd script people used to rely on. The unattend
-      settings in the oobeSystem pass below (a local Administrator password plus
-      AutoLogon) are what actually keep OOBE local; this registry value is the
-      belt-and-braces version of the same thing, written before OOBE runs.
-    -->
-    <component name="Microsoft-Windows-Deployment"
-               processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35"
-               language="neutral"
-               versionScope="nonSxS">
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Description>Allow OOBE to complete without a network or a Microsoft account</Description>
-          <Path>reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
-        </RunSynchronousCommand>
-      </RunSynchronous>
     </component>
 
     <!--

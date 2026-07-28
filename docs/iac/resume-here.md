@@ -14,8 +14,8 @@ public in git history) and `scripts/rotate-lab-credentials.sh` now exists; pre-c
 the scanner actually runs; `var.pve_node` + a plan-time node check make the repo work on another
 instructor's host; the stale "21-add/21-destroy" tofu warning was false and the real drift is now
 APPLIED (`plan` returns no changes); getting-started.md gained the three steps a fresh instructor
-cannot skip. Remaining: **Win11 template (9003)** — boot prompt FIXED, but Setup still writes nothing
-to disk (see below) — and a formal recorded `70-detections` run.**
+cannot skip. Remaining: **Win11 template (9003)** — see the Win11 section below, which is current as
+of 2026-07-28 and supersedes this line — and a formal recorded `70-detections` run.**
 
 ---
 
@@ -274,11 +274,13 @@ then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
 
 ---
 
-## Win11 (9003) — FOUR bugs fixed, install now works, sysprep is the last hang
+## Win11 (9003) — SIX bugs fixed; a build is in flight
 
-Updated 2026-07-26. This went from "boots and loops forever" to "installs Windows, connects WinRM,
-runs every provisioner" — and stops at the final step. Each fix is committed; the remaining problem
-is narrow and well-characterised.
+Updated 2026-07-28. This went from "boots and loops forever" to a full install that connects WinRM
+and runs every provisioner, then hit two further faults — automatic BitLocker (which was the sysprep
+hang) and a duplicate component in the answer file. Both are fixed and committed. **A build is
+running now; nobody has yet watched it reach `qm template`.** Do not mark 9003 done until you have
+seen a `template: 1` line in `/etc/pve/qemu-server/9003.conf`.
 
 ### FIXED — 1. The boot prompt (`scripts/remaster-windows-iso.sh`)
 
@@ -325,20 +327,70 @@ and Packer waited on a shutdown that was never coming. Now excludes `packer-*` a
 `win-server-2022` already excluded `packer-*` (which is why Server built and Win11 did not) and has
 been hardened the same way so the two stop diverging.
 
-### ⚠️ REMAINING — sysprep hangs
+### FIXED — 5. Windows 11 encrypted its own disk, which is what hung sysprep
 
-Current state, verified: Windows installs (disk 0.01% → 25.66%), WinRM connects, and all four
-provisioners run in order — `00-virtio-guest-tools`, `10-cloudbase-init`, `90-cleanup` (clean, no
-CommandNotFoundException), `99-sysprep`. Then it stops:
+Win11 turns device encryption ON BY ITSELF during OOBE when the firmware and a TPM support it —
+which is exactly this template (q35 + OVMF + vTPM 2.0, all mandatory for Win11). Nothing in the
+answer file asks for it. **Sysprep /generalize cannot run on a BitLocker volume**, so it never
+returned: 25+ minutes of no output, a static disk, a black console, and a VM that never shut down,
+so Packer waited on a shutdown that was never coming.
 
-- `99-sysprep.ps1` runs for 25+ minutes with **no output**
-- disk static at 25.66% for the last 9 of those
-- console fully black (luma 0), VM still `running`, guest burning only ~5% CPU
-- no error in the Packer log; the `(1115) A system shutdown is in progress` line is at log line 38,
-  from the FIRST WinRM attempt during the post-install reboot — not from sysprep
+Fix: `PreventDeviceEncryption=1` in the **specialize** pass, which runs before OOBE. A provisioner
+cannot do this — by then encryption has started and would need a full decrypt.
 
-**Next step: read sysprep's own log off the disk. The procedure is below and the one
-non-obvious prerequisite is `-on-error=abort`.**
+This also explains why the vTPM looked guilty: it IS involved, but as the trigger for
+auto-encryption, not as a reset. Removing `tpm_config` alone left the build broken for the other
+reasons still live at the time, so that experiment gave a false negative.
+
+### FIXED — 6. Two `Microsoft-Windows-Deployment` components in one settings pass
+
+Fix 5 was added as its own `<component>` block in `specialize`, beside the existing one that writes
+`BypassNRO`. **A settings pass may name a component only once.** The file is still well-formed XML —
+so `validate-answer-files.sh` passed it — but Windows rejects the whole answer file, and Setup
+stopped at *"The computer restarted unexpectedly or encountered an unexpected error"* with a
+24-hour build parked on `Waiting for WinRM`.
+
+Windows names the fault precisely, and only on the disk:
+
+```
+SMI data results dump: Source = Name: Microsoft-Windows-Deployment, ...
+SMI data results dump: Description = The same namespace should not appear twice in a single settings section.
+The provided unattend file is not valid; hrResult = 0x8022001b
+```
+
+Fix: both commands now live in one component (`PreventDeviceEncryption` Order 1, `BypassNRO`
+Order 2), and `scripts/validate-answer-files.sh` gained a duplicate-component check that reports
+both line numbers. Verified it fails on a reinjected duplicate and passes both real templates.
+
+That is **three** distinct ways this repo has shipped a silently-invalid answer file (`--` in a
+comment, twice; a duplicate component, once). Every one of them looked like a different kind of
+fault from the console. When Setup misbehaves, suspect the answer file first and run the validator
+before theorising.
+
+### Current state — a build is in flight (2026-07-28)
+
+Launched 09:24 from the workstation, detached, `-on-error=abort`. At T+3m the console showed
+*"Installing Windows 11 — 28% complete"* and the disk was climbing (5.45% → 17.31%); the failed
+build never got past ~18% total. Log and pidfile are in the launching session's scratchpad.
+
+⚠️ **There is no `direnv` on this workstation.** `.envrc` must be sourced by hand or packer dies in
+three seconds with `401 Authentication failed`:
+
+```bash
+cd ~/projects/mutaspace-soc-lab && . ./.envrc
+setsid nohup packer build -on-error=abort \
+  -var-file=packer/common.pkrvars.hcl \
+  -var-file=packer/win11-client/win11-client.pkrvars.hcl \
+  packer/win11-client/ > /tmp/w11.log 2>&1 &
+echo $! > /tmp/w11.pid   # ⚠️ this captures setsid's PID, which exits immediately.
+                         # Re-capture the real one: pgrep -f '^packer build -on-error=abort'
+```
+
+Watch it with the console screendump recipe in CLAUDE.md, or `lvs -o lv_name,data_percent pve |
+grep 9003-disk-1`. Expect roughly an hour to WinRM, then four provisioners, then sysprep and
+shutdown.
+
+### Reading the disk when a build fails — proven procedure
 
 ⚠️ **Packer DESTROYS the VM when a build is interrupted or fails.** `qm destroy` runs in its
 cleanup path, so killing a hung build always takes the disk — and therefore the logs — with it.
@@ -355,38 +407,43 @@ packer build -on-error=abort \
   packer/win11-client/
 ```
 
-Let it reach `99-sysprep.ps1`, wait for the hang (disk static, console black, ~8 min of no
-output), then interrupt it. The VM survives. Then, ON THE HOST:
+Let it reach the hang, then kill it **by its captured PID**. The VM survives — this was walked
+end-to-end on 2026-07-28 and is what found bug 6. Then, ON THE HOST:
 
 ```bash
 qm stop 9003                                   # stop, do NOT destroy
 lvchange -ay /dev/pve/vm-9003-disk-1
-partx -a /dev/pve/vm-9003-disk-1               # expose the GPT partitions
-lsblk -o NAME,SIZE,FSTYPE /dev/pve/vm-9003-disk-1
+LOOP=$(losetup --find --show --partscan --read-only /dev/pve/vm-9003-disk-1)
+lsblk -o NAME,SIZE,FSTYPE "$LOOP"              # p3 is the 63G Windows partition
 
-# the Windows partition is the large ntfs one (p3 on this layout)
 mkdir -p /mnt/w11disk
-mount -t ntfs-3g -o ro /dev/pve/vm-9003-disk-1p3 /mnt/w11disk
+mount -t ntfs-3g -o ro "${LOOP}p3" /mnt/w11disk
 
-# THE FILES THAT ANSWER THE QUESTION
-sed -n '1,200p' /mnt/w11disk/Windows/System32/Sysprep/Panther/setuperr.log
-grep -iE 'error|fail|abort' /mnt/w11disk/Windows/System32/Sysprep/Panther/setupact.log | tail -40
+# WHICH LOG ANSWERS THE QUESTION DEPENDS ON WHERE IT DIED
+#   Setup / specialize / OOBE  ->  Windows\Panther
+tail -40 /mnt/w11disk/Windows/Panther/setuperr.log
+tail -20 /mnt/w11disk/Windows/Panther/UnattendGC/setuperr.log
+#   sysprep itself             ->  Windows\System32\Sysprep\Panther
+tail -40 /mnt/w11disk/Windows/System32/Sysprep/Panther/setuperr.log
 
-umount /mnt/w11disk; partx -d /dev/pve/vm-9003-disk-1
+umount /mnt/w11disk; losetup -d "$LOOP"
+qm destroy 9003                                # clear the way for the next build
 ```
 
 `ntfs-3g` is already installed on the host (`apt-get install -y ntfs-3g`, done 2026-07-26).
-`guestmount` is NOT installed; `partx` + `ntfs-3g` is enough and avoids pulling in libguestfs.
+`guestmount` is NOT installed; `losetup --partscan` + `ntfs-3g` is enough and avoids libguestfs.
+`losetup --partscan` is more reliable here than `partx -a`, which is what the earlier draft used.
+
+**`blkid` on that partition is also a free BitLocker check:** `TYPE="ntfs"` means encryption did
+not happen; `TYPE="BitLocker"` (or `-FVE-FS-` in the first sector) means it did, and sysprep will
+never finish.
 
 **Also seen on the last attempt: a SECOND, different hang.** One run stalled for 30+ minutes
 between provisioner 1 and 2 — after `00-virtio-guest-tools.ps1` printed "virtio guest tools
 complete" and before `10-cloudbase-init.ps1` produced any output. That script downloads the
 Cloudbase-Init MSI from the internet, so a slow or hanging fetch is the obvious suspect. It is
-NOT the sysprep hang and may be intermittent; the earlier run got past this point cleanly. Worth
-adding a timeout and a retry to that download regardless.
-
-Suspect worth checking first: the script may be invoking sysprep in a way that returns before
-generalize completes, or Cloudbase-Init's `SetupComplete`/unattend interaction may be blocking it.
+NOT the sysprep hang (that was BitLocker, bug 5) and may be intermittent; another run got past this
+point cleanly. Worth adding a timeout and a retry to that download regardless — still open.
 
 What 9003 still blocks: `win-client-01` (VMID 105), the Windows half of `60-endpoints` (Sysmon +
 4625 auditing), and `50-wazuh-agents` for that host. Nothing else depends on it — both incident
@@ -396,8 +453,10 @@ scenarios run Linux-to-Linux.
 
 ## Git
 
-Branch `feat/infrastructure-as-code`, pushed. HEAD = jumpbox commit (`8cd3ef0`). `tofu test` 14/14.
-The Windows/OPNsense manual ISOs are on the host's `local:iso` shelf.
+Branch `feat/infrastructure-as-code`, pushed. HEAD is the answer-file duplicate-component fix
+(2026-07-28). `tofu test` 14/14. The Windows/OPNsense manual ISOs are on the host's `local:iso`
+shelf. Note the aborted builds leave stray `packer<digits>.iso` files there — harmless, but they
+accumulate.
 
 ---
 
