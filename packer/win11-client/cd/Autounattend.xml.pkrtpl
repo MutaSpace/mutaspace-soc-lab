@@ -459,11 +459,54 @@
         Setting AdministratorPassword enables the built-in Administrator account and
         is what stops OOBE from demanding that a new user be created.
       -->
+      <!--
+        THE `packer` ACCOUNT IS WHAT PACKER AUTHENTICATES AS. Do not remove it, and
+        do not point winrm_username back at Administrator.
+
+        Client Windows disables the BUILT-IN Administrator (RID 500) roughly five to
+        ten minutes after Setup's final boot, on its own schedule, and after that no
+        new WinRM shell can be created:
+
+          Couldn't create shell: http response error: 401 - invalid content type
+
+        Fourteen builds died on that. Measured across several of them:
+
+          build 14:  boot 21:28:46 -> disabled 21:34:13   (boot +  5m27s)
+          build 13:  boot 21:01:55 -> disabled 21:12:20   (boot + 10m25s)
+          build 12:  boot 20:41:34 -> disabled 20:46:18   (boot +  4m44s)
+
+        Five theories were tested against the running guest and every one was
+        disproved - the AutoLogon LogonCount, 90-cleanup deleting the autologon
+        registry values, the extra local admin the Cloudbase-Init MSI used to
+        create, Defender quarantining the watchdog, and simply doing less work
+        inside the window. See scripts/05-keep-admin-enabled.ps1 for the details.
+
+        This sidesteps it instead. Windows only auto-disables the built-in account;
+        a normal local administrator is left alone. `packer` is deleted again at the
+        top of 99-sysprep.ps1, before the image is sealed, so it does not ship in
+        the template or in any learner clone.
+
+        AdministratorPassword still sets the built-in account's password, because
+        that is what enables it for the OOBE autologon that runs FirstLogonCommands -
+        and FirstLogonCommands is what turns WinRM on in the first place.
+      -->
       <UserAccounts>
         <AdministratorPassword>
           <Value>${admin_password}</Value>
           <PlainText>true</PlainText>
         </AdministratorPassword>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>packer</Name>
+            <DisplayName>Packer build account</DisplayName>
+            <Description>Temporary build account. Deleted by 99-sysprep.ps1.</Description>
+            <Group>Administrators</Group>
+            <Password>
+              <Value>${admin_password}</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
       </UserAccounts>
 
       <!--

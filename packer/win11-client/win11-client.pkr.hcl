@@ -719,8 +719,17 @@ source "proxmox-iso" "win11-client" {
   # 2022. cd/setup.ps1 forces the profile to Private before touching WinRM. Without
   # that one line this build hangs here and the error message never mentions the
   # network profile. This is the classic "works on Server 2022, hangs on Win11".
+  # ⚠️ `packer`, NOT `Administrator`. Do not change this back.
+  #
+  # Client Windows disables the BUILT-IN Administrator five to ten minutes after
+  # Setup's final boot, on its own schedule, and no new WinRM shell can be created
+  # afterwards - "Couldn't create shell: 401". Fourteen builds died there. Windows
+  # leaves ordinary local administrators alone, so the build authenticates as one.
+  # The account is created by the answer file and deleted again at the top of
+  # 99-sysprep.ps1, before the image is sealed. The long version of this story is in
+  # the answer file, beside the account definition.
   communicator   = "winrm"
-  winrm_username = "Administrator"
+  winrm_username = "packer"
   winrm_password = var.windows_admin_password
   winrm_use_ssl  = false
   winrm_insecure = true

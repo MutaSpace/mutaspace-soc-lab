@@ -98,6 +98,45 @@ if (Get-ScheduledTask -TaskName 'MutaSpaceKeepAdminEnabled' -ErrorAction Silentl
 }
 Write-Host 'Watchdog task removed and its files deleted.'
 
+# ---------------------------------------------------------------------------
+# DELETE THE `packer` BUILD ACCOUNT. It must not ship in the template.
+#
+# The answer file creates it as a local administrator because Packer cannot use the
+# built-in Administrator: client Windows disables that account a few minutes into
+# every build and no new WinRM shell can be opened afterwards. See the note beside
+# the account definition in cd/Autounattend.xml.pkrtpl.
+#
+# This is the last moment it can be removed. A build account with a known password,
+# in Administrators, in the template that every learner workstation is cloned from,
+# is exactly the finding this lab exists to teach people to spot.
+#
+# We are almost certainly RUNNING AS this account right now - Packer's WinRM session
+# is authenticated as `packer`. Deleting it does not tear down the already-running
+# process or its token, so sysprep still completes below. The deletion is wrapped
+# anyway: if it fails the build should still produce a template, and say loudly what
+# is wrong with it, rather than throwing away a 25-minute build.
+# ---------------------------------------------------------------------------
+Write-Host '--- Removing the packer build account ---'
+try {
+    if (Get-LocalUser -Name 'packer' -ErrorAction SilentlyContinue) {
+        Remove-LocalUser -Name 'packer' -ErrorAction Stop
+        Write-Host 'Deleted the local account `packer`.'
+    } else {
+        Write-Host 'No `packer` account present (already gone).'
+    }
+    $profilePath = 'C:\Users\packer'
+    if (Test-Path $profilePath) {
+        Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPath -eq $profilePath } |
+            Remove-CimInstance -ErrorAction SilentlyContinue
+        Remove-Item -Path $profilePath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+} catch {
+    Write-Host "WARNING: could not delete the packer account: $($_.Exception.Message)"
+    Write-Host 'WARNING: THIS TEMPLATE SHIPS A LOCAL ADMIN CALLED `packer` WITH THE BUILD'
+    Write-Host 'WARNING: PASSWORD. Remove it by hand before cloning, and fix this script.'
+}
+
 Write-Host '--- Credential hygiene (autologon values) ---'
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 foreach ($name in @('AutoAdminLogon', 'DefaultUserName', 'DefaultPassword', 'DefaultDomainName', 'AutoLogonCount')) {
