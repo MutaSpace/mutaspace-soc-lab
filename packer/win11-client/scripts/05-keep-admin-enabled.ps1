@@ -82,6 +82,15 @@ Set-Content -Path $script -Value $watchdog -Encoding UTF8
 $action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+
+# AT STARTUP, not just "start it now". The first version of this script registered a
+# task with NO trigger and called Start-ScheduledTask, which works exactly until the
+# windows-restart provisioner reboots the machine - after which nothing started it
+# again and the watchdog was dead for the entire second half of the build, which is
+# precisely the half where Windows disables the account. The build failed identically
+# to the runs with no watchdog at all, and the guest afterwards showed the task gone
+# and its log never written.
+$trigger = New-ScheduledTaskTrigger -AtStartup
 # New-ScheduledTaskSettingsSet, NOT New-ScheduledTaskSettings. The shorter name does
 # not exist and cost a build: a parse check validates syntax, not cmdlet names, so it
 # passed every check and then failed with CommandNotFoundException on the guest.
@@ -89,10 +98,34 @@ $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGo
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+    -Principal $principal -Settings $settings | Out-Null
 Start-ScheduledTask -TaskName $taskName
 
+# This script is IDEMPOTENT and is deliberately run twice by the template - once at
+# the start and again immediately after the windows-restart provisioner. Belt and
+# braces for the same reboot problem: the AtStartup trigger should bring it back on
+# its own, and re-running proves it rather than assuming it.
 Start-Sleep -Seconds 3
-$state = (Get-ScheduledTask -TaskName $taskName).State
-Write-Host "Watchdog task '$taskName' registered and started (state: $state)."
-Write-Host "It re-enables the built-in Administrator every 3s until 99-sysprep.ps1 stops it."
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if (-not $task) {
+    throw "Watchdog task '$taskName' is not registered after Register-ScheduledTask."
+}
+Write-Host "Watchdog task '$taskName' registered (state: $($task.State), trigger: AtStartup)."
+
+# Prove it actually works rather than trusting the task state, which says nothing
+# about whether the loop inside is running. Disable the account and time how long the
+# watchdog takes to put it back.
+Write-Host 'Testing the watchdog: disabling the account on purpose...'
+Disable-LocalUser -Name 'Administrator'
+$deadline = (Get-Date).AddSeconds(30)
+$recovered = $false
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 1
+    if ((Get-LocalUser -Name 'Administrator').Enabled) { $recovered = $true; break }
+}
+if (-not $recovered) {
+    Enable-LocalUser -Name 'Administrator'   # never leave it broken
+    throw 'The watchdog did NOT re-enable the built-in Administrator within 30s. The build would fail later with a 401; fix the watchdog rather than proceeding.'
+}
+Write-Host 'Watchdog verified: it re-enabled the account. Packer will keep working through the disable.'

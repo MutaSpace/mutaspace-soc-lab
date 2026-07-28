@@ -781,6 +781,16 @@ build {
     restart_check_command = "powershell -command \"Write-Output 'restarted'\""
   }
 
+  # RUN AGAIN AFTER THE REBOOT. The watchdog is a scheduled task; the restart above
+  # stops whatever was running, and a build once lost it entirely across the reboot.
+  # The script is idempotent and self-testing - it disables the account on purpose and
+  # fails the build if the watchdog does not put it back - so this second run is what
+  # guarantees protection during the half of the build where Windows disables it.
+  provisioner "powershell" {
+    only   = ["proxmox-iso.win11-client"]
+    script = "${path.root}/scripts/05-keep-admin-enabled.ps1"
+  }
+
   provisioner "powershell" {
     only   = ["proxmox-iso.win11-client"]
     script = "${path.root}/scripts/90-cleanup.ps1"
