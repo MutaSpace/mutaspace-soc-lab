@@ -173,6 +173,60 @@ if (Test-Path $cbUnattend) {
     Copy-Item -LiteralPath $cbUnattend -Destination $stagedUnattend -Force
     Write-Host "Using the Cloudbase-Init answer file: $cbUnattend"
     Write-Host "Staged for sysprep at:                $stagedUnattend"
+
+    # -----------------------------------------------------------------------
+    # INJECT SkipRearm=1 INTO THE GENERALIZE PASS. Do not remove it.
+    #
+    # Without it, sysprep /generalize calls SLReArmWindows and the build dies:
+    #
+    #   SYSPRP LaunchModule: Failure executing 'SLReArmWindows' from slc.dll;
+    #                        dwRet = 0xc004f075
+    #   SYSPRP Error in executing action for Microsoft-Windows-Security-SPP
+    #
+    # and then sysprep hangs on a dialog nobody can see, so the 15-minute deadline
+    # below is what actually ends the build.
+    #
+    # Skipping the rearm is not a workaround here, it is the policy this repo
+    # already committed to. Windows 11 Enterprise Evaluation allows only TWO
+    # rearms in its entire life, and the counter decrements the moment the rearm
+    # runs. A generalize that rearms would spend half the image's total runway on
+    # every single build - and getting a Windows template right takes more than
+    # two builds, as the last ten demonstrate. 90-cleanup.ps1 refuses to run
+    # `slmgr /rearm` for exactly this reason; this is the same decision in the
+    # place sysprep actually reads.
+    #
+    # Consequence to be aware of: clones inherit the REMAINING evaluation period
+    # rather than a fresh 90 days. That is the documented trade in
+    # 90-cleanup.ps1 - the fix for an expired evaluation is VL media, not rearms.
+    # -----------------------------------------------------------------------
+    $ns  = 'urn:schemas-microsoft-com:unattend'
+    $xml = [xml](Get-Content -LiteralPath $stagedUnattend -Raw)
+
+    $generalize = $xml.unattend.settings | Where-Object { $_.pass -eq 'generalize' }
+    if (-not $generalize) {
+        $generalize = $xml.CreateElement('settings', $ns)
+        $generalize.SetAttribute('pass', 'generalize')
+        $xml.DocumentElement.AppendChild($generalize) | Out-Null
+        Write-Host 'Added a generalize pass to the staged answer file.'
+    }
+
+    $spp = $generalize.component | Where-Object { $_.name -eq 'Microsoft-Windows-Security-SPP' }
+    if (-not $spp) {
+        $spp = $xml.CreateElement('component', $ns)
+        $spp.SetAttribute('name', 'Microsoft-Windows-Security-SPP')
+        $spp.SetAttribute('processorArchitecture', 'amd64')
+        $spp.SetAttribute('publicKeyToken', '31bf3856ad364e35')
+        $spp.SetAttribute('language', 'neutral')
+        $spp.SetAttribute('versionScope', 'nonSxS')
+        $generalize.AppendChild($spp) | Out-Null
+    }
+
+    $skip = $xml.CreateElement('SkipRearm', $ns)
+    $skip.InnerText = '1'
+    $spp.AppendChild($skip) | Out-Null
+    $xml.Save($stagedUnattend)
+    Write-Host 'Injected SkipRearm=1 into the generalize pass (evaluation rearms are finite).'
+
     $sysprepArgs += "/unattend:$stagedUnattend"
 } else {
     Write-Host "WARNING: $cbUnattend not found."
@@ -186,6 +240,24 @@ $sysprepArgs += '/quit'
 # Pass ONE pre-joined string rather than the array, so PowerShell hands the
 # command line to sysprep verbatim instead of re-quoting each element.
 $argLine = $sysprepArgs -join ' '
+
+# 0xC004F075 reads as "the operation cannot be completed because the service is
+# stopping", and sppsvc starts on demand and stops again when idle - so sysprep can
+# call into it exactly as it is winding down. SkipRearm above should mean sysprep
+# never asks it for anything, but nudging the service into a running state first
+# costs a second and removes the race either way.
+try {
+    $spp = Get-Service -Name 'sppsvc' -ErrorAction Stop
+    if ($spp.Status -ne 'Running') {
+        Write-Host "Starting the Software Protection service (was: $($spp.Status))"
+        Start-Service -Name 'sppsvc' -ErrorAction SilentlyContinue
+        $spp.WaitForStatus('Running', (New-TimeSpan -Seconds 60))
+    }
+    Write-Host "Software Protection service: $((Get-Service -Name 'sppsvc').Status)"
+} catch {
+    Write-Host "Could not check the Software Protection service: $($_.Exception.Message)"
+}
+
 Write-Host "Running: $sysprepExe $argLine"
 
 # Deliberately NOT -Wait. A sysprep stopped on a dialog never returns, and an
