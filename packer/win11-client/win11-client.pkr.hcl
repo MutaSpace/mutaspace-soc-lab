@@ -806,38 +806,34 @@ build {
     destination = "C:/Windows/Temp/packer-99-sysprep.ps1"
   }
 
-  # check_registry = FALSE, deliberately. This is a deadline, not a preference.
-  #
-  # Windows disables the built-in Administrator between roughly FIVE and EIGHT
-  # minutes after this reboot completes - measured, and variable:
-  #
-  #   build  9:  boot 19:02:49 -> disabled 19:11:09   (boot + 8m20s)
-  #   build 11:  boot 20:13:54 -> disabled 20:18:42   (boot + 4m48s)
-  #
-  # Everything after this provisioner therefore has to happen fast, and
-  # check_registry is what was eating the budget. It polls the pending-reboot
-  # registry keys until Windows finishes settling its updates, which on this image
-  # takes about EIGHT MINUTES - so build 11 booted at 20:13:54, sat here until
-  # roughly 20:21, and then tried to upload the last provisioner into an account
-  # that had been disabled two and a half minutes earlier. Build 10 got through the
-  # same step only because its window happened to be the long kind.
-  #
-  # With it false, Packer moves on as soon as WinRM answers - about a minute after
-  # boot - which puts the one remaining upload four to seven minutes inside even the
-  # short window. The scripts it runs are already staged on disk above, so that
-  # upload is the last thing in the entire build that needs WinRM at all.
-  #
-  # What is given up: Packer no longer waits for pending Windows updates to settle
-  # before continuing. That is acceptable here because what follows is cleanup and
-  # sysprep, neither of which cares, and because a build that reliably fails is
-  # worth less than one that occasionally races an update.
-  provisioner "windows-restart" {
-    only                  = ["proxmox-iso.win11-client"]
-    restart_timeout       = "30m"
-    check_registry        = false
-    restart_check_command = "powershell -command \"Write-Output 'restarted'\""
-  }
-
+  # ###########################################################################
+  # # THERE IS NO windows-restart PROVISIONER HERE ANY MORE, AND THAT IS       #
+  # # DELIBERATE. Adding one back will break the build. Read this first.       #
+  # #                                                                          #
+  # # Windows disables the built-in Administrator - the account Packer          #
+  # # authenticates as - about five minutes after the SECOND boot, and WinRM    #
+  # # does not answer again until about eight. Measured on three builds:        #
+  # #                                                                          #
+  # #   build 12:  boot 20:41:34 -> disabled 20:46:18 -> Packer reconnects      #
+  # #              20:49:33 and fails. Account died 3 minutes before Packer     #
+  # #              could have used it.                                          #
+  # #   build 11:  boot 20:13:54 -> disabled 20:18:42  (boot + 4m48s)           #
+  # #   build  9:  boot 19:02:49 -> disabled 19:11:09  (boot + 8m20s)           #
+  # #                                                                          #
+  # # So the post-reboot window is not small, it is usually NEGATIVE. Build 10  #
+  # # got through only because its window was the long kind - a coin toss.      #
+  # # check_registry = false was tried and did not help: the wait is WinRM      #
+  # # coming back, not the registry poll.                                       #
+  # #                                                                          #
+  # # The FIRST session has never shown the disable - it has run 15 minutes     #
+  # # past WinRM without one. So everything now happens there, in one session,  #
+  # # and the build never reconnects to anything.                              #
+  # #                                                                          #
+  # # What the reboot was for: letting the virtio drivers and Cloudbase-Init    #
+  # # settle after 10-cloudbase-init. That is not load-bearing here, because    #
+  # # sysprep /generalize is about to reseal the image and every clone boots    #
+  # # fresh from it anyway.                                                     #
+  # ###########################################################################
   # LAST. Everything after sysprep /generalize runs on a machine whose identity has
   # already been erased, so nothing may follow it.
   #
