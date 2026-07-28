@@ -82,7 +82,10 @@ Set-Content -Path $script -Value $watchdog -Encoding UTF8
 $action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings  = New-ScheduledTaskSettings -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+# New-ScheduledTaskSettingsSet, NOT New-ScheduledTaskSettings. The shorter name does
+# not exist and cost a build: a parse check validates syntax, not cmdlet names, so it
+# passed every check and then failed with CommandNotFoundException on the guest.
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
