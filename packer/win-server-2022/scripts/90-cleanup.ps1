@@ -105,6 +105,33 @@ try {
     Write-Host "Optimize-Volume -ReTrim failed (this is not fatal): $($_.Exception.Message)"
 }
 
+Write-Host '--- Make sure Packer can still get back in ---'
+#
+# LAST THING BEFORE SYSPREP, AND IT MUST STAY LAST.
+#
+# Kept identical to win11-client/scripts/90-cleanup.ps1. There, client Windows
+# disables the built-in Administrator when the answer file's AutoLogon LogonCount
+# reaches 0, and every WinRM shell afterwards fails with:
+#
+#   Couldn't create shell: http response error: 401 - invalid content type
+#
+# Server is not known to do that - the built-in Administrator is the primary
+# account here - so this is pure insurance on this template. It is present anyway
+# because the two Windows templates keep diverging by having a fix applied to only
+# one of them, and it costs one command.
+try {
+    $admin = Get-LocalUser -Name 'Administrator' -ErrorAction Stop
+    if (-not $admin.Enabled) {
+        Write-Host 'WARNING: the built-in Administrator was disabled during this build - re-enabling it.'
+        Write-Host 'WARNING: check the AutoLogon LogonCount in the answer file; that is the usual cause.'
+        Enable-LocalUser -Name 'Administrator'
+    } else {
+        Write-Host 'Built-in Administrator is enabled, as it should be.'
+    }
+} catch {
+    Write-Host "Could not check the Administrator account: $($_.Exception.Message)"
+}
+
 Write-Host '--- What this script deliberately does NOT do ---'
 #
 #   slmgr /rearm

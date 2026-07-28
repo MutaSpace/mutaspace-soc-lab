@@ -471,16 +471,39 @@
         somebody logs on, and the thing they run is the WinRM bootstrap that lets
         Packer connect at all.
 
-        LogonCount 2 leaves one spare logon in case a driver install forces a reboot
-        before the bootstrap finishes. The AutoAdminLogon and DefaultPassword registry
-        values this creates are deleted in scripts/90-cleanup.ps1 - note that the
-        commonly-cited "AutoLogonCount = 0" trick is a logon-counter fix and does NOT
-        scrub those values.
+        ⚠️ LogonCount MUST NOT be reached during the build. Do not lower it back to 2.
+
+        When the count hits 0, Windows finalises the autologon - and on CLIENT Windows
+        that includes DISABLING the built-in Administrator account. Every WinRM shell
+        opened afterwards is then rejected, and Packer fails partway through the
+        provisioners with:
+
+          Couldn't create shell: http response error: 401 - invalid content type
+
+        The build spends both of its logons (OOBE, then the windows-restart after
+        10-cloudbase-init), so a count of 2 left it disabling the account mid-build,
+        roughly four minutes into the second session. Confirmed on the box: Security
+        event 4725 "A user account was disabled", subject and target both the built-in
+        Administrator, immediately followed by StartMenuExperienceHost crash-looping.
+
+        It presents as INTERMITTENT, because it is a race against however long
+        90-cleanup's Optimize-Volume takes - one build got 99-sysprep uploaded before
+        the account went away and three did not.
+
+        This is also why win-server-2022 never hit it with the identical setting: on
+        Server the built-in Administrator is the primary account and is not
+        auto-disabled. Do not conclude from "Server works" that the setting is fine.
+
+        5 leaves headroom for a driver install forcing an extra reboot while still
+        never reaching 0 in a build that uses two. The AutoAdminLogon and
+        DefaultPassword registry values this creates are deleted in
+        scripts/90-cleanup.ps1 - note that the commonly-cited "AutoLogonCount = 0"
+        trick is a logon-counter fix and does NOT scrub those values.
       -->
       <AutoLogon>
         <Enabled>true</Enabled>
         <Username>Administrator</Username>
-        <LogonCount>2</LogonCount>
+        <LogonCount>5</LogonCount>
         <Password>
           <Value>${admin_password}</Value>
           <PlainText>true</PlainText>

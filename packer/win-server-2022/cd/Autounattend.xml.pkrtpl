@@ -335,16 +335,25 @@
         somebody logs on, and the thing they run is the WinRM bootstrap that lets
         Packer connect at all.
 
-        LogonCount 2 leaves one spare logon in case a driver install forces a reboot
-        before the bootstrap finishes. The AutoAdminLogon and DefaultPassword registry
-        values this creates are deleted in scripts/90-cleanup.ps1 - note that the
-        commonly-cited "AutoLogonCount = 0" trick is a logon-counter fix and does NOT
-        scrub those values.
+        LogonCount is 5, not 2, to match win11-client - see the long note in that
+        template's answer file. Reaching 0 makes CLIENT Windows disable the built-in
+        Administrator mid-build, which fails every later WinRM shell with
+        "Couldn't create shell: http response error: 401".
+
+        Server is NOT known to do that - here the built-in Administrator is the primary
+        account - and this template built fine on 2. It is raised anyway so the two
+        Windows answer files do not quietly diverge on a setting that is load-bearing in
+        one of them, which is how the 90-cleanup bug survived in win11 after being fixed
+        here. It costs nothing: the build uses two logons and never reaches 0 either way.
+
+        The AutoAdminLogon and DefaultPassword registry values this creates are deleted
+        in scripts/90-cleanup.ps1 - note that the commonly-cited "AutoLogonCount = 0"
+        trick is a logon-counter fix and does NOT scrub those values.
       -->
       <AutoLogon>
         <Enabled>true</Enabled>
         <Username>Administrator</Username>
-        <LogonCount>2</LogonCount>
+        <LogonCount>5</LogonCount>
         <Password>
           <Value>${admin_password}</Value>
           <PlainText>true</PlainText>

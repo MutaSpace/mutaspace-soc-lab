@@ -115,6 +115,38 @@ try {
     Write-Host "Optimize-Volume -ReTrim failed (this is not fatal): $($_.Exception.Message)"
 }
 
+Write-Host '--- Make sure Packer can still get back in ---'
+#
+# LAST THING BEFORE SYSPREP, AND IT MUST STAY LAST.
+#
+# Client Windows disables the built-in Administrator when the answer file's
+# AutoLogon LogonCount reaches 0. If that happens the account is gone before the
+# next provisioner runs, and Packer dies uploading it with:
+#
+#   Couldn't create shell: http response error: 401 - invalid content type
+#
+# The actual fix is LogonCount 5 in the answer file, so the count never reaches 0
+# during a build. This is the belt to that pair of braces: it costs one command
+# and turns a 25-minute failed build into a non-event if anything else in Windows
+# decides to disable the account. Confirmed as a real failure mode - Security
+# event 4725, fired mid-cleanup, three builds in a row.
+#
+# Leaving the account enabled is the intended state, not a weakening: the answer
+# file enables it on purpose (that is what AdministratorPassword does), Packer
+# needs it to connect, and the lab logs into it afterwards.
+try {
+    $admin = Get-LocalUser -Name 'Administrator' -ErrorAction Stop
+    if (-not $admin.Enabled) {
+        Write-Host 'WARNING: the built-in Administrator was disabled during this build - re-enabling it.'
+        Write-Host 'WARNING: check the AutoLogon LogonCount in the answer file; that is the usual cause.'
+        Enable-LocalUser -Name 'Administrator'
+    } else {
+        Write-Host 'Built-in Administrator is enabled, as it should be.'
+    }
+} catch {
+    Write-Host "Could not check the Administrator account: $($_.Exception.Message)"
+}
+
 Write-Host '--- What this script deliberately does NOT do ---'
 #
 #   slmgr /rearm
