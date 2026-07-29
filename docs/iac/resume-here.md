@@ -575,11 +575,43 @@ Fixes, all committed:
   a real second-order bug — it is why the failed first boot was never re-attempted —
   though it was NOT the reason the first boot failed.
 
-**Verification status, stated plainly:** the rendered user-data and the modified
-99-sysprep both parse on real Windows (checked on dc-01), `tofu validate` and the 14
-offline tests pass. **None of it has been exercised by an actual clone.** Proving it
-needs a fresh Windows VM, and proving the sysprep half needs a template rebuild. The
-existing win-client-01 was fixed by hand and will not re-run any of this.
+**Verification status (updated 2026-07-29 after the rebuild):**
+
+The template was rebuilt — build 23, backed up first as
+`/var/lib/vz/dump/vzdump-qemu-9003-2026_07_29-13_40_41.vma.zst` (9.6 GB) — and the
+sysprep-side fixes are now PROVEN. It was also the **second consecutive clean build**,
+so the recipe is reproducible rather than a one-off. Build log:
+
+```
+GeneralizationState = 4 (image has been generalised)     <- corrected check, no false warning
+Sysprep_succeeded.tag present - generalize completed.    <- new hard assert
+Scheduling its removal on the first boot of any clone, via RunOnce.
+Removing packer-ps-env-vars-....ps1
+```
+
+Confirmed by mounting the finished template read-only: sysprep tag present, Panther
+scrubbed, Cloudbase-Init installed, and **no `packer-*` or `script-*` left in
+C:\Windows\Temp** (the previous template shipped two).
+
+⚠️ **The Cloudbase-Init plugin-state clear found NOTHING to clear** —
+`No Cloudbase-Init plugin state present (nothing to clear)`. The key does not exist in
+a freshly built template, so the "baked-in plugin state" theory was WRONG. That matches
+what the guest log later showed: the real cause was the user-data dying at
+`Get-NetConnectionProfile`. The step is kept as cheap defence for an image that boots
+more than once during a build, but it is not the fix and should not be described as one.
+
+**STILL UNVERIFIED, and it needs a fresh clone to prove:**
+
+- the reordered, fault-tolerant user-data actually bootstrapping a machine end to end
+  (Administrator enabled, WinRM listening, no `qm guest exec` rescue);
+- `var.windows_admin_password` reaching the guest — requires `TF_VAR_windows_admin_password`
+  to be exported, which `.envrc.example` now documents;
+- the `RunOnce` entry removing `C:\Users\packer` on first boot.
+
+The existing win-client-01 predates all of it and was fixed by hand, so it will not
+exercise any of this. Proving it means destroying and re-cloning VM 105 — which throws
+away a working, domain-joined, Wazuh-enrolled endpoint, so decide deliberately rather
+than casually.
 
 #### Playbook order matters: 50 BEFORE 60
 
