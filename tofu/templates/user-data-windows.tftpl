@@ -125,7 +125,34 @@ Invoke-Step 'Local Administrator for the Ansible bootstrap connection' {
 }
 
 Invoke-Step 'WinRM' {
-    winrm quickconfig -quiet -force
+    # ⚠️ THE LISTENER IS CREATED EXPLICITLY. Do not rely on quickconfig alone.
+    #
+    # `winrm quickconfig` REFUSES to create a listener while Windows considers the
+    # network Public, and on a fresh clone the profile flip above can time out - NLA
+    # sometimes takes longer than any reasonable wait to classify the network, and
+    # Get-NetConnectionProfile just returns "A general error occurred" until it does.
+    #
+    # That happened on the first hands-off clone: quickconfig ran, the service was
+    # briefly Running, and there was NO listener. WinRM then stopped, and Ansible
+    # could not connect even though every other step had succeeded.
+    #
+    # `winrm create Listener?Address=*+Transport=HTTP` works regardless of profile.
+    # Verified live on win-client-01: listener on 5985 bound to 10.10.10.51 while the
+    # profile was still Public, and `ansible -m win_ping` returned pong.
+    #
+    # AllowUnencrypted is deliberately NOT set: Ansible uses NTLM (see
+    # inventory/group_vars/bootstrap_windows.yml), which encrypts the payload itself,
+    # so HTTP on 5985 does not need the service weakened.
+    winrm quickconfig -quiet -force 2>&1 | Out-Null
+
+    Set-Service -Name WinRM -StartupType Automatic
+    Start-Service -Name WinRM -ErrorAction SilentlyContinue
+
+    $hasListener = (& winrm enumerate winrm/config/listener 2>&1) -match 'Transport = HTTP'
+    if (-not $hasListener) {
+        Write-Step 'No WinRM listener (Public profile blocks quickconfig) - creating one explicitly'
+        & winrm create "winrm/config/Listener?Address=*+Transport=HTTP" 2>&1 | Out-Null
+    }
 
     # Without this, a local administrator authenticating remotely is filtered down to
     # a standard-user token and everything fails with access denied.
@@ -143,7 +170,34 @@ Invoke-Step 'WinRM' {
     sc.exe config WinRM start= delayed-auto | Out-Null
     Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service -Name WinRM -ErrorAction SilentlyContinue
+
+    # Report what actually exists, not merely that commands were issued. A service
+    # that is Running with no listener is the failure mode this step was written for.
+    $listener = ((& winrm enumerate winrm/config/listener 2>&1) -match 'Port|ListeningOn') -join ' | '
     Write-Step ('WinRM service: {0}' -f (Get-Service WinRM).Status)
+    if ([string]::IsNullOrWhiteSpace($listener)) {
+        Write-Step 'WARNING: WinRM has NO LISTENER. Ansible will not be able to connect.'
+    } else {
+        Write-Step ('WinRM listener: {0}' -f $listener)
+    }
+}
+
+Invoke-Step 'Computer name' {
+    # Cloudbase-Init cannot do this: Proxmox's `cicustom user=` supplies user-data
+    # ONLY, with no meta-data, so SetHostNamePlugin logs "Hostname not found in
+    # metadata" and does nothing. Observed on both clones - they came up as
+    # DESKTOP-FEET0KV and DESKTOP-22VU4RM.
+    #
+    # The rename needs a reboot to take effect, and deliberately does NOT force one:
+    # 30-domain-join renames and joins in a single operation anyway, and rebooting
+    # underneath a bootstrap that is still running is how first boots get stuck.
+    $want = '${hostname}'
+    if ($env:COMPUTERNAME -ieq $want) {
+        Write-Step ('Computer name already {0}' -f $want)
+    } else {
+        Write-Step ('Renaming {0} -> {1} (applies on next restart)' -f $env:COMPUTERNAME, $want)
+        Rename-Computer -NewName $want -Force -ErrorAction Stop
+    }
 }
 
 # ---------------------------------------------------------------------------

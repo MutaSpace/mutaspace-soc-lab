@@ -145,12 +145,26 @@ try {
     }
     if (Test-Path $profilePath) {
         Write-Host 'Profile C:\Users\packer is still in use (we are logged in as it).'
-        Write-Host 'Scheduling its removal on the first boot of any clone, via RunOnce.'
-        New-ItemProperty `
-            -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' `
-            -Name 'MutaSpaceRemovePackerProfile' `
-            -Value 'cmd.exe /c rmdir /s /q C:\Users\packer' `
-            -PropertyType String -Force | Out-Null
+        Write-Host 'Scheduling its removal at the next STARTUP of any clone.'
+
+        # ⚠️ A STARTUP TASK, NOT RunOnce. RunOnce was tried and does not fire here:
+        # it runs at the first INTERACTIVE LOGON, and nobody ever logs into a headless
+        # lab VM. Verified on the first hands-off clone - the RunOnce value was sitting
+        # in the registry, unfired, with C:\Users\packer still present.
+        #
+        # AtStartup runs as SYSTEM with no logon required. The task deletes the profile
+        # and then unregisters itself, so it does not linger in the template's children.
+        $cmd = 'rmdir /s /q C:\Users\packer & schtasks /delete /tn MutaSpaceRemovePackerProfile /f'
+        $action    = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c $cmd"
+        $trigger   = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Unregister-ScheduledTask -TaskName 'MutaSpaceRemovePackerProfile' -Confirm:$false -ErrorAction SilentlyContinue
+        Register-ScheduledTask -TaskName 'MutaSpaceRemovePackerProfile' `
+            -Action $action -Trigger $trigger -Principal $principal | Out-Null
+
+        # Remove the RunOnce value if an older build left one, so the two do not race.
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' `
+            -Name 'MutaSpaceRemovePackerProfile' -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host 'Profile C:\Users\packer removed.'
     }
