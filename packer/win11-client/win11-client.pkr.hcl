@@ -829,8 +829,33 @@ build {
   # `-File` per script rather than dot-sourcing, so each keeps the scope and the
   # $ErrorActionPreference it had when they were separate provisioners.
   # $LASTEXITCODE is checked after each so a failure still fails the build.
+  # ###########################################################################
+  # # skip_clean = TRUE IS LOAD-BEARING. Removing it fails the build.          #
+  # #                                                                          #
+  # # After a provisioner's command returns, Packer opens ANOTHER WinRM shell  #
+  # # to delete the script it uploaded. By then Windows has finished OOBE and  #
+  # # disabled the account, so that shell cannot be created and Packer reports #
+  # #                                                                          #
+  # #   Couldn't create shell: http response error: 401 - invalid content type #
+  # #                                                                          #
+  # # It then treats the 401 as RETRYABLE and re-runs the whole provisioner,   #
+  # # which fails the same way forever. That is what eighteen builds looked    #
+  # # like from outside: a 401 on an upload, and no sign that anything ran.    #
+  # #                                                                          #
+  # # It had. Build 18's PACKER_LOG=1 capture showed the command running for   #
+  # # 3m39s and returning 5973 bytes of stdout, and the guest afterwards had   #
+  # # Cloudbase-Init installed and                                             #
+  # #   C:\Windows\System32\Sysprep\Sysprep_succeeded.tag                      #
+  # # written. The build was finishing successfully and then throwing itself   #
+  # # away on the tidy-up.                                                     #
+  # #                                                                          #
+  # # The leftover C:\Windows\Temp\script-*.ps1 does not survive into the      #
+  # # template: 90-cleanup.ps1 empties that directory, and sysprep /generalize #
+  # # clears temp again on top of that.                                        #
+  # ###########################################################################
   provisioner "powershell" {
-    only = ["proxmox-iso.win11-client"]
+    only       = ["proxmox-iso.win11-client"]
+    skip_clean = true
     environment_vars = [
       "CLOUDBASE_INIT_MSI_URL=${var.cloudbase_init_msi_url}"
     ]
