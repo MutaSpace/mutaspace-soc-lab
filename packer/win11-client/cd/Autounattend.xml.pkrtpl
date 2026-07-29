@@ -392,13 +392,34 @@
           WinRM does not exist until the machine has stopped rearranging itself, and
           Packer connects to something stable instead of racing it.
 
-          No & < or > characters in the command below - they are XML metacharacters
-          and would need entity-escaping. This file has been broken that way twice.
+          ⚠️ TWO RULES FOR THIS COMMAND, both learned the hard way.
+
+          1. IT MUST NOT TOUCH THE CD. The first version copied setup.ps1 off the
+             seed CD here. During specialize the CD does not reliably have a drive
+             letter, so Copy-Item failed. Which leads to rule 2.
+
+          2. IT MUST NOT FAIL. A RunSynchronousCommand that exits non-zero ABORTS
+             WINDOWS SETUP - the console shows "The computer restarted unexpectedly
+             or encountered an unexpected error", Setup never finishes, WinRM never
+             appears, and Packer sits at "Waiting for WinRM" until its timeout. That
+             is indistinguishable from a dozen other faults and cost a 15-hour
+             overnight run. Hence try/catch and an explicit `exit 0`.
+
+          So specialize does the one thing that cannot fail: write a .cmd file. The
+          CD is located later, by that .cmd, at SetupComplete time - by which point
+          Windows is fully up and drive letters exist. The batch `for` loop searches
+          the likely letters rather than assuming one.
+
+          No & < or > characters below - they are XML metacharacters and would need
+          entity-escaping. This file has been broken that way twice. That is also why
+          the generated .cmd does NOT redirect its output anywhere: `1) file 2)1`
+          would need both, and setup.ps1 already writes its own transcript to
+          C:\Windows\Temp\packer-bootstrap.log. Read that file if WinRM never shows up.
         -->
         <RunSynchronousCommand wcm:action="add">
           <Order>3</Order>
           <Description>Stage the WinRM bootstrap to run after OOBE completes</Description>
-          <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq '${seed_cd_label}' } | Select-Object -First 1; New-Item -Path 'C:\Windows\Setup\Scripts' -ItemType Directory -Force | Out-Null; Copy-Item -Path ($v.DriveLetter + ':\setup.ps1') -Destination 'C:\Windows\Setup\Scripts\packer-setup.ps1' -Force; Set-Content -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -Value 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\packer-setup.ps1'"</Path>
+          <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { New-Item -Path 'C:\Windows\Setup\Scripts' -ItemType Directory -Force | Out-Null; $lines = @('@echo off', 'for %%d in (D E F G H I J K) do if exist %%d:\setup.ps1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File %%d:\setup.ps1'); Set-Content -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -Value $lines -Encoding ASCII } catch { }; exit 0"</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
