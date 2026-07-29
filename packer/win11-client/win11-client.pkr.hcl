@@ -639,9 +639,16 @@ source "proxmox-iso" "win11-client" {
     # cloud-init looks for, and this is not a NoCloud seed. What matters is that
     # setup.ps1 can find its own volume by LABEL instead of guessing a letter.
     cd_label = local.seed_cd_label
+    # THE PROVISIONER SCRIPTS RIDE ON THIS CD. That is not tidiness, it is the only
+    # way the build reliably works - see the note on the provisioner below. Uploading
+    # them over WinRM costs shells the build does not reliably have.
     cd_content = {
-      "Autounattend.xml" = local.autounattend
-      "setup.ps1"        = file("cd/setup.ps1")
+      "Autounattend.xml"          = local.autounattend
+      "setup.ps1"                 = file("cd/setup.ps1")
+      "00-virtio-guest-tools.ps1" = file("scripts/00-virtio-guest-tools.ps1")
+      "10-cloudbase-init.ps1"     = file("scripts/10-cloudbase-init.ps1")
+      "90-cleanup.ps1"            = file("scripts/90-cleanup.ps1")
+      "99-sysprep.ps1"            = file("scripts/99-sysprep.ps1")
     }
 
     # Mandatory for cd_content/cd_files. Omitting it hard-fails in Prepare().
@@ -798,62 +805,52 @@ build {
   # # nothing depends on it. The script and its findings are kept for whoever   #
   # # meets this next.                                                          #
   # ###########################################################################
-  # ONE upload, not four. Each `file` provisioner opens its own WinRM shell, and
-  # shells are the scarce resource here - see the note on the provisioner below.
-  # Build 19 spent four of them on individual scripts and ran out before it got to
-  # the one that matters. A directory upload moves the whole set in a single shell.
-  #
-  # The destination MUST stay under a `packer-` name: 90-cleanup.ps1 empties
-  # C:\Windows\Temp except `packer-*` and `script-*`, so anything else would delete
-  # 99-sysprep.ps1 out from under the run that is about to execute it.
-  provisioner "file" {
-    only        = ["proxmox-iso.win11-client"]
-    source      = "${path.root}/scripts/"
-    destination = "C:/Windows/Temp/packer-scripts/"
-  }
-
-  # THE ONLY REMAINING SHELL. Everything the build does happens in here, in order,
-  # from the files staged above. Nothing may follow it: sysprep /generalize has
-  # erased the machine's identity by the time it returns.
-  #
-  # `-File` per script rather than dot-sourcing, so each keeps the scope and the
-  # $ErrorActionPreference it had when they were separate provisioners.
-  # $LASTEXITCODE is checked after each so a failure still fails the build.
   # ###########################################################################
-  # # skip_clean = TRUE IS LOAD-BEARING. Removing it fails the build.          #
+  # # THE BUILD USES EXACTLY ONE WinRM SHELL, AND IT MUST STAY THAT WAY.       #
   # #                                                                          #
-  # # After a provisioner's command returns, Packer opens ANOTHER WinRM shell  #
-  # # to delete the script it uploaded. By then Windows has finished OOBE and  #
-  # # disabled the account, so that shell cannot be created and Packer reports #
+  # # Windows finishes OOBE a few minutes after WinRM first answers and, as    #
+  # # part of that, stops accepting NEW shells - every attempt returns         #
   # #                                                                          #
   # #   Couldn't create shell: http response error: 401 - invalid content type #
   # #                                                                          #
-  # # It then treats the 401 as RETRYABLE and re-runs the whole provisioner,   #
-  # # which fails the same way forever. That is what eighteen builds looked    #
-  # # like from outside: a 401 on an upload, and no sign that anything ran.    #
+  # # The gap between "WinRM answers" and "no more shells" is short and        #
+  # # VARIABLE. Measured deltas from boot to the account being disabled ran    #
+  # # from 4m44s to 10m25s across builds 9-14, and WinRM itself only comes up  #
+  # # a couple of minutes before the end of that. Full write-up, including six #
+  # # disproved theories, is in docs/iac/resume-here.md.                       #
   # #                                                                          #
-  # # It had. Build 18's PACKER_LOG=1 capture showed the command running for   #
-  # # 3m39s and returning 5973 bytes of stdout, and the guest afterwards had   #
-  # # Cloudbase-Init installed and                                             #
-  # #   C:\Windows\System32\Sysprep\Sysprep_succeeded.tag                      #
-  # # written. The build was finishing successfully and then throwing itself   #
-  # # away on the tidy-up.                                                     #
+  # # A shell that is ALREADY RUNNING is unaffected: build 18 ran for 3m39s    #
+  # # straight through the cutoff and wrote Sysprep_succeeded.tag. So the      #
+  # # build must spend its ONE shell on the thing that does the work, and no   #
+  # # shells on anything else.                                                 #
   # #                                                                          #
-  # # The leftover C:\Windows\Temp\script-*.ps1 does not survive into the      #
-  # # template: 90-cleanup.ps1 empties that directory, and sysprep /generalize #
-  # # clears temp again on top of that.                                        #
+  # # WHAT THAT RULES OUT, EACH TRIED AND EACH FAILED:                         #
+  # #   * four `file` provisioners, one per script (build 19) - four shells;   #
+  # #   * one `file` provisioner for the directory (build 20) - two shells,    #
+  # #     and it still lost the race;                                          #
+  # #   * environment_vars, which makes Packer upload a separate env-vars      #
+  # #     script first. The MSI URL is interpolated into the command instead.  #
+  # #                                                                          #
+  # # So the scripts ride on the seed CD (see cd_content above) and this       #
+  # # provisioner runs them from there. skip_clean stops Packer opening one    #
+  # # more shell afterwards to delete what it uploaded, which is what threw    #
+  # # away build 18's completed sysprep.                                       #
+  # #                                                                          #
+  # # Nothing after this needs WinRM: there is no shutdown_command, so the VM  #
+  # # is stopped and converted through the Proxmox API.                        #
   # ###########################################################################
   provisioner "powershell" {
     only       = ["proxmox-iso.win11-client"]
     skip_clean = true
-    environment_vars = [
-      "CLOUDBASE_INIT_MSI_URL=${var.cloudbase_init_msi_url}"
-    ]
     inline = [
       "$ErrorActionPreference = 'Stop'",
+      "$env:CLOUDBASE_INIT_MSI_URL = '${var.cloudbase_init_msi_url}'",
+      "$cd = (Get-Volume | Where-Object { $_.FileSystemLabel -eq '${local.seed_cd_label}' } | Select-Object -First 1).DriveLetter",
+      "if (-not $cd) { throw 'Could not find the seed CD by label ${local.seed_cd_label}' }",
+      "Write-Host (\"Running provisioner scripts from drive \" + $cd)",
       "foreach ($s in @('00-virtio-guest-tools', '10-cloudbase-init', '90-cleanup', '99-sysprep')) {",
       "  Write-Host \"=== running $s.ps1 ===\"",
-      "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Windows\\Temp\\packer-scripts\\$s.ps1\"",
+      "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$cd`:\\$s.ps1\"",
       "  if ($LASTEXITCODE -ne 0) { throw \"$s.ps1 exited $LASTEXITCODE\" }",
       "}"
     ]
