@@ -741,6 +741,22 @@ source "proxmox-iso" "win11-client" {
   winrm_use_ssl  = false
   winrm_insecure = true
 
+  # NTLM rather than plain Basic. Two reasons, one of them diagnostic.
+  #
+  # 1. Basic re-sends the credential on EVERY WS-Man POST and depends on two settings
+  #    the WinRM service ships DISABLED by default - `service/auth Basic` and
+  #    `AllowUnencrypted`. cd/setup.ps1 turns both on. If anything in Windows restores
+  #    either default mid-build, every subsequent request 401s. Negotiate/NTLM is on by
+  #    default and is unaffected by both.
+  #
+  # 2. It discriminates between the two remaining explanations for our 401s. If NTLM
+  #    keeps working past the point where Basic started failing, the fault was the
+  #    service configuration; if it dies at the same instant, it is the account.
+  #
+  # Needs LocalAccountTokenFilterPolicy=1 for a non-builtin local admin, which
+  # setup.ps1 already sets.
+  winrm_use_ntlm = true
+
   # This timeout must cover the ENTIRE OS installation, because it is how long Packer
   # waits for the first WinRM connection.
   winrm_timeout = "2h"

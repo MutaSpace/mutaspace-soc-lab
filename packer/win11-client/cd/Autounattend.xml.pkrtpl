@@ -492,10 +492,31 @@
         more - that is SetupComplete.cmd, staged in the specialize pass above.
       -->
       <UserAccounts>
-        <AdministratorPassword>
-          <Value>${admin_password}</Value>
-          <PlainText>true</PlainText>
-        </AdministratorPassword>
+        <!--
+          ⚠️ THERE IS DELIBERATELY NO <AdministratorPassword> HERE. Do not add one.
+
+          Every maintained public Windows-CLIENT Packer template picks exactly one of
+          two account models, and never both:
+
+            A. the built-in Administrator, with NO <LocalAccounts> at all;
+            B. a dedicated local admin, with NO <AdministratorPassword> at all.
+
+          This file used to do BOTH, which no working reference template does. Setting
+          AdministratorPassword enables the built-in account for OOBE; client Windows
+          then disables it again at the end of OOBE - that is documented, by design,
+          and is the `Accounts: Administrator account status` policy whose effective
+          default is Disabled on client and Enabled on Server. (Which is exactly why
+          win-server-2022 builds fine with the identical arrangement.)
+
+            https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/
+              enable-and-disable-the-built-in-administrator-account
+
+          We are Camp B. The build authenticates as `packer`, autologon runs as
+          `packer`, and 99-sysprep.ps1 deletes the account before the image is sealed.
+          The nearest published analogue to this build - Pumba98/proxmox-packer-
+          templates, proxmox-iso + Windows 11 Enterprise EVALUATION media + WinRM -
+          has exactly this shape.
+        -->
         <LocalAccounts>
           <LocalAccount wcm:action="add">
             <Name>packer</Name>
@@ -518,10 +539,15 @@
         at first logon meant Packer connected DURING OOBE and got cut off by
         Windows' end-of-OOBE housekeeping a few minutes later.
 
-        ⚠️ LogonCount MUST NOT be reached during the build. Do not lower it back to 2.
+        ⚠️ CORRECTION: an earlier version of this comment claimed that reaching
+        LogonCount 0 is what disables the built-in Administrator. THAT IS WRONG, and it
+        sent the investigation down a blind alley. Microsoft's AutoLogon reference says
+        the opposite - "If the built-in administrator account is used, the account is
+        still active" after the count expires - and raising it 2 -> 5 changed nothing.
 
-        When the count hits 0, Windows finalises the autologon - and on CLIENT Windows
-        that includes DISABLING the built-in Administrator account. Every WinRM shell
+        What actually disables the built-in Administrator on client Windows is the end
+        of OOBE, unconditionally. See the note on UserAccounts above. It no longer
+        matters here, because the build no longer uses that account for anything. Every WinRM shell
         opened afterwards is then rejected, and Packer fails partway through the
         provisioners with:
 
@@ -549,7 +575,7 @@
       -->
       <AutoLogon>
         <Enabled>true</Enabled>
-        <Username>Administrator</Username>
+        <Username>packer</Username>
         <LogonCount>5</LogonCount>
         <Password>
           <Value>${admin_password}</Value>
