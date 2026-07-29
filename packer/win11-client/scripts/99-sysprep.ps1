@@ -124,12 +124,35 @@ try {
     } else {
         Write-Host 'No `packer` account present (already gone).'
     }
+    # THE PROFILE DIRECTORY CANNOT BE DELETED FROM HERE, AND THAT IS NOT A BUG.
+    #
+    # The build is logged in AS `packer` - that is what the answer file's autologon
+    # does, and it is what makes FirstLogonCommands run at all - so its profile is
+    # loaded and in use. The first successful template shipped with C:\Users\packer
+    # still present for exactly this reason: the ACCOUNT was gone, the directory was
+    # not.
+    #
+    # Best effort first, then hand the leftovers to the next boot. RunOnce runs once,
+    # as SYSTEM-equivalent, at the first interactive logon of the CLONE - by which
+    # time nothing holds the profile open. rmdir is used rather than PowerShell so
+    # the command cannot depend on an execution policy.
     $profilePath = 'C:\Users\packer'
     if (Test-Path $profilePath) {
         Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
             Where-Object { $_.LocalPath -eq $profilePath } |
             Remove-CimInstance -ErrorAction SilentlyContinue
         Remove-Item -Path $profilePath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $profilePath) {
+        Write-Host 'Profile C:\Users\packer is still in use (we are logged in as it).'
+        Write-Host 'Scheduling its removal on the first boot of any clone, via RunOnce.'
+        New-ItemProperty `
+            -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' `
+            -Name 'MutaSpaceRemovePackerProfile' `
+            -Value 'cmd.exe /c rmdir /s /q C:\Users\packer' `
+            -PropertyType String -Force | Out-Null
+    } else {
+        Write-Host 'Profile C:\Users\packer removed.'
     }
 } catch {
     Write-Host "WARNING: could not delete the packer account: $($_.Exception.Message)"
@@ -325,20 +348,78 @@ if ($p.ExitCode -ne 0) {
 # ---------------------------------------------------------------------------
 # Verify the generalisation actually happened, rather than trusting exit code 0.
 #
-# GeneralizationState 7 is the value Windows writes once /generalize has completed.
-# Checking it is the difference between "sysprep returned" and "the image is
-# actually generalised", and this repository's documentation standard is explicit
-# that a step is not complete just because it ran.
+# ⚠️ THE SENSE OF THIS CHECK WAS BACKWARDS AND IS NOW CORRECTED.
+#
+# It used to expect GeneralizationState 7 and warned on anything else, so the first
+# successful build in this template's history printed
+#   "WARNING: GeneralizationState is '4', expected 7"
+# on an image that was perfectly generalised. That is a false alarm on the one build
+# that mattered, which is worse than no check at all.
+#
+# The values run the other way round: 7 is the CLEAN state, meaning sysprep has not
+# run and is ready to; 3 or 4 means sysprep HAS run. The widely-circulated fix for
+# "Sysprep was not able to validate your Windows installation" is to set the value
+# back to 7 precisely so the machine will generalise again - which only makes sense
+# if 7 means "not yet generalised".
+#
+#   https://learn.microsoft.com/en-us/answers/questions/405829/sysprep-failed-windows-server-2016-2019
+#   https://michlstechblog.info/blog/windows-sysprep-error-machine-is-in-an-invalid-state-or-we-couldnt-update-the-recorded-state/
+#
+# Microsoft does not document these values, so treat this as corroboration and not
+# as proof. The AUTHORITATIVE markers, both checked above and below, are sysprep's
+# own exit code and the tag file it writes on success.
 # ---------------------------------------------------------------------------
 $genState = (Get-ItemProperty -Path 'HKLM:\SYSTEM\Setup\Status\SysprepStatus' -Name 'GeneralizationState' -ErrorAction SilentlyContinue).GeneralizationState
-if ($genState -eq 7) {
-    Write-Host 'GeneralizationState = 7 (generalize completed)'
+if ($genState -in @(3, 4)) {
+    Write-Host "GeneralizationState = $genState (image has been generalised)"
+} elseif ($genState -eq 7) {
+    Write-Host 'WARNING: GeneralizationState is 7, which means the image has NOT been generalised.'
+    Write-Host 'WARNING: sysprep returned success but left the machine in the clean state. Do not trust this template.'
 } else {
-    Write-Host "WARNING: GeneralizationState is '$genState', expected 7. Inspect C:\Windows\System32\Sysprep\Panther on the built template before trusting it."
+    Write-Host "WARNING: GeneralizationState is '$genState', which is neither 3/4 (generalised) nor 7 (clean)."
+}
+
+# The one Windows writes on success, and the thing worth trusting.
+$tag = 'C:\Windows\System32\Sysprep\Sysprep_succeeded.tag'
+if (Test-Path $tag) {
+    Write-Host "Sysprep_succeeded.tag present - generalize completed."
+} else {
+    throw "Sysprep exited 0 but $tag does not exist. The image is NOT generalised."
 }
 
 $imageState = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Setup\State' -Name 'ImageState' -ErrorAction SilentlyContinue).ImageState
 Write-Host "ImageState = $imageState"
+
+# ---------------------------------------------------------------------------
+# REMOVE PACKER'S OWN SCAFFOLDING. Last thing before the VM is stopped.
+#
+# The build runs with skip_clean = true, which stops Packer opening a second WinRM
+# shell to tidy up after itself - that extra shell is refused once Windows has
+# finished OOBE, and losing it threw away an otherwise complete build. The cost is
+# that Packer leaves its files behind, and 90-cleanup.ps1 cannot remove them: it
+# deliberately preserves `packer-*` and `script-*` precisely so it does not delete
+# the scripts queued behind it.
+#
+# So they are removed here instead. Verified present in the first successful
+# template (`packer-ps-env-vars-*.ps1` and `script-*.ps1` in C:\Windows\Temp);
+# neither contained a credential, but shipping Packer's scaffolding in an image
+# cloned for every learner is untidy at best.
+#
+# Deleting the currently-executing runner is safe: PowerShell has already read it.
+# ---------------------------------------------------------------------------
+Write-Host '--- Removing Packer scaffolding from C:\Windows\Temp ---'
+Get-ChildItem -Path 'C:\Windows\Temp' -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'packer-*' -or $_.Name -like 'script-*' } |
+    ForEach-Object {
+        Write-Host "Removing $($_.Name)"
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+$left = @(Get-ChildItem -Path 'C:\Windows\Temp' -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'packer-*' -or $_.Name -like 'script-*' })
+if ($left.Count -gt 0) {
+    Write-Host "NOTE: $($left.Count) Packer file(s) could not be removed (in use): $($left.Name -join ', ')"
+    Write-Host 'NOTE: they contain no credentials; sysprep clears temp on the clone anyway.'
+}
 
 # Give sysprep a moment to flush to disk before Packer asks the API to stop the VM.
 # See the race noted in the banner above.

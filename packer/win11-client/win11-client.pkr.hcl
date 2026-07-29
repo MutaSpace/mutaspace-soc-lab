@@ -854,6 +854,16 @@ build {
   # #                                                                          #
   # # Nothing after this needs WinRM: there is no shutdown_command, so the VM  #
   # # is stopped and converted through the Proxmox API.                        #
+  # #                                                                          #
+  # # THE COST OF skip_clean, AND WHO PAYS IT: Packer leaves its own            #
+  # # packer-ps-env-vars-*.ps1 and script-*.ps1 in C:\Windows\Temp. An earlier  #
+  # # note here claimed 90-cleanup.ps1 would remove them; that was WRONG, and   #
+  # # the first successful template shipped with both files present.           #
+  # # 90-cleanup deliberately PRESERVES `packer-*` and `script-*` so it does    #
+  # # not delete the scripts queued behind it, so it was never going to.        #
+  # # 99-sysprep.ps1 deletes them explicitly instead, as its last act. Neither  #
+  # # file contains a credential - both were read off the built template - but  #
+  # # Packer scaffolding has no business in an image cloned for every learner.  #
   # ###########################################################################
   provisioner "powershell" {
     only       = ["proxmox-iso.win11-client"]
