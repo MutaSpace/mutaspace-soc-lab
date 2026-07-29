@@ -274,7 +274,7 @@ then `cd ~/mutaspace-soc-lab/ansible; set -a; . .secrets/env; set +a`.
 
 ---
 
-## Win11 (9003) — SEVEN bugs fixed; sysprep's real cause is now known
+## Win11 (9003) — NOT BUILT. Nine bugs fixed; the blocker is WinRM, not sysprep
 
 Updated 2026-07-28 (second pass). This went from "boots and loops forever" to a full install that
 completes OOBE, connects WinRM and runs every provisioner. The last hang — sysprep — was finally
@@ -415,29 +415,109 @@ had simply not tripped it. Three changes each:
 Both scripts were parse-checked with `[Parser]::ParseFile` on dc-01 (real Windows PowerShell 5.1)
 before committing — there is no `pwsh` on the workstation.
 
-### Current state — a build is in flight (2026-07-28)
+### ⛔ CURRENT STATE (2026-07-29): 17 builds, no template. Read this before build 18.
 
-The 09:24 build proved bugs 1-6 fixed: it installed, completed OOBE (leaving the disk unencrypted),
-connected WinRM at T+11m and ran all four provisioners. It then hung on sysprep, which is how bug 7
-was found; it was aborted at T+40m and VM 9003 destroyed. A build with the bug-7 fix is what should
-run next. Log and pidfile live in the launching session's scratchpad.
+Everything below was measured on the running guest, not inferred. The five templates that
+exist are unaffected; 9003 blocks only `win-client-01` (VMID 105), the Windows half of
+`60-endpoints` (Sysmon + 4625 auditing) and one Wazuh agent. Both incident scenarios are
+Linux-to-Linux and do not need it.
 
-⚠️ **There is no `direnv` on this workstation.** `.envrc` must be sourced by hand or packer dies in
-three seconds with `401 Authentication failed`:
+**The wall:** partway through every build, WinRM starts refusing to open new shells:
 
-```bash
-cd ~/projects/mutaspace-soc-lab && . ./.envrc
-setsid nohup packer build -on-error=abort \
-  -var-file=packer/common.pkrvars.hcl \
-  -var-file=packer/win11-client/win11-client.pkrvars.hcl \
-  packer/win11-client/ > /tmp/w11.log 2>&1 &
-echo $! > /tmp/w11.pid   # ⚠️ this captures setsid's PID, which exits immediately.
-                         # Re-capture the real one: pgrep -f '^packer build -on-error=abort'
+```
+Error uploading script: Error uploading file to $env:TEMP\winrmcp-<uuid>.tmp:
+Couldn't create shell: http response error: 401 - invalid content type
 ```
 
-Watch it with the console screendump recipe in CLAUDE.md, or `lvs -o lv_name,data_percent pve |
-grep 9003-disk-1`. Expect roughly an hour to WinRM, then four provisioners, then sysprep and
-shutdown.
+**A shell that is ALREADY OPEN keeps working.** Build 10 ran 90-cleanup and 99-sysprep for
+about twenty minutes straight through the failure window inside one provisioner and finished
+both. Only shell CREATION is affected. That is the single most useful fact here.
+
+#### What happens, and when
+
+The failure coincides with Windows finishing OOBE. At that moment Windows:
+
+- deletes `defaultuser0` — Security event **4726**, its own "OOBE is done" marker;
+- **disables the built-in Administrator** — Security event **4725**, subject and target both
+  the built-in account;
+- deletes a local account the answer file created (`packer`) — build 15 authenticated as it
+  successfully, then got `0xC0000064`, "user name does not exist";
+- scrubs `C:\Windows\Panther`;
+- removes scheduled tasks and directories created during the window (this is what kept eating
+  `scripts/05-keep-admin-enabled.ps1`'s task and `C:\ProgramData\mutaspace`).
+
+Timings, all boot-relative and **variable** — this is why it looked random for so long:
+
+| build | final boot | account disabled | delta |
+|---|---|---|---|
+| 12 | 20:41:34 | 20:46:18 | +4m44s |
+| 11 | 20:13:54 | 20:18:42 | +4m48s |
+| 14 | 21:28:46 | 21:34:13 | +5m27s |
+| 9  | 19:02:49 | 19:11:09 | +8m20s |
+| 13 | 21:01:55 | 21:12:20 | +10m25s |
+
+Grep signature: the **Windows Search service start type flips in the same second as the 4725**,
+every time.
+
+#### Six theories, all DISPROVED against the running guest — do not re-test these
+
+1. **AutoLogon `LogonCount` hitting 0.** Raised 2 → 5; confirmed by reading the mounted build
+   CD *inside the guest* that it really carried 5. Still disabled.
+2. **`90-cleanup` deleting the Winlogon autologon values.** Moved to `99-sysprep`; Windows
+   then deleted the values itself at the same moment.
+3. **The `cloudbase-init` local admin the MSI created.** Removed with
+   `RUN_SERVICE_AS_LOCAL_SYSTEM=1`, confirmed absent from `Get-LocalUser`. Still disabled.
+4. **Defender quarantining the watchdog.** No detections in `Get-MpThreatDetection` or the
+   Defender operational log.
+5. **The reboot.** `windows-restart` removed entirely — still disabled, just later.
+6. **Doing less work inside the window.** Build 14 staged every script within 90 seconds of
+   boot; the uploads succeeded and the next shell still failed.
+
+#### ⚠️ The unresolved contradiction — start here
+
+Build 14 is the one that does not fit. Its four uploads finished at **21:30:26** and the
+account was not disabled until **21:34:13**, yet the very next shell creation failed. So at
+least one 401 happened roughly four minutes BEFORE the account died, which means the disable
+may be a *correlated symptom* rather than the cause. Anyone picking this up should get a
+`PACKER_LOG=1` capture of the WinRM exchange at the moment of first failure before theorising
+further — that is the evidence nobody has yet.
+
+#### ⛔ Do NOT retry: moving the WinRM bootstrap to SetupComplete.cmd
+
+Tried in `87c0061` and `58763a7`, to make WinRM appear only after OOBE finishes. It made
+things strictly worse and cost two builds, one of them a 15-hour overnight run.
+
+**The rule that bit: a `RunSynchronousCommand` that exits non-zero ABORTS WINDOWS SETUP.**
+The console shows *"The computer restarted unexpectedly or encountered an unexpected error"* —
+identical to the malformed-answer-file symptom, but the XML is fine. Setup never completes,
+WinRM never appears, and Packer waits out its timeout.
+
+The first version copied `setup.ps1` off the seed CD during specialize; the CD does not
+reliably have a drive letter in that pass, so `Copy-Item` threw and took Setup with it. The
+second version touched no CD, was wrapped in try/catch with an explicit `exit 0`, and was
+verified on dc-01 to run clean and emit exactly the right file — **and Setup still aborted.**
+Unexplained. Suspect `%` expansion in the `<Path>` element, which Setup processes before the
+command runs.
+
+`FirstLogonCommands` is restored, because it demonstrably works: every build that ever reached
+WinRM did so through it.
+
+#### What IS fixed and proven, so nobody redoes it
+
+- Install completes, OOBE completes, WinRM connects.
+- **Sysprep runs correctly** (build 10) — the `/unattend:` quoting fix is proven on the wire.
+- **BitLocker auto-encryption is genuinely prevented** — proven by a build that completed OOBE
+  and left the partition plain NTFS, where the pre-fix one showed `TYPE="BitLocker"`.
+- `SkipRearm=1` is injected into the generalize pass for `0xC004F075` — written and dry-run on
+  dc-01, but **never yet exercised in a real build**.
+- `99-sysprep.ps1` has a 15-minute deadline that kills sysprep and prints `setuperr.log` into
+  the Packer log, so a hang is legible without mounting the disk.
+
+#### The pragmatic alternative
+
+`tpl-win-server-2022` (9002) is built and working. Pointing the Windows endpoint role at it
+unblocks the Windows half of `60-endpoints` and a fourth Wazuh agent today, at the cost of the
+endpoint being a server rather than a client SKU.
 
 ### Reading the disk when a build fails — proven procedure
 

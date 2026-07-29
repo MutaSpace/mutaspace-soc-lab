@@ -364,63 +364,6 @@
           <Description>Allow OOBE to complete without a network or a Microsoft account</Description>
           <Path>reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
-        <!--
-          STAGE THE WinRM BOOTSTRAP AS SetupComplete.cmd. This is why Packer can
-          connect at all, and WHEN it connects is the whole point.
-
-          It used to run from FirstLogonCommands, which fires during OOBE. That is
-          what made fifteen builds fail. Windows does its end-of-OOBE housekeeping
-          several minutes after Packer has already connected and started working,
-          and that housekeeping:
-
-            * disables the built-in Administrator,
-            * deletes the accounts OOBE was using - including, apparently, one the
-              answer file created,
-            * scrubs C:\Windows\Panther,
-            * removes scheduled tasks and directories created during the window.
-
-          After it, no new WinRM shell can be created: every attempt returns
-          "Couldn't create shell: http response error: 401". A shell already open
-          survives, which is why the failure always landed on whichever upload came
-          next rather than on the work in flight.
-
-          The marker in the Security log is event 4726 deleting `defaultuser0` -
-          Windows' own "OOBE is finished" signal. In build 15 that landed at
-          21:55:45, about a minute before Packer's next upload was refused.
-
-          SetupComplete.cmd runs AFTER Setup and OOBE have finished, as SYSTEM. So
-          WinRM does not exist until the machine has stopped rearranging itself, and
-          Packer connects to something stable instead of racing it.
-
-          ⚠️ TWO RULES FOR THIS COMMAND, both learned the hard way.
-
-          1. IT MUST NOT TOUCH THE CD. The first version copied setup.ps1 off the
-             seed CD here. During specialize the CD does not reliably have a drive
-             letter, so Copy-Item failed. Which leads to rule 2.
-
-          2. IT MUST NOT FAIL. A RunSynchronousCommand that exits non-zero ABORTS
-             WINDOWS SETUP - the console shows "The computer restarted unexpectedly
-             or encountered an unexpected error", Setup never finishes, WinRM never
-             appears, and Packer sits at "Waiting for WinRM" until its timeout. That
-             is indistinguishable from a dozen other faults and cost a 15-hour
-             overnight run. Hence try/catch and an explicit `exit 0`.
-
-          So specialize does the one thing that cannot fail: write a .cmd file. The
-          CD is located later, by that .cmd, at SetupComplete time - by which point
-          Windows is fully up and drive letters exist. The batch `for` loop searches
-          the likely letters rather than assuming one.
-
-          No & < or > characters below - they are XML metacharacters and would need
-          entity-escaping. This file has been broken that way twice. That is also why
-          the generated .cmd does NOT redirect its output anywhere: `1) file 2)1`
-          would need both, and setup.ps1 already writes its own transcript to
-          C:\Windows\Temp\packer-bootstrap.log. Read that file if WinRM never shows up.
-        -->
-        <RunSynchronousCommand wcm:action="add">
-          <Order>3</Order>
-          <Description>Stage the WinRM bootstrap to run after OOBE completes</Description>
-          <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { New-Item -Path 'C:\Windows\Setup\Scripts' -ItemType Directory -Force | Out-Null; $lines = @('@echo off', 'for %%d in (D E F G H I J K) do if exist %%d:\setup.ps1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File %%d:\setup.ps1'); Set-Content -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -Value $lines -Encoding ASCII } catch { }; exit 0"</Path>
-        </RunSynchronousCommand>
       </RunSynchronous>
     </component>
 
@@ -628,22 +571,29 @@
         current session without needing the call operator.
       -->
       <!--
-        THERE IS NO FirstLogonCommands HERE ANY MORE. Do not add the WinRM bootstrap
-        back into it.
+        WinRM comes up from here, at first logon. This is the arrangement that has
+        actually worked: every build that reached WinRM did so through this command.
 
-        It used to run setup.ps1 from here, at first logon, which happens DURING
-        OOBE. Packer would connect while Windows was still finishing setup, and a few
-        minutes later the end-of-OOBE housekeeping would disable the built-in
-        Administrator, delete the build account and refuse every further WinRM shell
-        with a 401. That cost fifteen builds. The same script is now staged as
-        C:\Windows\Setup\Scripts\SetupComplete.cmd by the specialize pass above, so
-        WinRM only comes up once Windows has finished.
+        ⚠️ IT RUNS DURING OOBE, and that has consequences - see the OOBE-completion
+        section in docs/iac/resume-here.md. Moving it to SetupComplete.cmd was tried
+        (87c0061, 58763a7) to avoid them and made things strictly worse: the
+        specialize command that staged the .cmd aborted Windows Setup outright, so
+        WinRM never appeared at all and two builds were lost. Do not retry that
+        without reading the write-up first.
 
-        If WinRM never appears and the build sits at "Waiting for WinRM to become
-        available", the staging command in specialize is the first thing to check:
-        read C:\Windows\Temp\packer-bootstrap.log and see whether
-        C:\Windows\Setup\Scripts\ contains both files.
+        The command deliberately contains no & < or > characters - those are XML
+        metacharacters and would have to be entity-escaped, which is a classic source
+        of answer files that parse but do nothing. Dot-sourcing runs the script in the
+        current session without needing the call operator.
       -->
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Bootstrap WinRM and the QEMU guest agent for Packer</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq '${seed_cd_label}' } | Select-Object -First 1; . ($v.DriveLetter + ':\setup.ps1')"</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
     </component>
   </settings>
 </unattend>
