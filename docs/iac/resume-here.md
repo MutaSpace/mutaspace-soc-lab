@@ -14,9 +14,9 @@ public in git history) and `scripts/rotate-lab-credentials.sh` now exists; pre-c
 the scanner actually runs; `var.pve_node` + a plan-time node check make the repo work on another
 instructor's host; the stale "21-add/21-destroy" tofu warning was false and the real drift is now
 APPLIED (`plan` returns no changes); getting-started.md gained the three steps a fresh instructor
-cannot skip. **Win11 template (9003) is now BUILT (2026-07-29)** — see the Win11 section below for
-the recipe. Remaining: clone `win-client-01` (VMID 105), run the Windows half of `60-endpoints`
-(Sysmon + 4625 auditing) and `50-wazuh-agents` for it.**
+cannot skip. **Win11 template (9003) is BUILT and win-client-01 is DEPLOYED, domain-joined and
+monitored (2026-07-29)** — see the Win11 section for the build recipe and the win-client-01 section
+for what a fresh clone still needs by hand.**
 
 ---
 
@@ -510,6 +510,77 @@ file being *deleted* at OOBE completion; anything that removes scheduled tasks a
 shells while a running one survives". The public Packer 401 issues were bulk-closed as
 stale in 2025 and `winrmcp` is unmaintained, so there is no upstream fix pending. If those
 symptoms recur, they are still uncharacterised.
+
+### win-client-01 (VMID 105) — DEPLOYED, DOMAIN-JOINED, MONITORED (2026-07-29)
+
+The first machine ever cloned from 9003. Live state, all verified rather than assumed:
+
+| Check | State |
+|---|---|
+| `tofu apply` | `3 to add, 0 to change, 0 to destroy` — nothing else in the lab touched |
+| VM | 105 running, guest agent up, DHCP reservation **10.10.10.51** honoured |
+| Identity | renamed `WIN-CLIENT-01`, `PartOfDomain=True` on `mutaspace.local` |
+| Sysmon + 4625 auditing | installed and running (`60-endpoints`) |
+| Wazuh agent | **ID 004, Active** on the manager — five agents total |
+| Re-run idempotency | `60-endpoints` second pass: ubuntu-app-01 `changed=0`, no failures |
+
+`lab.yaml` now has `win-client-01: enabled` (the `enabled: false` guard is gone), and
+`tofu/tests/enabled_flag.tftest.hcl` lost its "at least one machine is disabled"
+assertion — on the instruction that assertion itself carried. `tofu test` is 14/14.
+
+**`learner_endpoints.win-client` is deliberately still `enabled: false`.** Those are
+LINKED clones: creating them pins template 9003 so it cannot be rebuilt or deleted while
+any of them exists. Leave them off until the template is settled.
+
+#### ⚠️ A FRESH CLONE IS NOT MANAGEABLE UNTIL SOMETHING FIXES IT. Codify this.
+
+This is the biggest open gap in the Windows path, and it is a real reproducibility hole,
+not a nuisance. Straight after cloning, VM 105 had:
+
+- hostname `DESKTOP-FEET0KV` — **Cloudbase-Init never consumed the metadata OpenTofu wrote**,
+  so the hostname, and anything else that file carries, was ignored;
+- the built-in **Administrator disabled with no password** — correct for the Camp B template
+  (see the Win11 section), but it means no account can log in;
+- **WinRM stopped** — so `bootstrap_windows`, which connects as `Administrator` over NTLM on
+  5985, could not reach it at all.
+
+It was unblocked BY HAND through the QEMU guest agent, which runs as SYSTEM and needs no
+credentials — the same escape hatch used for dc-01 in design gap 1:
+
+```bash
+# builds a PowerShell payload that sets+enables Administrator and turns WinRM on,
+# then runs it inside the guest without any working login
+qm guest exec 105 --timeout 150 -- powershell -EncodedCommand <base64-utf16le>
+```
+
+Contents: `Set-LocalUser -Password` + `Enable-LocalUser` for Administrator,
+`winrm quickconfig`, `LocalAccountTokenFilterPolicy=1`, a 5985 inbound firewall rule, and
+`Set-Service WinRM -StartupType Automatic`. After that
+`ansible win-client-01-bootstrap -m win_ping` returned **pong** and everything else ran
+normally.
+
+⚠️ That command puts the password in the Proxmox host's process list. Acceptable once in a
+lab; not acceptable as the documented path.
+
+**The fix is to make first boot do this**, most likely via the Cloudbase-Init `Unattend.xml`
+that 99-sysprep hands to sysprep, so a clone comes up with a known local admin and WinRM
+listening. Until then, a from-scratch deploy of the Windows workstation is NOT hands-off,
+and getting-started.md should say so.
+
+#### Playbook order matters: 50 BEFORE 60
+
+`60-endpoints` finishes by adding the Sysmon channel to the Wazuh agent's `ossec.conf`,
+which does not exist until `50-wazuh-agents` has installed the agent. Running 60 first
+gives `ok=9 changed=6 failed=1` with
+`Cannot find path 'C:\Program Files (x86)\ossec-agent\ossec.conf'`. The numbering encodes
+the dependency; follow it. Re-running 60 afterwards clears it (`ok=12 changed=2 failed=0`).
+
+#### Known, expected failure in 50-wazuh-agents
+
+Its closing assert wants `kali-01`, `nlp-01` and `untrusted-01` registered. Those are
+`started: false` by design, so the play reports `wazuh-01 ... failed=1` while every host it
+could actually reach succeeds. Scope it with
+`--limit "wazuh_manager:<host>"` to avoid the noise, or power the research plane on first.
 
 ### Reading the disk when a build fails — proven procedure
 

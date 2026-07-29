@@ -86,13 +86,20 @@ run "a_disabled_machine_is_not_built" {
     error_message = "A machine marked enabled:false in lab.yaml was still planned."
   }
 
-  # And the disabled list is not silently empty, which would make the check above
-  # vacuous. This is the assertion that fails when someone re-enables everything
-  # without updating this test.
-  assert {
-    condition     = length(output.disabled_vms) > 0
-    error_message = "Expected at least one disabled machine during bring-up. If the lab is now fully built, delete this assertion rather than weakening the one above."
-  }
+  # The "and the disabled list is not silently empty" assertion that used to sit
+  # here has been DELETED, on the instruction it carried: "If the lab is now fully
+  # built, delete this assertion rather than weakening the one above."
+  #
+  # That day came on 2026-07-29. Template 9003 (Windows 11) was finally built, so
+  # win-client-01 - the last core machine held back by a missing template - is
+  # enabled, and output.disabled_vms is now empty. The assertion above is
+  # consequently vacuous rather than wrong: it still fails correctly the moment
+  # anything is disabled again, which is the case it exists for.
+  #
+  # Note that `learner_endpoints.win-client` remains enabled:false, deliberately -
+  # those are LINKED clones and pin template 9003 so it cannot be rebuilt while
+  # they exist. They do not appear in disabled_vms, which is why this assertion
+  # went empty even though something in lab.yaml is still switched off.
 }
 
 # ---------------------------------------------------------------------------

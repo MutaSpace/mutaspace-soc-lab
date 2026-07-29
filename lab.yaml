@@ -422,7 +422,9 @@ vms:
   # in-place conversion to a full edition. A rebuild is the only path out.
   win-client-01:
     vm_id: 105
-    enabled: false  # template 9003 (Windows 11) not built - needs a registration-gated ISO
+    # Enabled 2026-07-29: template 9003 is built. It still needs a registration-gated
+    # ISO to REBUILD - see packer/win11-client/README.md - so an instructor without
+    # that media should set this back to false rather than fail a deploy.
     lifecycle: reprovisioned
     template: win11-client
     guest: windows
