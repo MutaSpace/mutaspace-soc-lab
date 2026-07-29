@@ -798,28 +798,18 @@ build {
   # # nothing depends on it. The script and its findings are kept for whoever   #
   # # meets this next.                                                          #
   # ###########################################################################
+  # ONE upload, not four. Each `file` provisioner opens its own WinRM shell, and
+  # shells are the scarce resource here - see the note on the provisioner below.
+  # Build 19 spent four of them on individual scripts and ran out before it got to
+  # the one that matters. A directory upload moves the whole set in a single shell.
+  #
+  # The destination MUST stay under a `packer-` name: 90-cleanup.ps1 empties
+  # C:\Windows\Temp except `packer-*` and `script-*`, so anything else would delete
+  # 99-sysprep.ps1 out from under the run that is about to execute it.
   provisioner "file" {
     only        = ["proxmox-iso.win11-client"]
-    source      = "${path.root}/scripts/00-virtio-guest-tools.ps1"
-    destination = "C:/Windows/Temp/packer-00-virtio-guest-tools.ps1"
-  }
-
-  provisioner "file" {
-    only        = ["proxmox-iso.win11-client"]
-    source      = "${path.root}/scripts/10-cloudbase-init.ps1"
-    destination = "C:/Windows/Temp/packer-10-cloudbase-init.ps1"
-  }
-
-  provisioner "file" {
-    only        = ["proxmox-iso.win11-client"]
-    source      = "${path.root}/scripts/90-cleanup.ps1"
-    destination = "C:/Windows/Temp/packer-90-cleanup.ps1"
-  }
-
-  provisioner "file" {
-    only        = ["proxmox-iso.win11-client"]
-    source      = "${path.root}/scripts/99-sysprep.ps1"
-    destination = "C:/Windows/Temp/packer-99-sysprep.ps1"
+    source      = "${path.root}/scripts/"
+    destination = "C:/Windows/Temp/packer-scripts/"
   }
 
   # THE ONLY REMAINING SHELL. Everything the build does happens in here, in order,
@@ -861,9 +851,9 @@ build {
     ]
     inline = [
       "$ErrorActionPreference = 'Stop'",
-      "foreach ($s in @('packer-00-virtio-guest-tools', 'packer-10-cloudbase-init', 'packer-90-cleanup', 'packer-99-sysprep')) {",
+      "foreach ($s in @('00-virtio-guest-tools', '10-cloudbase-init', '90-cleanup', '99-sysprep')) {",
       "  Write-Host \"=== running $s.ps1 ===\"",
-      "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Windows\\Temp\\$s.ps1\"",
+      "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Windows\\Temp\\packer-scripts\\$s.ps1\"",
       "  if ($LASTEXITCODE -ne 0) { throw \"$s.ps1 exited $LASTEXITCODE\" }",
       "}"
     ]
