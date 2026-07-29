@@ -246,6 +246,39 @@ resource "proxmox_virtual_environment_vm" "this" {
 
   lifecycle {
     # -------------------------------------------------------------------------
+    # ⚠️ CLOUD-INIT USER-DATA MUST NOT REBUILD A RUNNING MACHINE
+    # -------------------------------------------------------------------------
+    # user_data_file_id is ForceNew on this provider, and the snippet's file
+    # resource is replaced whenever the rendered template changes. Without this
+    # ignore_changes, EDITING A SHARED TEMPLATE MARKS EVERY GUEST THAT USES IT FOR
+    # DESTRUCTION.
+    #
+    # That is not hypothetical. On 2026-07-29 a one-line change to
+    # templates/user-data-windows.tftpl produced:
+    #
+    #   Plan: 4 to add, 0 to change, 4 to destroy
+    #   # module.vm["dc-01"].proxmox_virtual_environment_vm.this must be replaced
+    #
+    # dc-01 is the forest root. Replacing it destroys Active Directory, DNS, every
+    # member's domain trust and every Wazuh enrolment - a full lab rebuild, from a
+    # plan whose headline number looks small and symmetrical.
+    #
+    # Ignoring the change is CORRECT, not a workaround: cloud-init user-data is
+    # consumed once, at first boot. A running machine has already read it, and
+    # re-reading it is not what recreating the VM would achieve. New machines still
+    # get the current snippet, because a create is not a change.
+    #
+    # To deliberately re-provision a guest against new user-data, ask for it
+    # explicitly and by name:
+    #
+    #   tofu -chdir=tofu apply -replace='module.vm["win-client-01"].proxmox_virtual_environment_vm.this'
+    #
+    # which is a targeted, reviewable act rather than a side effect of a text edit.
+    ignore_changes = [
+      initialization[0].user_data_file_id,
+    ]
+
+    # -------------------------------------------------------------------------
     # The placement guard
     # -------------------------------------------------------------------------
     # vmbr0 carries the operator's real home network and the Proxmox management
