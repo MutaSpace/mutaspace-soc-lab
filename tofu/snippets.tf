@@ -64,6 +64,15 @@ resource "proxmox_virtual_environment_file" "user_data" {
         # The firewall is the lab's only time source. Which leg of it depends on
         # which plane the guest is on.
         ntp_server = local.network_meta[local.vm_network[each.key]].gateway
+
+        # Enables the built-in Administrator at first boot so Ansible can connect.
+        # Null renders as an empty string, which the script detects and warns about
+        # rather than failing - see the block around it in the template.
+        #
+        # NOT coalesce(): it rejects empty strings as well as nulls, so it blows up
+        # with "no non-null, non-empty-string arguments" on exactly the unset case
+        # this is meant to tolerate. The offline test suite caught that immediately.
+        windows_admin_password = var.windows_admin_password == null ? "" : var.windows_admin_password
       }
       ) : templatefile(
       "${path.module}/templates/user-data-linux.tftpl",

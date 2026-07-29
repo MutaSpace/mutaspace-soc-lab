@@ -17,15 +17,38 @@
 #     Setting it again here would fight that.
 #   * The username. Proxmox's `ciuser` is ignored on Windows entirely; the account
 #     Cloudbase-Init manages is named in cloudbase-init.conf inside the image.
-#   * Any password. Credentials belong to Ansible over WinRM, not to a file that
-#     lands on a readable virtual drive.
+#   * The domain admin password, and every credential Ansible uses afterwards.
+#
+#   ⚠️ ONE PASSWORD IS HERE, AND IT HAS TO BE. The built-in Administrator password is
+#   set below from var.windows_admin_password, because the Windows templates are
+#   sealed with no Administrator password and client Windows disables that account at
+#   the end of OOBE - so without this a clone has NO account Ansible can authenticate
+#   as, and the machine can only be rescued by hand through the QEMU guest agent.
+#   That is exactly what happened to win-client-01 on 2026-07-29.
+#
+#   It lands in plaintext in a snippet on the Proxmox host, the same exposure the
+#   Packer answer file already has. It is a build/bootstrap credential; rotate it with
+#   scripts/rotate-lab-credentials.sh. An earlier version of this comment claimed no
+#   password would ever be here - that was true and is no longer.
 #   * The domain join, Sysmon, the Wazuh agent. All Ansible - all of them need to
 #     be re-runnable against a machine that already exists.
 #
 # Generated for: ${hostname}
 # ---------------------------------------------------------------------------
 
-$ErrorActionPreference = 'Stop'
+# ⚠️ 'Continue', NOT 'Stop'. One failing step must not abandon the rest.
+#
+# This script used to run with 'Stop'. On win-client-01's first boot it logged
+# exactly two lines - "starting" and "Setting DNS" - and then died, because the very
+# next step calls Get-NetConnectionProfile, which throws on a freshly booted machine
+# while Network Location Awareness is still deciding what the network is. Everything
+# after it was skipped, INCLUDING THE WinRM CONFIGURATION, so the machine came up
+# unreachable and had to be rescued by hand through the QEMU guest agent.
+#
+# Each section below is wrapped in Invoke-Step, which logs a failure and carries on.
+# A machine that gets DNS wrong is a nuisance; a machine with no WinRM is a machine
+# no playbook can fix.
+$ErrorActionPreference = 'Continue'
 $log = 'C:\Windows\Temp\mutaspace-cloudinit.log'
 
 function Write-Step {
@@ -35,7 +58,93 @@ function Write-Step {
     Write-Output $line
 }
 
+function Invoke-Step {
+    param([string] $Name, [scriptblock] $Body)
+    Write-Step ("=== {0}" -f $Name)
+    try {
+        & $Body
+    } catch {
+        Write-Step ('WARNING: step "{0}" failed: {1}' -f $Name, $_.Exception.Message)
+        Write-Step 'WARNING: continuing - later steps may still be essential.'
+    }
+}
+
 Write-Step 'MutaSpace lab first-boot configuration starting for ${hostname}'
+
+# ---------------------------------------------------------------------------
+# CONNECTIVITY FIRST. Everything below this point is recoverable by Ansible; this
+# block is what MAKES the machine reachable by Ansible, so it runs before anything
+# that has ever been observed to throw.
+# ---------------------------------------------------------------------------
+Invoke-Step 'Network profile -> Private' {
+    # WinRM refuses to configure itself on an interface Windows considers Public, and
+    # a freshly cloned client SKU calls every new network Public. This is the specific
+    # reason WinRM bootstrap "works on Server 2022 and hangs on Windows 11" - the
+    # server SKU is more permissive. Flipping the profile first is not optional, which
+    # is why it leads the connectivity block.
+    #
+    # It is also the step that killed the first clone: on a freshly booted machine
+    # Get-NetConnectionProfile throws while Network Location Awareness is still
+    # deciding, and under the old 'Stop' preference that abandoned the whole script
+    # before WinRM was ever configured. Hence the retry, and hence Invoke-Step.
+    $deadline = (Get-Date).AddMinutes(3)
+    while ($true) {
+        try {
+            $profiles = @(Get-NetConnectionProfile -ErrorAction Stop)
+            if ($profiles.Count -gt 0) {
+                foreach ($p in $profiles) {
+                    if ($p.NetworkCategory -ne 'DomainAuthenticated') {
+                        Write-Step ('Setting network category to Private on {0}' -f $p.InterfaceAlias)
+                        Set-NetConnectionProfile -InterfaceIndex $p.InterfaceIndex -NetworkCategory Private
+                    }
+                }
+                break
+            }
+        } catch {
+            Write-Step ('Network profile not ready yet ({0})' -f $_.Exception.Message)
+        }
+        if ((Get-Date) -ge $deadline) {
+            Write-Step 'WARNING: gave up waiting for a network profile; WinRM config may fail.'
+            break
+        }
+        Start-Sleep -Seconds 5
+    }
+}
+
+Invoke-Step 'Local Administrator for the Ansible bootstrap connection' {
+    $adminPassword = '${windows_admin_password}'
+    if ([string]::IsNullOrEmpty($adminPassword)) {
+        Write-Step 'WARNING: no windows_admin_password supplied - leaving Administrator disabled.'
+        Write-Step 'WARNING: Ansible bootstrap_windows will NOT be able to reach this host.'
+    } else {
+        $sec = ConvertTo-SecureString $adminPassword -AsPlainText -Force
+        Set-LocalUser  -Name 'Administrator' -Password $sec
+        Enable-LocalUser -Name 'Administrator'
+        Write-Step ('Administrator enabled: {0}' -f (Get-LocalUser -Name 'Administrator').Enabled)
+    }
+}
+
+Invoke-Step 'WinRM' {
+    winrm quickconfig -quiet -force
+
+    # Without this, a local administrator authenticating remotely is filtered down to
+    # a standard-user token and everything fails with access denied.
+    New-ItemProperty `
+        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+        -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force | Out-Null
+
+    if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
+            -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow | Out-Null
+    }
+
+    # Delayed start: WinRM occasionally loses a race against the network stack on a
+    # freshly cloned machine and comes up before there is an interface to listen on.
+    sc.exe config WinRM start= delayed-auto | Out-Null
+    Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name WinRM -ErrorAction SilentlyContinue
+    Write-Step ('WinRM service: {0}' -f (Get-Service WinRM).Status)
+}
 
 # ---------------------------------------------------------------------------
 # DNS
@@ -52,54 +161,15 @@ Write-Step 'MutaSpace lab first-boot configuration starting for ${hostname}'
 # resolves at the firewall instead of the domain controller cannot find the
 # _ldap._tcp SRV records, and the domain join fails with an error that blames the
 # network.
-$dnsServers = @(${dns_servers})
-if ($dnsServers.Count -gt 0) {
-    Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
-        Write-Step ('Setting DNS on adapter {0} to {1}' -f $_.Name, ($dnsServers -join ', '))
-        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $dnsServers
+Invoke-Step 'DNS' {
+    $dnsServers = @(${dns_servers})
+    if ($dnsServers.Count -gt 0) {
+        Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            Write-Step ('Setting DNS on adapter {0} to {1}' -f $_.Name, ($dnsServers -join ', '))
+            Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $dnsServers
+        }
     }
 }
-
-# ---------------------------------------------------------------------------
-# Network profile
-# ---------------------------------------------------------------------------
-# WinRM refuses to configure itself on an interface Windows considers Public, and
-# a freshly cloned client SKU calls every new network Public. This is the specific
-# reason WinRM bootstrap "works on Server 2022 and hangs on Windows 11" - the
-# server SKU is more permissive. Flipping the profile first is not optional.
-Get-NetConnectionProfile | ForEach-Object {
-    if ($_.NetworkCategory -ne 'DomainAuthenticated') {
-        Write-Step ('Setting network category to Private on {0}' -f $_.InterfaceAlias)
-        Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
-    }
-}
-
-# ---------------------------------------------------------------------------
-# WinRM - the door Ansible comes in through
-# ---------------------------------------------------------------------------
-# HTTP on 5985 with NTLM, used only by the bootstrap inventory group that talks to
-# the local Administrator account before the machine is a domain member. Once the
-# machine has joined mutaspace.local, Ansible switches to Kerberos.
-#
-# NTLM cannot delegate, which is why every play that creates an Active Directory
-# object runs against dc-01 itself rather than reaching through another host.
-Write-Step 'Configuring WinRM'
-winrm quickconfig -quiet -force
-
-# Without this, a local administrator account authenticating remotely is filtered
-# down to a standard-user token and everything fails with access denied.
-New-ItemProperty `
-    -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-    -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force | Out-Null
-
-if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
-        -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow | Out-Null
-}
-
-# Delayed start: WinRM occasionally loses a race against the network stack on a
-# freshly cloned machine and comes up before there is an interface to listen on.
-sc.exe config WinRM start= delayed-auto | Out-Null
 
 # ---------------------------------------------------------------------------
 # Time
@@ -108,11 +178,12 @@ sc.exe config WinRM start= delayed-auto | Out-Null
 # and a machine that comes back believing it is two weeks ago fails Kerberos
 # because the skew exceeds five minutes. Domain members inherit their time from the
 # domain hierarchy once joined, so this only has to hold until then.
-Write-Step 'Setting timezone and time source'
-tzutil /s 'UTC' | Out-Null
-w32tm /config /manualpeerlist:"${ntp_server},0x8" /syncfromflags:manual /update | Out-Null
-Restart-Service w32time -ErrorAction SilentlyContinue
-w32tm /resync | Out-Null
+Invoke-Step 'Timezone and time source' {
+    tzutil /s 'UTC' | Out-Null
+    w32tm /config /manualpeerlist:"${ntp_server},0x8" /syncfromflags:manual /update | Out-Null
+    Restart-Service w32time -ErrorAction SilentlyContinue
+    w32tm /resync | Out-Null
+}
 
 # ---------------------------------------------------------------------------
 # Breadcrumb

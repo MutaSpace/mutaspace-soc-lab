@@ -160,6 +160,42 @@ try {
     Write-Host 'WARNING: PASSWORD. Remove it by hand before cloning, and fix this script.'
 }
 
+# ---------------------------------------------------------------------------
+# CLEAR CLOUDBASE-INIT'S PLUGIN EXECUTION STATE. Without this, every clone of this
+# template silently ignores its own cloud-init.
+#
+# Cloudbase-Init records "I have already run plugin X for instance Y" under
+#   HKLM:\SOFTWARE\Cloudbase Solutions\Cloudbase-Init
+# The plugins run during THIS build, find no metadata service, and complete
+# trivially - and that completed state is then baked into the image. On a clone,
+# Cloudbase-Init finds the Proxmox drive perfectly well and then skips everything:
+#
+#   Metadata service loaded: 'ConfigDriveService'
+#   Plugin 'SetHostNamePlugin' execution already done, skipping
+#   Plugin 'UserDataPlugin'   execution already done, skipping
+#
+# Observed on win-client-01, the first machine ever cloned from this template: it
+# came up named DESKTOP-FEET0KV with WinRM stopped and no usable local account, so
+# Ansible could not reach it and the machine had to be fixed by hand through the
+# QEMU guest agent. The user-data in tofu/templates/user-data-windows.tftpl was
+# correct all along - DNS, network category, WinRM, firewall, timezone - it simply
+# never executed.
+#
+# Deleting the key makes a clone treat itself as a new instance and run everything.
+# ---------------------------------------------------------------------------
+Write-Host '--- Resetting Cloudbase-Init plugin state so clones re-run it ---'
+$cbiState = 'HKLM:\SOFTWARE\Cloudbase Solutions\Cloudbase-Init'
+if (Test-Path $cbiState) {
+    Remove-Item -Path $cbiState -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $cbiState) {
+        Write-Host "WARNING: could not remove $cbiState - clones will SKIP their cloud-init."
+    } else {
+        Write-Host 'Cloudbase-Init plugin state cleared.'
+    }
+} else {
+    Write-Host 'No Cloudbase-Init plugin state present (nothing to clear).'
+}
+
 Write-Host '--- Credential hygiene (autologon values) ---'
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 foreach ($name in @('AutoAdminLogon', 'DefaultUserName', 'DefaultPassword', 'DefaultDomainName', 'AutoLogonCount')) {

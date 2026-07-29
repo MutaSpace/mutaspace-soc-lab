@@ -169,6 +169,36 @@ variable "lab_admin_password" {
   sensitive   = true
 }
 
+variable "windows_admin_password" {
+  description = <<-EOT
+    Password set on the built-in Administrator of every Windows guest at FIRST BOOT,
+    by the Cloudbase-Init user-data. This is what Ansible's `bootstrap_windows` group
+    authenticates with, so without it a freshly cloned Windows machine is
+    unreachable and has to be rescued by hand through the QEMU guest agent.
+
+    WHY IT IS NEEDED AT ALL. The Windows templates are sealed with no built-in
+    Administrator password (see the account-model note in
+    packer/win11-client/cd/Autounattend.xml.pkrtpl), and client Windows disables that
+    account at the end of OOBE. Nothing else in the clone path sets it: Proxmox's
+    `cicustom` carries user-data only, with no `cipassword` field for Cloudbase-Init's
+    password plugin to consume. This closes documented design gap 1.
+
+    Use the SAME value as MUTASPACE_WIN_ADMIN_PASSWORD in the Ansible environment, or
+    the bootstrap connection will fail with a credential that does not match.
+
+    Never put this in a committed file. TF_VAR_windows_admin_password, or a gitignored
+    terraform.tfvars. It is rendered into a snippet on the Proxmox host in plaintext -
+    the same exposure the answer file already has, and the reason
+    scripts/rotate-lab-credentials.sh exists.
+
+    Left null, the user-data skips the step and says so in the guest log, which keeps
+    a Linux-only deploy working without it.
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 # -----------------------------------------------------------------------------
 # Classroom capacity
 # -----------------------------------------------------------------------------

@@ -532,40 +532,54 @@ assertion — on the instruction that assertion itself carried. `tofu test` is 1
 LINKED clones: creating them pins template 9003 so it cannot be rebuilt or deleted while
 any of them exists. Leave them off until the template is settled.
 
-#### ⚠️ A FRESH CLONE IS NOT MANAGEABLE UNTIL SOMETHING FIXES IT. Codify this.
+#### First-boot bootstrap — CODIFIED 2026-07-29 (fix is committed, NOT yet exercised)
 
-This is the biggest open gap in the Windows path, and it is a real reproducibility hole,
-not a nuisance. Straight after cloning, VM 105 had:
+win-client-01 came up unmanageable — hostname `DESKTOP-FEET0KV`, built-in Administrator
+disabled with no password, WinRM stopped — and had to be rescued by hand through
+`qm guest exec`. Root cause, read out of the guest rather than guessed:
 
-- hostname `DESKTOP-FEET0KV` — **Cloudbase-Init never consumed the metadata OpenTofu wrote**,
-  so the hostname, and anything else that file carries, was ignored;
-- the built-in **Administrator disabled with no password** — correct for the Camp B template
-  (see the Win11 section), but it means no account can log in;
-- **WinRM stopped** — so `bootstrap_windows`, which connects as `Administrator` over NTLM on
-  5985, could not reach it at all.
+**The OpenTofu user-data ran and died after one step.** `C:\Windows\Temp\mutaspace-cloudinit.log`
+on the clone contained exactly two lines:
 
-It was unblocked BY HAND through the QEMU guest agent, which runs as SYSTEM and needs no
-credentials — the same escape hatch used for dc-01 in design gap 1:
-
-```bash
-# builds a PowerShell payload that sets+enables Administrator and turns WinRM on,
-# then runs it inside the guest without any working login
-qm guest exec 105 --timeout 150 -- powershell -EncodedCommand <base64-utf16le>
+```
+[...13:06:13...] MutaSpace lab first-boot configuration starting for win-client-01
+[...13:06:17...] Setting DNS on adapter Ethernet to 10.10.10.10
 ```
 
-Contents: `Set-LocalUser -Password` + `Enable-LocalUser` for Administrator,
-`winrm quickconfig`, `LocalAccountTokenFilterPolicy=1`, a 5985 inbound firewall rule, and
-`Set-Service WinRM -StartupType Automatic`. After that
-`ansible win-client-01-bootstrap -m win_ping` returned **pong** and everything else ran
-normally.
+The next statement calls `Get-NetConnectionProfile`, which **throws on a freshly booted
+machine** while Network Location Awareness is still deciding what the network is. The
+script ran under `$ErrorActionPreference = 'Stop'`, so that one throw abandoned
+everything after it — including the WinRM configuration. The bootstrap was fully written
+and correct; it simply never got that far.
 
-⚠️ That command puts the password in the Proxmox host's process list. Acceptable once in a
-lab; not acceptable as the documented path.
+Fixes, all committed:
 
-**The fix is to make first boot do this**, most likely via the Cloudbase-Init `Unattend.xml`
-that 99-sysprep hands to sysprep, so a clone comes up with a known local admin and WinRM
-listening. Until then, a from-scratch deploy of the Windows workstation is NOT hands-off,
-and getting-started.md should say so.
+- `tofu/templates/user-data-windows.tftpl` runs under `Continue`, and every section is
+  wrapped in an `Invoke-Step` helper that logs a failure and carries on. **Connectivity
+  comes first**: network profile → Private (with a 3-minute retry, because that is the
+  step that throws), then the Administrator account, then WinRM. DNS, time and the
+  marker file follow, and none of them can strand the machine any more.
+- **`var.windows_admin_password` is new** and closes design gap 1. The templates are
+  sealed with no built-in Administrator password and client Windows disables that
+  account at the end of OOBE, so nothing else in the clone path can create a login.
+  Left unset, the script warns loudly in the guest log and keeps going, so a Linux-only
+  deploy still works.
+  ⚠️ **Three variables must carry the same secret**: `PKR_VAR_windows_admin_password`
+  (Packer bakes), `TF_VAR_windows_admin_password` (OpenTofu sets at first boot),
+  `MUTASPACE_WIN_ADMIN_PASSWORD` (Ansible authenticates). `.envrc.example` wires the
+  third to the first two.
+- `99-sysprep.ps1` clears `HKLM:\SOFTWARE\Cloudbase Solutions\Cloudbase-Init` before
+  sealing. Cloudbase-Init records per-instance "plugin already ran" state, and a clone
+  that boots more than once otherwise logs
+  `Plugin 'UserDataPlugin' execution already done, skipping` and never retries. This was
+  a real second-order bug — it is why the failed first boot was never re-attempted —
+  though it was NOT the reason the first boot failed.
+
+**Verification status, stated plainly:** the rendered user-data and the modified
+99-sysprep both parse on real Windows (checked on dc-01), `tofu validate` and the 14
+offline tests pass. **None of it has been exercised by an actual clone.** Proving it
+needs a fresh Windows VM, and proving the sysprep half needs a template rebuild. The
+existing win-client-01 was fixed by hand and will not re-run any of this.
 
 #### Playbook order matters: 50 BEFORE 60
 

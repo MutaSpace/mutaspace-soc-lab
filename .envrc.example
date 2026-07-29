@@ -317,6 +317,23 @@ export PKR_VAR_upstream_dns="1.1.1.1"
 # PKR_VAR_windows_admin_password in section 6, until you rotate it.
 export MUTASPACE_WIN_ADMIN_PASSWORD="changeme"
 
+# ⚠️ THE SAME SECRET AGAIN, FOR OPENTOFU. These three must match or Windows breaks.
+#
+#   PKR_VAR_windows_admin_password   what Packer bakes into the build
+#   TF_VAR_windows_admin_password    what OpenTofu's cloud-init SETS on first boot
+#   MUTASPACE_WIN_ADMIN_PASSWORD     what Ansible AUTHENTICATES with
+#
+# The middle one is why a cloned Windows machine is reachable at all. The templates
+# are sealed with no built-in Administrator password and client Windows disables that
+# account when OOBE finishes, so the OpenTofu user-data is the only thing that
+# re-enables it and gives it a password. Leave TF_VAR_windows_admin_password unset and
+# a Windows clone comes up with WinRM listening and no account that can log in - it
+# then has to be rescued by hand through `qm guest exec`.
+#
+# Set it to the same value as MUTASPACE_WIN_ADMIN_PASSWORD above. Rotate all three
+# together with scripts/rotate-lab-credentials.sh.
+export TF_VAR_windows_admin_password="$MUTASPACE_WIN_ADMIN_PASSWORD"
+
 # MUTASPACE\Administrator after the forest exists. On a brand-new forest this
 # is the same secret as the one above, because promotion converts the local
 # account into the domain account.
