@@ -532,86 +532,89 @@ assertion — on the instruction that assertion itself carried. `tofu test` is 1
 LINKED clones: creating them pins template 9003 so it cannot be rebuilt or deleted while
 any of them exists. Leave them off until the template is settled.
 
-#### First-boot bootstrap — CODIFIED 2026-07-29 (fix is committed, NOT yet exercised)
+#### First-boot bootstrap — ✅ VERIFIED HANDS-OFF (2026-07-30)
 
-win-client-01 came up unmanageable — hostname `DESKTOP-FEET0KV`, built-in Administrator
-disabled with no password, WinRM stopped — and had to be rescued by hand through
-`qm guest exec`. Root cause, read out of the guest rather than guessed:
-
-**The OpenTofu user-data ran and died after one step.** `C:\Windows\Temp\mutaspace-cloudinit.log`
-on the clone contained exactly two lines:
+A clone now goes from nothing to domain-joined and monitored with **no manual step**.
+Proven on a machine that was never touched by hand:
 
 ```
-[...13:06:13...] MutaSpace lab first-boot configuration starting for win-client-01
-[...13:06:17...] Setting DNS on adapter Ethernet to 10.10.10.10
+template 9003 (build 25)
+  -> tofu clone, DHCP reservation 10.10.10.51 honoured
+  -> cloud-init enables Administrator from TF_VAR_windows_admin_password
+  -> template-registered task converges WinRM, then unregisters itself
+  -> template-registered task removes C:\Users\packer
+  -> ansible win-client-01-bootstrap -m win_ping  ->  pong
+  -> 30-domain-join   ok=6  changed=1  failed=0   (mutaspace.local)
+  -> 50-wazuh-agents  ok=7  changed=5  failed=0   (agent ID 005, Active)
+  -> 60-endpoints     ok=12 changed=8  failed=0   (Sysmon + 4625)
 ```
 
-The next statement calls `Get-NetConnectionProfile`, which **throws on a freshly booted
-machine** while Network Location Awareness is still deciding what the network is. The
-script ran under `$ErrorActionPreference = 'Stop'`, so that one throw abandoned
-everything after it — including the WinRM configuration. The bootstrap was fully written
-and correct; it simply never got that far.
-
-Fixes, all committed:
-
-- `tofu/templates/user-data-windows.tftpl` runs under `Continue`, and every section is
-  wrapped in an `Invoke-Step` helper that logs a failure and carries on. **Connectivity
-  comes first**: network profile → Private (with a 3-minute retry, because that is the
-  step that throws), then the Administrator account, then WinRM. DNS, time and the
-  marker file follow, and none of them can strand the machine any more.
-- **`var.windows_admin_password` is new** and closes design gap 1. The templates are
-  sealed with no built-in Administrator password and client Windows disables that
-  account at the end of OOBE, so nothing else in the clone path can create a login.
-  Left unset, the script warns loudly in the guest log and keeps going, so a Linux-only
-  deploy still works.
-  ⚠️ **Three variables must carry the same secret**: `PKR_VAR_windows_admin_password`
-  (Packer bakes), `TF_VAR_windows_admin_password` (OpenTofu sets at first boot),
-  `MUTASPACE_WIN_ADMIN_PASSWORD` (Ansible authenticates). `.envrc.example` wires the
-  third to the first two.
-- `99-sysprep.ps1` clears `HKLM:\SOFTWARE\Cloudbase Solutions\Cloudbase-Init` before
-  sealing. Cloudbase-Init records per-instance "plugin already ran" state, and a clone
-  that boots more than once otherwise logs
-  `Plugin 'UserDataPlugin' execution already done, skipping` and never retries. This was
-  a real second-order bug — it is why the failed first boot was never re-attempted —
-  though it was NOT the reason the first boot failed.
-
-**Verification status (updated 2026-07-29 after the rebuild):**
-
-The template was rebuilt — build 23, backed up first as
-`/var/lib/vz/dump/vzdump-qemu-9003-2026_07_29-13_40_41.vma.zst` (9.6 GB) — and the
-sysprep-side fixes are now PROVEN. It was also the **second consecutive clean build**,
-so the recipe is reproducible rather than a one-off. Build log:
+Guest evidence:
 
 ```
-GeneralizationState = 4 (image has been generalised)     <- corrected check, no false warning
-Sysprep_succeeded.tag present - generalize completed.    <- new hard assert
-Scheduling its removal on the first boot of any clone, via RunOnce.
-Removing packer-ps-env-vars-....ps1
+WinRM status:    Running
+WinRM listener:  ListeningOn = 10.10.10.51, 127.0.0.1, ::1, ...
+ensure task:     False          <- unregistered itself after succeeding
+C:\Users\packer: False
+ensure-winrm starting / listener up: ... / task unregistered - done
 ```
 
-Confirmed by mounting the finished template read-only: sysprep tag present, Panther
-scrubbed, Cloudbase-Init installed, and **no `packer-*` or `script-*` left in
-C:\Windows\Temp** (the previous template shipped two).
+#### ⭐ THE RULE THAT MAKES WINDOWS FIRST-BOOT WORK: PLACEMENT DECIDES SURVIVAL
 
-⚠️ **The Cloudbase-Init plugin-state clear found NOTHING to clear** —
-`No Cloudbase-Init plugin state present (nothing to clear)`. The key does not exist in
-a freshly built template, so the "baked-in plugin state" theory was WRONG. That matches
-what the guest log later showed: the real cause was the user-data dying at
-`Get-NetConnectionProfile`. The step is kept as cheap defence for an image that boots
-more than once during a build, but it is not the fix and should not be described as one.
+**Anything registered before OOBE completes is WIPED when it does.** Measured three
+times: the build-time watchdog's scheduled task and `C:\ProgramData\mutaspace` vanished
+mid-build, and a converge task registered from the clone's cloud-init was gone after the
+first reboot with its log never written.
 
-**STILL UNVERIFIED, and it needs a fresh clone to prove:**
+The OpenTofu user-data runs during the clone's **specialize** pass, which is on the wrong
+side of that line. It proved it by logging `$env:COMPUTERNAME` as **PKR-WIN11-TPL — the
+template's own name** — before OOBE had assigned an identity. At that moment there is no
+usable network either, so `winrm quickconfig` and even an explicit `winrm create Listener`
+both fail.
 
-- the reordered, fault-tolerant user-data actually bootstrapping a machine end to end
-  (Administrator enabled, WinRM listening, no `qm guest exec` rescue);
-- `var.windows_admin_password` reaching the guest — requires `TF_VAR_windows_admin_password`
-  to be exported, which `.envrc.example` now documents;
-- the `RunOnce` entry removing `C:\Users\packer` on first boot.
+So first-boot machinery must live **in the image**, registered by `99-sysprep.ps1` before
+sysprep. Two tasks now ship that way, and both are verified firing on a clone:
 
-The existing win-client-01 predates all of it and was fixed by hand, so it will not
-exercise any of this. Proving it means destroying and re-cloning VM 105 — which throws
-away a working, domain-joined, Wazuh-enrolled endpoint, so decide deliberately rather
-than casually.
+| Task | Job | Self-removes |
+|---|---|---|
+| `MutaSpaceEnsureWinRM` | wait for real IPv4, flip Public→Private, create the HTTP listener | yes, once listening |
+| `MutaSpaceRemovePackerProfile` | delete the leftover `C:\Users\packer` | yes, after deleting |
+
+⚠️ **The clone's cloud-init must NOT register either task.** An earlier version did, and
+its registration begins with `Unregister-ScheduledTask` — on a clone that DELETES the
+template's working task and replaces it with one that is then wiped. Strictly worse than
+doing nothing. The user-data now only does cheap idempotent work (service, firewall,
+token policy, DNS, time) and defers the listener to the template task.
+
+⚠️ **`RunOnce` does not work here.** It fires at the first *interactive* logon and nobody
+logs into a headless lab VM — the value sat unfired with the profile still present. Use an
+`AtStartup` SYSTEM task instead.
+
+⚠️ **No computer-name rename in the user-data.** It cannot stick from specialize (OOBE
+overwrote `win-client-01` with `DESKTOP-RA0MI6L`), and `30-domain-join` renames and joins
+in one `microsoft.ad.membership` operation anyway. Cloudbase-Init cannot do it either:
+`cicustom user=` ships user-data with no meta-data, so `SetHostNamePlugin` logs
+"Hostname not found in metadata".
+
+#### ⚠️ THREE VARIABLES MUST CARRY THE SAME WINDOWS PASSWORD
+
+They did NOT match on this host, and that alone would have made a clone unreachable:
+
+| Variable | Used by |
+|---|---|
+| `PKR_VAR_windows_admin_password` | Packer, during the build |
+| `TF_VAR_windows_admin_password` | OpenTofu cloud-init, sets it at first boot |
+| `MUTASPACE_WIN_ADMIN_PASSWORD` | Ansible, authenticates with it |
+
+`TF_VAR_` must equal the **Ansible** one. `.envrc.example` wires them together; compare
+with `sha256sum` before cloning rather than trusting that they match.
+
+#### Re-cloning a Windows guest: the stale artefacts are fine
+
+Destroying and re-cloning leaves an AD computer object and a Wazuh agent registration
+behind. Both resolved themselves on 2026-07-30: `microsoft.ad.membership` reused the
+existing computer object, and the agent re-enrolled as a NEW id (004 → 005) with the stale
+entry replaced. No manual cleanup was needed.
 
 #### Playbook order matters: 50 BEFORE 60
 
