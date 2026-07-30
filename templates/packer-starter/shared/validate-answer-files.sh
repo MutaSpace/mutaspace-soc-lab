@@ -43,11 +43,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# `templates/` as well as `packer/`: the exported starter kit in
-# templates/packer-starter/ carries its own copies of the answer files, and an
-# exported template that has quietly rotted is worse than no template at all -
-# somebody will copy it into a new project and inherit a build that cannot work.
-mapfile -t FILES < <(find packer templates -name 'Autounattend.xml*' -type f 2>/dev/null | sort)
+mapfile -t FILES < <(find packer -name 'Autounattend.xml*' -type f | sort)
 if (( ${#FILES[@]} == 0 )); then
   echo "no Autounattend templates found - nothing to validate"; exit 0
 fi

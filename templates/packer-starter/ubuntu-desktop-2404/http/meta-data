@@ -1,0 +1,23 @@
+# packer/<template>/http/meta-data
+#
+# THIS FILE IS INTENTIONALLY EMPTY OF DATA, AND IT MUST EXIST ANYWAY.
+#
+# NoCloud is a cloud-init datasource that is identified by the presence of TWO
+# files served together: `meta-data` and `user-data`. Packer's built-in HTTP
+# server serves both (see `http_content` in the .pkr.hcl beside this folder),
+# and the installer is pointed at them with `autoinstall ds=nocloud-net;s=...`
+# on the kernel command line.
+#
+# A 404 on meta-data does not produce an error. cloud-init concludes "this is
+# not a NoCloud datasource", moves on to the next one, finds nothing, and the
+# Ubuntu installer falls back to asking questions interactively - on a console
+# nobody is watching, until Packer's ssh_timeout finally expires. The failure
+# looks like a hang, not like a missing file, which is why this comment is
+# longer than the file it is in.
+#
+# Everything this lab wants to configure - hostname, user, SSH key, storage
+# layout - is in user-data.pkrtpl.hcl. Nothing needs to be here.
+#
+# YAML note: a file of nothing but comments parses to null, which cloud-init
+# treats as an empty mapping. That is the same result as a zero-byte file, with
+# the advantage that a reader learns why the file exists.

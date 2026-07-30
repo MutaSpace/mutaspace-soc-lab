@@ -1,0 +1,150 @@
+# common.pkrvars.hcl.example
+#
+# WHAT THIS IS
+#   The template for `packer/common.pkrvars.hcl`, the variable file shared by every Packer
+#   build in this repository. Copy it, edit the values, and pass it to every build:
+#
+#     cp packer/common.pkrvars.hcl.example packer/common.pkrvars.hcl
+#     packer build -var-file=../common.pkrvars.hcl .
+#
+# WHY THE REAL FILE IS GITIGNORED
+#   `packer/common.pkrvars.hcl` is listed in .gitignore. Nothing in THIS file is secret -
+#   there are no credentials here on purpose - but the node name and the management network
+#   are lab-identifying details, and the repository's documentation policy is that public
+#   documents use placeholders like <LAB_MANAGEMENT_IP> rather than real addresses.
+#
+#   Keeping the real file out of git also means that the day someone does paste a token in
+#   here by mistake, `git add -A` does not publish it.
+#
+# WHAT IS DELIBERATELY NOT IN THIS FILE
+#   Credentials. All four of them:
+#
+#     PKR_VAR_proxmox_username      packer@pve!buildtoken
+#     PKR_VAR_proxmox_token         the token secret (a bare UUID)
+#     PKR_VAR_build_password_hash   SHA-512 crypt hash for the build account
+#     PKR_VAR_ssh_public_key        the public half of the build key pair
+#
+#   Packer reads any variable `foo` from the environment variable `PKR_VAR_foo`, so secrets
+#   live in your shell (or in a gitignored .envrc via direnv) and never in a file. See
+#   packer/README.md for the full list and for the credential-shape trap that catches
+#   everyone who tries to share one variable between Packer and OpenTofu.
+
+# ---------------------------------------------------------------------------------------
+# Proxmox connection
+# ---------------------------------------------------------------------------------------
+
+# The API endpoint, WITH /api2/json.
+#
+# TRAP: the bpg OpenTofu provider wants the SAME host WITHOUT /api2/json. Two tools, two
+# spellings of one URL. Getting it wrong produces a 501 or a 404 rather than a clear error.
+proxmox_url = "https://<LAB_MANAGEMENT_IP>:8006/api2/json"
+
+# The Proxmox node that runs the build, as PROXMOX knows it.
+#
+# ★ YOU MUST CHANGE THIS. ★ The value below is a placeholder and matches no real
+# machine, which is deliberate - a build that forgets it fails immediately with a
+# 404 naming this string, rather than doing something surprising on a host that
+# happens to share a name.
+#
+# Find yours:  hostname          (on the Proxmox host)
+#              pvesh get /nodes  (or ask the API)
+#
+# Note OpenTofu takes the same value separately, via TF_VAR_pve_node or
+# pve_node in terraform.tfvars. Packer and OpenTofu do not share variables.
+proxmox_node = "CHANGEME-your-proxmox-node-name"
+
+# Proxmox installs with a self-signed certificate. `true` is the honest setting for a lab
+# on a private management network; set it to false once a real certificate is installed and
+# the endpoint above uses the name on that certificate.
+proxmox_insecure_tls = true
+
+# ---------------------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------------------
+
+# Where template disks are written.
+#
+# This is NOT a free choice. kali-01 and untrusted-01 are LINKED clones of tpl-kali-rolling,
+# and Proxmox cannot change the target storage of a linked clone - "it is a storage internal
+# feature". So the template has to be written to the same datastore its clones will live on.
+# On a default PVE install with ext4 that is the LVM-thin pool, `local-lvm`.
+storage_pool = "local-lvm"
+
+# Where ISO files live. On a default install this is the directory storage `local`, which is
+# carved out of the root logical volume.
+#
+# WATCH THIS ONE. `local` is roughly 96 GB on a default 2 TB install, and it is where ISOs,
+# snippets, snapshot RAM state and vzdump backups all land by default. The ISO shelf alone
+# is about 26 GB once the Windows media is on it. The thin pool is not the constraint here;
+# the root volume is.
+iso_storage_pool = "local"
+
+# ---------------------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------------------
+
+# The bridge Packer builds on. THIS IS A PER-HOST DECISION - read before copying.
+#
+# Two correct answers depending on YOUR host:
+#
+#   vmbr0  - if your management bridge already serves DHCP and has a route to the
+#            internet (the usual home/lab case). Simplest: no extra services, and
+#            the build VM is reachable from your workstation for the SSH/WinRM step.
+#            This is what the reference host uses. START HERE.
+#
+#   vmbr9  - only if vmbr0 is a bare WAN uplink with no DHCP, or you refuse to put an
+#            installing VM on the management network. vmbr9 is a host-masqueraded
+#            build plane with no physical port. It needs its own DHCP: run
+#            scripts/bootstrap-host.sh with --build-plane-dhcp, and make sure the
+#            workstation running Packer has a route to 10.99.0.0/24.
+#
+# NEVER vmbr1: it has no route out until fw-01 exists, so a build there hangs
+# fetching packages in a way that looks like an installer problem and is not.
+build_bridge = "vmbr0"
+
+# The address Packer advertises its autoinstall/seed HTTP server on, and what
+# {{ .HTTPIP }} expands to in the boot command.
+#
+# PIN THIS if your workstation has more than one network interface - and a laptop
+# running Docker, a VPN, or libvirt easily has ten. Packer auto-detects a SINGLE
+# address and has no idea which of your interfaces the lab can actually reach. If it
+# guesses a docker0 or a VPN-internal address, the guest requests the seed from an
+# address that does not exist on its network, cloud-init/subiquity times out, and the
+# installer silently drops to its interactive menu - which looks exactly like a broken
+# boot command and is not.
+#
+# Set it to the workstation address ON the network the build VM can route back to.
+# Leave it empty ONLY if the workstation has a single interface.
+#   the reference host reaches the lab over WireGuard, so this is a WireGuard address
+http_bind_address = ""
+
+# ---------------------------------------------------------------------------------------
+# Timeouts
+# ---------------------------------------------------------------------------------------
+
+# How long to wait for a single Proxmox API task.
+#
+# The plugin default is ONE MINUTE, which is not enough for an ISO upload, a disk import or
+# a template conversion. When this is too low the failure reads as an API timeout and gives
+# no hint that the operation itself was fine and merely slow.
+task_timeout = "10m"
+
+# ---------------------------------------------------------------------------------------
+# Media (optional but recommended)
+# ---------------------------------------------------------------------------------------
+
+# Pre-staged ISOs on the host. Set these to skip re-uploading gigabytes on every build,
+# and REQUIRED for anything that cannot be fetched by URL.
+#
+#   iso_file            = "local:iso/ubuntu-24.04.4-live-server-amd64.iso"
+#   virtio_win_iso_file = "local:iso/virtio-win-0.1.271.iso"
+#
+# The Windows and OPNsense ISOs are registration-gated or compressed, so they MUST be
+# uploaded to the host by hand - see docs/proxmox/iso-shelf.md. The two Windows templates
+# take their media as PER-TEMPLATE var-files (packer/win-*/*.pkrvars.hcl), NOT here,
+# because both use the variable name `windows_iso_file` for different ISOs and a shared
+# value would silently build the wrong OS.
+#
+# Left commented so a fresh clone still validates. Uncomment and point at real files.
+# iso_file            = "local:iso/ubuntu-24.04.4-live-server-amd64.iso"
+# virtio_win_iso_file = "local:iso/virtio-win-0.1.271.iso"

@@ -1,0 +1,56 @@
+# packer/win-server-2022/win-server.pkrvars.hcl.example
+#
+# WHAT THIS IS
+#   A worked example of the non-secret variables for the tpl-win-server-2022 build.
+#   Copy it to `win-server.pkrvars.hcl` and edit, then:
+#
+#     packer build -var-file=win-server.pkrvars.hcl packer/win-server-2022/
+#
+# ⚠️ DO NOT PUT CREDENTIALS IN THE COPY YOU CREATE.
+#
+#   `*.auto.pkrvars.hcl` files are loaded automatically by design, which makes
+#   `git add -A` a one-keystroke credential leak. This file is named WITHOUT `.auto.`
+#   for that reason -- you have to pass it explicitly, so you have to think about it.
+#
+#   Every secret in this build comes from the environment instead:
+#
+#     export PKR_VAR_proxmox_url='https://<LAB_MANAGEMENT_IP>:8006/api2/json'
+#     export PKR_VAR_proxmox_username='packer@pve!buildtoken'
+#     export PKR_VAR_proxmox_token='<the token UUID on its own>'
+#     export PKR_VAR_windows_admin_password='<a build-only Administrator password>'
+#
+#   Note the token shape. Packer wants the ID and the secret as TWO values.
+#   OpenTofu's bpg/proxmox provider wants ONE concatenated string of the form
+#   `terraform@pve!provider=<uuid>`. Sharing one variable between the two tools
+#   produces a silent 401 that looks like a permissions problem and is not.
+
+proxmox_node = "pve-node01"
+
+# Must be local-lvm: linked clones cannot cross datastores, so templates live on the
+# same datastore as the VMs cloned from them.
+storage_pool = "local-lvm"
+
+# Where the generated Autounattend seed ISO is written. Required, not optional.
+iso_storage_pool = "local"
+
+# The build plane. vmbr9 is masqueraded by the Proxmox host and is the only bridge
+# with a route out before fw-01 exists.
+build_bridge = "vmbr9"
+
+# ---------------------------------------------------------------------------
+# Media you uploaded by hand. Neither of these can be downloaded by this repository.
+# ---------------------------------------------------------------------------
+
+# Registration-gated. See README.md in this directory.
+windows_iso_file = "local:iso/windows-server-2022-eval.iso"
+
+# Pin 0.1.271. Not `stable-virtio`, not `latest-virtio` -- those are moving redirects.
+virtio_win_iso_file = "local:iso/virtio-win-0.1.271.iso"
+
+# Verify against YOUR ISO first:
+#   dism /Get-WimInfo /WimFile:D:\sources\install.wim
+# 2 is normally Standard with the Desktop Experience.
+windows_image_index = 2
+
+# Empty for evaluation media. Set a GVLK only if you are using Volume Licensing media.
+product_key = ""

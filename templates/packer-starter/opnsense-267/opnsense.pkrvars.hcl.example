@@ -1,0 +1,83 @@
+# packer/opnsense-267/opnsense.pkrvars.hcl.example
+#
+# WHAT THIS FILE IS
+#   A template for the non-secret, site-specific values of the OPNsense build.
+#   Copy it, fill it in, and pass it with -var-file. It is an .example on
+#   purpose: the real file is not committed.
+#
+#     cp opnsense.pkrvars.hcl.example opnsense.pkrvars.hcl
+#     $EDITOR opnsense.pkrvars.hcl
+#     packer build -var-file=opnsense.pkrvars.hcl .
+#
+# ⚠️ DO NOT NAME THE COPY *.auto.pkrvars.hcl.
+#   Packer loads .auto.pkrvars.hcl files WITHOUT being asked, and the
+#   repository's .gitignore ignores them for exactly that reason. Naming it
+#   plainly and passing -var-file keeps the loading explicit.
+#
+# ⚠️ NOTHING SECRET BELONGS IN THIS FILE, even the uncommitted copy.
+#   Secrets come from the environment so they never touch a file that could be
+#   staged by accident:
+#
+#     export PKR_VAR_proxmox_token='<api token uuid>'
+#     export PKR_VAR_root_password='<firewall root password>'
+#     export PKR_VAR_root_password_hash="$(openssl passwd -6 '<same password>')"
+#
+#   And, only if the WAN is statically addressed (the real management subnet is
+#   a secret; see README.md:347):
+#
+#     export PKR_VAR_wan_mode='static'
+#     export PKR_VAR_wan_address='<LAB_MANAGEMENT_IP>'
+#     export PKR_VAR_wan_gateway='<LAB_GATEWAY_IP>'
+
+# --- Proxmox --------------------------------------------------------------
+# Packer wants the endpoint WITH /api2/json. The bpg OpenTofu provider wants it
+# WITHOUT. That is not a typo in either place.
+proxmox_url      = "https://<LAB_MANAGEMENT_IP>:8006/api2/json"
+proxmox_username = "packer@pve!buildtoken"
+proxmox_node     = "pve-node01"
+
+# --- Storage --------------------------------------------------------------
+# storage_pool must be the datastore the CLONES live on. A linked clone cannot
+# change target storage, so a template built on `local` can never be
+# linked-cloned onto `local-lvm`.
+storage_pool     = "local-lvm"
+iso_storage_pool = "local"
+
+# The decompressed OPNsense DVD, already on the ISO shelf. See this directory's
+# README for the download / verify / bunzip2 recipe.
+opnsense_iso_file = "local:iso/OPNsense-26.7-dvd-amd64.iso"
+
+# --- Build plane ----------------------------------------------------------
+# vmbr9 exists because nothing can reach the internet until fw-01 routes, and
+# fw-01 is a VM. Note that 10.99.0.1 is the Proxmox host, NOT the firewall.
+build_bridge  = "vmbr9"
+build_address = "10.99.0.90"
+build_gateway = "10.99.0.1"
+upstream_dns  = "1.1.1.1"
+
+# --- Lab identity ---------------------------------------------------------
+fw_hostname = "fw-01"
+lab_domain  = "example.local"
+timezone    = "Etc/UTC"
+
+# --- Classroom size -------------------------------------------------------
+# MUST MATCH learner_count in tofu/variables.tf (default 3 in both).
+#
+# The DHCP reservations in the seeded config.xml are derived from lab.yaml, and
+# this is the only thing that derivation cannot work out for itself: how many of
+# the roster are actually being built. Set it too low and the last learners'
+# Windows clients take a pool address instead of the .60/.62/.64 the design
+# promises, and nothing anywhere reports a problem.
+#
+# A reservation for a learner who was never built is harmless --- Kea simply
+# never sees that MAC --- so if the two ever have to differ, make this the
+# larger of the two.
+learner_count = 3
+
+# --- Suricata (decision D-04) ---------------------------------------------
+# Detection only. Setting suricata_ips_mode = true switches the interfaces to
+# netmap and lets Suricata drop packets — do that as a deliberate exercise,
+# knowing a false positive can black-hole the classroom.
+suricata_enabled    = true
+suricata_ips_mode   = false
+suricata_interfaces = "lan,opt1"

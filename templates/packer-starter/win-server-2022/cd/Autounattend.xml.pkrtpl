@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  packer/win-server-2022/cd/Autounattend.xml.pkrtpl
+
+  WHAT THIS IS
+    The Windows Setup answer file for golden template 9002 (tpl-win-server-2022),
+    rendered by Packer's templatefile() and written to the root of a small generated
+    ISO labelled PACKERCD.
+
+  WHY IT EXISTS
+    Windows Setup is an interactive installer. Every question it would ask a human -
+    which disk, which edition, which keyboard, what password - has to be answered
+    here or the build sits at a dialog until Packer's winrm_timeout expires.
+
+  HOW WINDOWS FINDS IT
+    Setup scans the root of every removable, read-only volume for a file named
+    exactly "Autounattend.xml". No floppy drive is involved; the proxmox-iso builder
+    does not support floppies at all.
+
+  THE FOUR PASSES USED BELOW, IN THE ORDER WINDOWS RUNS THEM
+    windowsPE   - runs inside the boot environment, before anything is on disk.
+                  This is the ONLY place VirtIO drivers can be injected early enough
+                  to matter, and where the disk gets partitioned.
+    specialize  - runs after the image is applied, before first boot completes.
+                  Machine identity: computer name, time zone, RDP.
+    oobeSystem  - runs at the out-of-box experience. Local Administrator password,
+                  autologon, and the FirstLogonCommands that bootstrap WinRM so
+                  Packer can finally connect.
+
+  ⚠️ THE PASSWORD BELOW IS IN PLAINTEXT.
+    That is how Windows answer files work; there is no way around it for a password
+    Setup itself must consume. It is a build-only credential supplied from the
+    environment, the answer file's ISO is unmounted before the template is created,
+    C:\Windows\Panther is scrubbed in 90-cleanup.ps1, and sysprep /generalize clears
+    the LSA secret. Rotate the real Administrator password from Ansible anyway.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+  <!-- ==================================================================== -->
+  <!-- PASS 1: windowsPE                                                     -->
+  <!-- ==================================================================== -->
+  <settings pass="windowsPE">
+
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <SetupUILanguage>
+        <UILanguage>en-US</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+-->
+
+    <!--
+      THE POINT OF THIS WHOLE TEMPLATE.
+
+      Windows Setup draws its disk list from whatever storage controllers WinPE can
+      already see. WinPE ships no VirtIO driver, so on a virtio-scsi controller it
+      shows an empty list and the install dead-ends. The historical workaround - and
+      what the old hand-built dc-01 actually did - was to fall back to a SATA disk
+      and an E1000 NIC. That is emulated 1990s hardware carried forward forever.
+
+      PnpCustomizationsWinPE loads drivers INTO WinPE before the disk list is drawn,
+      so Setup sees the real controller and installs onto it. The template then
+      matches every other VM in the lab: scsi0 on virtio-scsi-single, virtio NIC.
+
+      Every plausible CD drive letter is listed for every driver directory because
+      drive letters in an answer file are positional and there is no way to run a
+      lookup script this early. Paths that do not exist are noted in setupact.log and
+      skipped, so the redundancy is free.
+    -->
+    <!--
+      NO PnpCustomizationsWinPE COMPONENT. This is deliberate and was expensive to
+      learn, so the reasoning is recorded rather than the code.
+
+      The obvious way to get VirtIO drivers into WinPE is
+      Microsoft-Windows-PnpCustomizationsWinPE with a DriverPaths list. On this
+      media (Windows Server 2022, SERVER_EVAL_x64FRE_en-us, March 2022) that
+      component causes Setup to abort at "Setup is starting" with:
+
+        Windows could not apply the Windows PE bootstrap setting specified in the
+        unattend answer file.
+
+      Everything the component needs was verified GOOD from a Shift+F10 shell in
+      the failing WinPE itself:
+
+        E: really is the virtio CD                         (dir E: -> vioscsi, NetKVM, ...)
+        the paths really exist                             (E:\vioscsi\2k22\amd64)
+        the driver really loads                            (drvload -> "Successfully loaded")
+        the disk really appears once it has                (wmic diskdrive get size -> 64420392960)
+
+      So the drivers, the path and the drive letter were all correct and the
+      component still refused to apply. Narrowing DriverPaths from sixteen
+      speculative entries to four correct ones did not help either; removing the
+      component was what let Setup proceed.
+
+      RunSynchronous below does the same job by calling the drvload that was
+      proven to work by hand. It runs at the start of windowsPE, before
+      DiskConfiguration needs a disk to partition.
+    -->
+
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+
+      <!--
+        GPT layout, because this VM boots OVMF/UEFI.
+
+        An MBR DiskConfiguration will not boot under OVMF. The required shape is:
+          1. EFI System Partition, FAT32, 260 MB  (the firmware reads this)
+          2. Microsoft Reserved (MSR), 16 MB      (no filesystem, no letter)
+          3. Windows, NTFS, everything else       (InstallTo points here)
+
+        Note InstallTo PartitionID = 3, not 1. Getting that wrong installs Windows
+        onto the 260 MB EFI partition and fails in a confusing way.
+
+        WillWipeDisk = true is safe here and only here: this is a fresh Packer VM
+        with one empty disk.
+      -->
+    <!--
+      NO DRIVER INJECTION IN THIS ANSWER FILE AT ALL. Both answer-file mechanisms
+      were tried and neither works on this media:
+
+        PnpCustomizationsWinPE  -> "Windows could not apply the Windows PE bootstrap
+                                    setting specified in the unattend answer file",
+                                    even with four paths verified to exist.
+        RunSynchronous drvload  -> runs too late. Setup has already enumerated
+                                    storage by then, so it still stops at
+                                    "Windows needs the driver for device
+                                    [Red Hat VirtIO SCSI pass-through controller]".
+
+      The drivers now arrive via $WinPEDriver$ instead - a folder at the ROOT of an
+      attached volume, which Windows Setup itself scans and drvloads before it draws
+      the disk list. No answer-file involvement, so nothing here can reject it.
+      That volume is built on the Proxmox host by scripts/build-winpe-driver-iso.sh
+      and attached as an extra CD by this template.
+    -->
+
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order>
+              <Type>EFI</Type>
+              <Size>260</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
+              <Type>Primary</Type>
+              <Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order>
+              <PartitionID>1</PartitionID>
+              <Label>System</Label>
+              <Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order>
+              <PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order>
+              <PartitionID>3</PartitionID>
+              <Label>Windows</Label>
+              <Letter>C</Letter>
+              <Format>NTFS</Format>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <!--
+            Which edition to install. See the windows_image_index variable for how to
+            confirm the index on YOUR ISO:
+              dism /Get-WimInfo /WimFile:D:\sources\install.wim
+          -->
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/INDEX</Key>
+              <Value>${image_index}</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <FullName>Example Lab</FullName>
+        <Organization>Example</Organization>
+%{ if product_key != "" ~}
+        <ProductKey>
+          <Key>${product_key}</Key>
+          <WillShowUI>OnError</WillShowUI>
+        </ProductKey>
+%{ else ~}
+        <!--
+          No ProductKey element at all. Evaluation media carries its own edition and
+          rejects a key. If you are installing from Volume Licensing media instead,
+          set the product_key variable to the appropriate GVLK.
+        -->
+%{ endif ~}
+      </UserData>
+
+      <EnableFirewall>true</EnableFirewall>
+      <EnableNetwork>true</EnableNetwork>
+    </component>
+  </settings>
+
+  <!-- ==================================================================== -->
+  <!-- PASS 2: specialize                                                    -->
+  <!-- ==================================================================== -->
+  <settings pass="specialize">
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <!--
+        A build-time placeholder name, NOT dc-01.
+
+        This is a generalised template. The real computer name is set per-VM after
+        cloning - by Cloudbase-Init from the OpenTofu initialization block, and then
+        authoritatively by Ansible when microsoft.ad promotes the machine. Baking
+        "dc-01" in here would give every clone of this template the same name.
+      -->
+      <ComputerName>${computer_name}</ComputerName>
+      <TimeZone>UTC</TimeZone>
+    </component>
+
+    <!--
+      RDP on. This is a lab whose whole purpose is that learners look at things, and
+      the Windows console through the Proxmox noVNC viewer is painful. UserAuthentication
+      0 disables Network Level Authentication, which is a real weakening - it is
+      accepted here because the machine sits behind fw-01 on an isolated lab LAN, and
+      because turning NLA back on is itself a worthwhile hardening exercise.
+    -->
+    <component name="Microsoft-Windows-TerminalServices-LocalSessionManager"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <fDenyTSConnections>false</fDenyTSConnections>
+    </component>
+
+    <component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <UserAuthentication>0</UserAuthentication>
+    </component>
+  </settings>
+
+  <!-- ==================================================================== -->
+  <!-- PASS 3: oobeSystem                                                    -->
+  <!-- ==================================================================== -->
+  <settings pass="oobeSystem">
+
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+
+      <!--
+        Every OOBE screen a human would click through.
+
+        ProtectYourPC = 3 declines the optional telemetry/privacy defaults rather than
+        accepting them. SkipMachineOOBE and SkipUserOOBE are deliberately NOT used:
+        they have been deprecated for years and cause more breakage on current builds
+        than the explicit Hide* settings they were meant to replace.
+      -->
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+
+      <!--
+        Setting AdministratorPassword enables the built-in Administrator account and
+        is what stops OOBE from demanding that a new user be created.
+      -->
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>${admin_password}</Value>
+          <PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+
+      <!--
+        Autologon exists for exactly one reason: FirstLogonCommands do not run until
+        somebody logs on, and the thing they run is the WinRM bootstrap that lets
+        Packer connect at all.
+
+        LogonCount is 5, not 2, to match win11-client - see the long note in that
+        template's answer file. Reaching 0 makes CLIENT Windows disable the built-in
+        Administrator mid-build, which fails every later WinRM shell with
+        "Couldn't create shell: http response error: 401".
+
+        Server is NOT known to do that - here the built-in Administrator is the primary
+        account - and this template built fine on 2. It is raised anyway so the two
+        Windows answer files do not quietly diverge on a setting that is load-bearing in
+        one of them, which is how the 90-cleanup bug survived in win11 after being fixed
+        here. It costs nothing: the build uses two logons and never reaches 0 either way.
+
+        The AutoAdminLogon and DefaultPassword registry values this creates are deleted
+        in scripts/90-cleanup.ps1 - note that the commonly-cited "AutoLogonCount = 0"
+        trick is a logon-counter fix and does NOT scrub those values.
+      -->
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <Username>Administrator</Username>
+        <LogonCount>5</LogonCount>
+        <Password>
+          <Value>${admin_password}</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+
+      <TimeZone>UTC</TimeZone>
+
+      <!--
+        Find setup.ps1 by VOLUME LABEL, never by drive letter.
+
+        Three CDs are attached during the build. Adding, removing or reordering one
+        shifts every letter after it. The label is stable; D:/E:/F: are not.
+
+        The command deliberately contains no & < or > characters - those are XML
+        metacharacters and would have to be entity-escaped, which is a classic source
+        of answer files that parse but do nothing. Dot-sourcing runs the script in the
+        current session without needing the call operator.
+      -->
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Bootstrap WinRM and the QEMU guest agent for Packer</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq '${seed_cd_label}' } | Select-Object -First 1; . ($v.DriveLetter + ':\setup.ps1')"</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>
