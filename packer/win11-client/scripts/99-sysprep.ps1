@@ -197,6 +197,89 @@ try {
 #
 # Deleting the key makes a clone treat itself as a new instance and run everything.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# REGISTER THE WinRM CONVERGE TASK **IN THE TEMPLATE**. This is why clones are
+# reachable, and it has to happen here rather than in the clone's cloud-init.
+#
+# The OpenTofu user-data runs during the clone's specialize pass, and ANYTHING
+# REGISTERED THERE IS WIPED WHEN OOBE COMPLETES. Measured twice: the build-time
+# watchdog's task and C:\ProgramData\mutaspace both vanished mid-build, and a
+# MutaSpaceEnsureWinRM task registered from the user-data was gone after the clone's
+# first reboot, with its log never written.
+#
+# A task registered HERE, before sysprep, survives into the image - proven by
+# MutaSpaceRemovePackerProfile above, which fires on a clone and deletes the stale
+# profile. Same mechanism, so the same placement.
+#
+# WHY A TASK AT ALL: the user-data cannot configure WinRM itself. It runs before the
+# machine has a working network, so `winrm quickconfig` and even an explicit
+# `winrm create Listener` fail, leaving a service with no listener and a machine
+# Ansible cannot reach. This task waits for a real IPv4 address, makes a listener
+# exist, and unregisters itself once one does.
+#
+# It is NOT started here - there is no reboot between this and sysprep, so it stays
+# dormant in the image and first fires on a clone.
+# ---------------------------------------------------------------------------
+Write-Host '--- Registering the WinRM converge task for clones ---'
+$ensureDir = 'C:\Windows\Setup\Scripts'
+New-Item -Path $ensureDir -ItemType Directory -Force | Out-Null
+$ensureBody = @'
+# Converge WinRM until it actually listens. Registered into the TEMPLATE by
+# 99-sysprep.ps1, because a task registered by a clone's cloud-init is wiped when
+# OOBE completes. Unregisters itself once a listener exists.
+$log = 'C:\Windows\Temp\mutaspace-ensure-winrm.log'
+function L { param($m) "[{0}] {1}" -f (Get-Date -Format 'o'), $m | Add-Content -Path $log }
+L 'ensure-winrm starting'
+$deadline = (Get-Date).AddMinutes(20)
+while ((Get-Date) -lt $deadline) {
+    $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+          Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' }
+    if (-not $ip) { L 'no usable IPv4 yet'; Start-Sleep -Seconds 10; continue }
+
+    Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+        Where-Object { $_.NetworkCategory -eq 'Public' } |
+        ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private -ErrorAction SilentlyContinue }
+
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+        -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
+            -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any | Out-Null
+    }
+
+    Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name WinRM -ErrorAction SilentlyContinue
+
+    if (-not ((& winrm enumerate winrm/config/listener 2>&1) -match 'Transport = HTTP')) {
+        L 'creating HTTP listener'
+        & winrm create "winrm/config/Listener?Address=*+Transport=HTTP" 2>&1 | Out-Null
+    }
+
+    $listening = ((& winrm enumerate winrm/config/listener 2>&1) -match 'ListeningOn') -join ' '
+    if ($listening) {
+        L ("listener up: " + $listening)
+        Unregister-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Confirm:$false -ErrorAction SilentlyContinue
+        L 'task unregistered - done'
+        return
+    }
+    Start-Sleep -Seconds 10
+}
+L 'WARNING: gave up without a listener'
+'@
+Set-Content -Path (Join-Path $ensureDir 'ensure-winrm.ps1') -Value $ensureBody -Encoding UTF8
+
+$eAct = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}\ensure-winrm.ps1"' -f $ensureDir)
+$eTrg = New-ScheduledTaskTrigger -AtStartup
+$ePrn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Unregister-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Action $eAct -Trigger $eTrg -Principal $ePrn | Out-Null
+if (Get-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -ErrorAction SilentlyContinue) {
+    Write-Host 'MutaSpaceEnsureWinRM registered (AtStartup, dormant until a clone boots).'
+} else {
+    throw 'Failed to register MutaSpaceEnsureWinRM - clones would come up unreachable.'
+}
+
 Write-Host '--- Resetting Cloudbase-Init plugin state so clones re-run it ---'
 $cbiState = 'HKLM:\SOFTWARE\Cloudbase Solutions\Cloudbase-Init'
 if (Test-Path $cbiState) {

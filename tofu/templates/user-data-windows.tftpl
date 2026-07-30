@@ -124,79 +124,39 @@ Invoke-Step 'Local Administrator for the Ansible bootstrap connection' {
     }
 }
 
-Invoke-Step 'WinRM' {
-    # ⚠️ THIS RUNS TOO EARLY TO FINISH THE JOB, AND THAT IS WHY THERE IS A TASK.
+Invoke-Step 'WinRM (best effort - the template task is what guarantees it)' {
+    # ⚠️ DO NOT REGISTER MutaSpaceEnsureWinRM HERE. An earlier version did, and it
+    # would have BROKEN the thing it was trying to help.
     #
-    # Cloudbase-Init executes this user-data during specialize, BEFORE the machine has
-    # its final identity or a working network. Measured on a hands-off clone: the
-    # script saw $env:COMPUTERNAME as PKR-WIN11-TPL - the TEMPLATE's name - and both
-    # `winrm quickconfig` and an explicit `winrm create Listener` failed, leaving
-    # "WinRM has NO LISTENER" and a machine Ansible could not reach. The same explicit
-    # create succeeds by hand once the box is up, so it is timing, not syntax.
+    # The converge task ships IN THE TEMPLATE, registered by 99-sysprep.ps1 before
+    # sysprep, which is the only placement that survives - anything registered during
+    # a clone's specialize pass is wiped when OOBE completes (measured: the task was
+    # registered here, and after the clone's first reboot it was gone with its log
+    # never written). Registering it from here starts with an Unregister, so it would
+    # DELETE the template's working task and replace it with one that is then wiped.
     #
-    # So this step does what it can now, and registers a task that CONVERGES: it runs
-    # at every startup, waits for a real IPv4 address, makes sure a listener exists,
-    # and unregisters itself once it does. No credential is written to disk - the
-    # account was already enabled above.
+    # This step therefore only does the parts that are safe and idempotent this early.
+    # If they fail because the network is not up yet, that is fine: the template's
+    # AtStartup task waits for a real IPv4 address and makes the listener exist.
     winrm quickconfig -quiet -force 2>&1 | Out-Null
-    Set-Service -Name WinRM -StartupType Automatic
+    Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service -Name WinRM -ErrorAction SilentlyContinue
 
-    if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
-            -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow | Out-Null
-    }
     New-ItemProperty `
         -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
         -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force | Out-Null
 
-    $dir = 'C:\Windows\Setup\Scripts'
-    New-Item -Path $dir -ItemType Directory -Force | Out-Null
-    $ensure = @'
-# Converge WinRM until it actually listens. Registered by the MutaSpace cloud-init
-# user-data, which runs too early in specialize to do this reliably itself.
-$log = 'C:\Windows\Temp\mutaspace-ensure-winrm.log'
-function L { param($m) "[{0}] {1}" -f (Get-Date -Format 'o'), $m | Add-Content -Path $log }
-L 'ensure-winrm starting'
-$deadline = (Get-Date).AddMinutes(15)
-while ((Get-Date) -lt $deadline) {
-    $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-          Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' }
-    if (-not $ip) { L 'no usable IPv4 yet'; Start-Sleep -Seconds 10; continue }
-
-    Get-NetConnectionProfile -ErrorAction SilentlyContinue |
-        Where-Object { $_.NetworkCategory -eq 'Public' } |
-        ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private -ErrorAction SilentlyContinue }
-
-    Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
-    Start-Service -Name WinRM -ErrorAction SilentlyContinue
-
-    if (-not ((& winrm enumerate winrm/config/listener 2>&1) -match 'Transport = HTTP')) {
-        L 'creating HTTP listener'
-        & winrm create "winrm/config/Listener?Address=*+Transport=HTTP" 2>&1 | Out-Null
+    if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
+            -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any | Out-Null
     }
 
     $listening = ((& winrm enumerate winrm/config/listener 2>&1) -match 'ListeningOn') -join ' '
     if ($listening) {
-        L ("listener up: " + $listening)
-        Unregister-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Confirm:$false -ErrorAction SilentlyContinue
-        L 'task unregistered - done'
-        return
+        Write-Step ('WinRM listener already up: {0}' -f $listening)
+    } else {
+        Write-Step 'No listener yet - MutaSpaceEnsureWinRM (from the template) will converge it after boot.'
     }
-    Start-Sleep -Seconds 10
-}
-L 'WARNING: gave up without a listener'
-'@
-    Set-Content -Path (Join-Path $dir 'ensure-winrm.ps1') -Value $ensure -Encoding UTF8
-
-    $act  = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\ensure-winrm.ps1`""
-    $trg  = New-ScheduledTaskTrigger -AtStartup
-    $prn  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Unregister-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Confirm:$false -ErrorAction SilentlyContinue
-    Register-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Action $act -Trigger $trg -Principal $prn | Out-Null
-    Start-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -ErrorAction SilentlyContinue
-    Write-Step 'Registered MutaSpaceEnsureWinRM (AtStartup, self-unregistering) to converge the listener'
 }
 
 # NO COMPUTER-NAME STEP HERE, DELIBERATELY.
