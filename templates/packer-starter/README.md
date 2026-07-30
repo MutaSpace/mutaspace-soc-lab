@@ -34,10 +34,28 @@ load-bearing and are marked as such.
      MUST be pinned** or the installer hangs with no error.
 3. Copy each template's `*.pkrvars.hcl.example` → `*.pkrvars.hcl`.
 4. Wire `shared/validate-answer-files.sh` into pre-commit if you build Windows.
-5. Search for `example` / `pve-node01` / `example.local` and replace with your own names.
+5. **Change `template_vmid` and `template_name`** in each `*.pkr.hcl` you keep. They are
+   hardcoded locals, not variables — deliberately, because in the project this came from
+   the VMID is a contract that OpenTofu clones by number. In a new project they will
+   collide with whatever already occupies 9000–9005, so edit them before your first build.
+6. Search for `example` / `pve-node01` / `example.local` and replace with your own names.
 
 Credentials come from the environment (`PKR_VAR_*`); no varfile in this kit contains one,
 and none should in yours.
+
+`iso_file` and `virtio_win_iso_file` are **commented out** in the common varfile on
+purpose — see the note beside them about a `windows_iso_file` name collision. All six
+templates validate without them.
+
+### This kit was adopted and built before it was published
+
+Not a claim, a test: it was copied into an empty project, wired up per the steps above,
+and used to build `tpl-starter-ubuntu` on real hardware — `A template was created: 9100`,
+17m39s, from `packer init` to a converted template. All six templates pass
+`packer validate` in that clean project.
+
+That trial is also what found the OPNsense `lab_yaml_path` bug below. Validation alone
+would not have caught it; copying the kit out did.
 
 ---
 
@@ -160,6 +178,20 @@ Comparatively uneventful, and included so a mixed estate starts from one place:
 - **OPNsense** seeds a `config.xml` so the appliance boots API- and SSH-ready. This is the
   pattern worth stealing: an appliance that needs console clicks is an appliance that
   cannot be rebuilt unattended.
+
+  ⚠️ It is the **only** template here that reads an external inventory, because seeding
+  DHCP reservations means knowing the addressing of the machines around it. Point
+  `lab_yaml_path` at your own file, or at the bundled `lab.example.yaml`:
+
+  ```bash
+  packer build -var 'lab_yaml_path=../lab.example.yaml' \
+    -var-file=packer/common.pkrvars.hcl packer/opnsense-267
+  ```
+
+  It used to hard-code `../../lab.yaml`, which meant every reference failed with
+  `Unsupported attribute` the moment the kit was copied anywhere else — a message that
+  reads like a broken template rather than a missing file. If you are not building
+  OPNsense, delete that directory and `lab.example.yaml`; nothing else reads them.
 
 ---
 

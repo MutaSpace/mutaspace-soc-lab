@@ -84,7 +84,7 @@ locals {
   #
   # PATHS: bare and relative, resolved against THIS directory - see the note on
   # `config_xml` below for why "${path.root}/" would be wrong here.
-  lab = yamldecode(file("../../lab.yaml"))
+  lab = yamldecode(file(var.lab_yaml_path))
 
   # [10, 10, 10, 0] and "10.10.10" for the SOC LAN.
   lan_octets      = [for o in split(".", split("/", local.lab.networks.lan.cidr)[0]) : parseint(o, 10)]

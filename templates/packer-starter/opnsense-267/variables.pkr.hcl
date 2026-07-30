@@ -403,6 +403,30 @@ variable "dc_address" {
 # same rules tofu/locals.tf uses. See the comment on `local.dhcp_reservations`
 # there. `learner_count` below is the only input that list still needs.
 
+variable "lab_yaml_path" {
+  type        = string
+  default     = "../../lab.yaml"
+  description = <<-EOT
+    Path to the YAML inventory this template reads its addressing from, resolved
+    relative to THIS directory.
+
+    Why it is a variable rather than a literal: the default only makes sense inside
+    the project this template came from. Copied into another project - which is
+    exactly what templates/packer-starter/ exists for - `../../lab.yaml` does not
+    exist and every reference below fails with "Unsupported attribute", which reads
+    like a broken template rather than a missing file. Caught by adopting the starter
+    kit into a scratch project and running `packer validate`.
+
+    The file must provide:
+      networks.<name>.cidr / .bridge
+      vms.<name>.ipv4.mode / .reservation, .nic.bridge, .nic.mac
+      learners (list)
+      learner_endpoints.<role>.ipv4.mode / .host_base / .host_step, .network
+
+    See lab.example.yaml in the starter kit for a minimal file that satisfies it.
+  EOT
+}
+
 variable "learner_count" {
   type        = number
   default     = 3

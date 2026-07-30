@@ -1,0 +1,74 @@
+# lab.example.yaml
+#
+# The MINIMUM inventory the OPNsense template needs to render its config.xml.
+#
+# WHY THIS FILE EXISTS
+#   opnsense-267 seeds the appliance's config.xml with DHCP reservations and interface
+#   assignments, so a built firewall comes up API- and SSH-ready with no console steps.
+#   That means it needs to know the addressing of the machines around it, which is more
+#   than a Packer varfile sensibly carries - so it reads a YAML inventory instead.
+#
+#   In the project this kit came from, that file is the lab's single source of truth and
+#   OpenTofu reads it too. Here it is a stub, so the template can be validated and built
+#   without inventing a whole lab.
+#
+# HOW TO USE IT
+#   Either point the template at this file:
+#       packer build -var 'lab_yaml_path=../lab.example.yaml' ... packer/opnsense-267
+#   or copy it to your own project root as lab.yaml, which is the default path
+#   (../../lab.yaml, resolved from the template directory).
+#
+#   If you are not building OPNsense, you can delete this file and the opnsense-267
+#   directory entirely. Nothing else in the kit reads it.
+
+# ---------------------------------------------------------------------------
+# networks - one entry per bridge the appliance will serve
+# ---------------------------------------------------------------------------
+networks:
+  lan:
+    bridge: vmbr1
+    cidr: 10.10.10.0/24
+  isolated:
+    bridge: vmbr2
+    cidr: 10.10.20.0/24
+
+# ---------------------------------------------------------------------------
+# vms - anything that needs a DHCP reservation seeded into the firewall
+#
+# Only the keys below are read: ipv4.mode, ipv4.reservation, nic.bridge, nic.mac.
+# `mode: dhcp` plus a `reservation` produces a static mapping keyed on the MAC.
+# Machines with `mode: static` are ignored here - they configure themselves.
+# ---------------------------------------------------------------------------
+vms:
+  example-workstation:
+    nic:
+      bridge: vmbr1
+      mac: "BC:24:11:10:10:51"
+    ipv4:
+      mode: dhcp
+      reservation: 10.10.10.51
+
+  example-analyst:
+    nic:
+      bridge: vmbr1
+      mac: "BC:24:11:10:10:50"
+    ipv4:
+      mode: dhcp
+      reservation: 10.10.10.50
+
+# ---------------------------------------------------------------------------
+# learners + learner_endpoints - per-student clones, if you have them
+#
+# Leave `learners` empty for a lab without them; the template slices this list by
+# var.learner_count, so an empty list simply seeds no learner reservations.
+# ---------------------------------------------------------------------------
+learners: []
+
+learner_endpoints:
+  workstation:
+    network: lan
+    ipv4:
+      mode: dhcp
+      # learner N gets host_base + (N * host_step)
+      host_base: 60
+      host_step: 2
