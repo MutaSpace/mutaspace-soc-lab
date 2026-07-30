@@ -3,20 +3,59 @@
 Scratch handoff for picking the work back up. docs/iac/session-handoff.md is the durable
 overview; getting-started.md is the operator walkthrough.
 
-**Last updated: 2026-07-24 — the lab is DEPLOYED. jumpbox-01 is the Ansible control node.
-Scenario-runner MVP live-proven; fw-01 is now zero-touch Infrastructure-as-Code (opnsense-as-code,
-see below); nlp-01 Ollama is up. **opnsense-as-code W4+W5 COMPLETE** (2026-07-24): EVE→Wazuh pipeline
-proven end-to-end, 05-fw-config idempotent, all `fw:*` Taskfile verbs shipped. 60-endpoints (Linux)
-and 90-lab-seed verified already-applied.
+**Last updated: 2026-07-30 — THE LAB IS COMPLETE. All six templates built, all thirteen core
+VMs deployed, all three incident scenarios passing, `tofu plan` clean.**
 
-**2026-07-24 (later) — distribution-readiness pass.** The leaked shared password is ROTATED (it was
-public in git history) and `scripts/rotate-lab-credentials.sh` now exists; pre-commit is installed so
-the scanner actually runs; `var.pve_node` + a plan-time node check make the repo work on another
-instructor's host; the stale "21-add/21-destroy" tofu warning was false and the real drift is now
-APPLIED (`plan` returns no changes); getting-started.md gained the three steps a fresh instructor
-cannot skip. **Win11 template (9003) is BUILT and win-client-01 is DEPLOYED, domain-joined and
-monitored (2026-07-29)** — see the Win11 section for the build recipe and the win-client-01 section
-for what a fresh clone still needs by hand.**
+Read this box first; the sections below are the detail and the archaeology.
+
+| Area | State |
+|---|---|
+| Templates | **6 of 6** — 9000 ubuntu-server, 9001 ubuntu-desktop, 9002 win-server, **9003 win11-client**, 9004 opnsense, 9005 kali |
+| Windows 11 (9003) | **BUILT and REPRODUCIBLE** — four consecutive clean builds. Took 25; the recipe and every disproved theory are in the Win11 section. |
+| win-client-01 (105) | Deployed, domain-joined to `mutaspace.local`, Sysmon + 4625 auditing, Wazuh agent **Active** |
+| First boot | **HANDS-OFF, verified** — a clone goes from nothing to domain-joined and monitored with **no manual step** |
+| Incident scenarios | **3 of 3 pass** — `ssh-bruteforce`, `web-sqli`, `web-dir-bruteforce` (re-run live 2026-07-30) |
+| SIEM | Wazuh healthy, five agents Active |
+| Drift | `tofu plan -detailed-exitcode` returns **0 — no changes** |
+| Offline tests | `tofu test` **14/14** |
+
+**What changed on 2026-07-29/30**
+
+1. **Win11 (9003) was finally built**, then rebuilt three more times to prove it was
+   reproducible rather than lucky. The four load-bearing decisions: one account model
+   (Camp B), NTLM, **one WinRM shell for the whole build**, and `skip_clean`.
+2. **The Windows first-boot bootstrap is codified and proven.** The rule that made it work:
+   **placement decides survival** — anything registered before OOBE completes is wiped, so
+   first-boot machinery ships *in the image*, registered before sysprep.
+3. **A near-miss worth more than the template.** A one-line edit to the shared Windows
+   user-data produced a plan that would have **destroyed dc-01**, the forest root, as a side
+   effect. Caught only by reading the replace set. Fixed with `ignore_changes` on
+   `initialization[0].user_data_file_id` — cloud-init user-data is first-boot-only, so it
+   must never recreate a running machine. **Keep reading the replace set anyway.**
+4. **All three scenarios re-verified live**, correcting a stale "two-scenario" claim here.
+5. **`templates/packer-starter/`** — the Packer work exported as a reusable kit, and
+   *adopted into a clean project and used to build a template* before being published.
+
+**⚠️ Deliberately still off**
+
+- `learner_endpoints.win-client` is `enabled: false`. Those are **linked** clones and would
+  pin template 9003 so it could never be rebuilt while they exist. Turn them on only when
+  the template is settled.
+- The research plane (`kali-01`, `untrusted-01`, `nlp-01`) ships `started: false`.
+  `qm start 108` before any scenario, and stop it afterwards or `tofu plan` shows drift.
+
+**⚠️ Known-expected noise, not regressions**
+
+- `50-wazuh-agents` ends with an assert wanting `kali-01`/`nlp-01`/`untrusted-01` registered;
+  they are powered off by design. Scope it with `--limit "wazuh_manager:<host>"`.
+- Playbook ORDER matters: **50 before 60**. `60-endpoints` writes into the Wazuh agent's
+  `ossec.conf`, which does not exist until `50-wazuh-agents` has installed the agent.
+- The three Windows password variables (`PKR_VAR_`/`TF_VAR_`/`MUTASPACE_`) must match.
+  They did **not** on this host — compare with `sha256sum` before cloning.
+
+**Still unexplained** — the Cloudbase-Init MSI download occasionally stalls 30+ minutes
+between provisioners. Intermittent, never root-caused; a timeout and retry on that download
+is the obvious first improvement.
 
 ---
 
@@ -147,12 +186,23 @@ The incident runner is **built and proven on the live host — THREE scenarios, 
 
 ## One-paragraph state
 
+⚠️ **SUPERSEDED — kept only as a record of where this started.** The paragraph below was
+written when five VMs existed, Ansible ran from the Proxmox host, and Win11 was unbuilt.
+Every claim in it is now out of date; the table at the top of this file is authoritative.
+It is left here because the contrast is the useful part: the machine that "was just added
+to lab.yaml but is not applied yet" is now a domain-joined, monitored workstation built
+from a template that took 25 attempts.
+
+<details>
+<summary>the original paragraph</summary>
+
 Five core VMs are cloned from templates and running. dc-01 is a promoted domain controller
-(`mutaspace.local`), DNS (forward + reverse) resolves, and the Wazuh SIEM finished installing on
-wazuh-01. Ansible currently runs **from the Proxmox host** (manual state — see
-below); a `jumpbox-01` VM was just added to lab.yaml to replace that but is **not applied yet**.
-Win11 (9003) is the one unbuilt template, now well-diagnosed. Everything is committed and
-pushed except nothing — the tree is clean at the jumpbox commit.
+(`mutaspace.local`), DNS (forward + reverse) resolves, and the Wazuh SIEM finished
+installing on wazuh-01. Ansible currently runs **from the Proxmox host** (manual state); a
+`jumpbox-01` VM was just added to lab.yaml to replace that but is **not applied yet**.
+Win11 (9003) is the one unbuilt template. Everything is committed and pushed.
+
+</details>
 
 ---
 
