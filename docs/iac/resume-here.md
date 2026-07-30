@@ -105,13 +105,28 @@ Plan + full state: `.planning/opnsense-as-code/plan.md`; design: `docs/proposals
 
 ## Scenario-runner — LIVE STATE (2026-07-24)
 
-The two-scenario incident runner is **built and proven on the live host**. Full instructor guide:
+The incident runner is **built and proven on the live host — THREE scenarios, all passing**. Full instructor guide:
 [docs/scenarios/README.md](../scenarios/README.md). Non-obvious live facts the next operator inherits:
 
-- **Both scenarios verify end-to-end** (run from the jumpbox, `ansible/`):
-  `ssh-bruteforce` fires built-in rules 5710+**5712**, `web-sqli` fires **31164**+31106
-  (31164, *not* the proposal's guessed 31103). Attack path: kali-01 (10.10.20.10, vmbr2) →
-  ubuntu-app-01 (10.10.10.30, vmbr1) across fw-01.
+- **ALL THREE scenarios verify end-to-end — re-confirmed live 2026-07-30** (run from the
+  jumpbox, `ansible/`). Attack path for every one: kali-01 (10.10.20.10, vmbr2) →
+  ubuntu-app-01 (10.10.10.30, vmbr1) **across fw-01**.
+
+  | scenario | attack | verify | observed |
+  |---|---|---|---|
+  | `ssh-bruteforce` | `ok=6 changed=3` | `ok=6 failed=0` | 5710, **5712** |
+  | `web-sqli` | `ok=4 changed=1` | `ok=6 failed=0` | **31164** ×3, 31106 ×2 |
+  | `web-dir-bruteforce` | `ok=4 changed=1` | `ok=6 failed=0` | **31101** ×20, **31151** ×1 |
+
+  31164 is the real rule, *not* the proposal's guessed 31103. `web-dir-bruteforce` was
+  described here as unproven until 2026-07-30 — it is not, and the catalogue entry had
+  said so since 2026-07-24. It needs the agent forwarding `/var/log/nginx/access.log`
+  (from `60-endpoints`); without that localfile 31101/31151 cannot fire at all.
+
+  A green run is a live end-to-end check of far more than the attack: traffic crosses two
+  segments through fw-01, the endpoint agent produces the telemetry, and the verify play
+  then ASSERTS each expected `rule.id` landed in the indexer inside its latency budget.
+  A scenario that fires but detects nothing fails the play.
 - **`scenario-baseline` snapshot EXISTS** on VMIDs **106 (ubuntu-app-01) and 108 (kali-01)** —
   disk-only, taken 2026-07-24 after instrumentation was proven and the targets' logs truncated.
   wazuh-01 (104) has **no** such snapshot and is never touched by reset (verified: uptime unbroken
