@@ -125,96 +125,93 @@ Invoke-Step 'Local Administrator for the Ansible bootstrap connection' {
 }
 
 Invoke-Step 'WinRM' {
-    # ⚠️ THE LISTENER IS CREATED EXPLICITLY. Do not rely on quickconfig alone.
+    # ⚠️ THIS RUNS TOO EARLY TO FINISH THE JOB, AND THAT IS WHY THERE IS A TASK.
     #
-    # `winrm quickconfig` REFUSES to create a listener while Windows considers the
-    # network Public, and on a fresh clone the profile flip above can time out - NLA
-    # sometimes takes longer than any reasonable wait to classify the network, and
-    # Get-NetConnectionProfile just returns "A general error occurred" until it does.
+    # Cloudbase-Init executes this user-data during specialize, BEFORE the machine has
+    # its final identity or a working network. Measured on a hands-off clone: the
+    # script saw $env:COMPUTERNAME as PKR-WIN11-TPL - the TEMPLATE's name - and both
+    # `winrm quickconfig` and an explicit `winrm create Listener` failed, leaving
+    # "WinRM has NO LISTENER" and a machine Ansible could not reach. The same explicit
+    # create succeeds by hand once the box is up, so it is timing, not syntax.
     #
-    # That happened on the first hands-off clone: quickconfig ran, the service was
-    # briefly Running, and there was NO listener. WinRM then stopped, and Ansible
-    # could not connect even though every other step had succeeded.
-    #
-    # `winrm create Listener?Address=*+Transport=HTTP` works regardless of profile.
-    # Verified live on win-client-01: listener on 5985 bound to 10.10.10.51 while the
-    # profile was still Public, and `ansible -m win_ping` returned pong.
-    #
-    # AllowUnencrypted is deliberately NOT set: Ansible uses NTLM (see
-    # inventory/group_vars/bootstrap_windows.yml), which encrypts the payload itself,
-    # so HTTP on 5985 does not need the service weakened.
+    # So this step does what it can now, and registers a task that CONVERGES: it runs
+    # at every startup, waits for a real IPv4 address, makes sure a listener exists,
+    # and unregisters itself once it does. No credential is written to disk - the
+    # account was already enabled above.
     winrm quickconfig -quiet -force 2>&1 | Out-Null
-
     Set-Service -Name WinRM -StartupType Automatic
     Start-Service -Name WinRM -ErrorAction SilentlyContinue
-
-    $hasListener = (& winrm enumerate winrm/config/listener 2>&1) -match 'Transport = HTTP'
-    if (-not $hasListener) {
-        Write-Step 'No WinRM listener (Public profile blocks quickconfig) - creating one explicitly'
-        & winrm create "winrm/config/Listener?Address=*+Transport=HTTP" 2>&1 | Out-Null
-    }
-
-    # Without this, a local administrator authenticating remotely is filtered down to
-    # a standard-user token and everything fails with access denied.
-    New-ItemProperty `
-        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-        -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force | Out-Null
 
     if (-not (Get-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -Name 'MutaSpace-WinRM-HTTP' -DisplayName 'WinRM HTTP (MutaSpace lab)' `
             -Enabled True -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow | Out-Null
     }
+    New-ItemProperty `
+        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+        -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force | Out-Null
 
-    # Delayed start: WinRM occasionally loses a race against the network stack on a
-    # freshly cloned machine and comes up before there is an interface to listen on.
-    sc.exe config WinRM start= delayed-auto | Out-Null
+    $dir = 'C:\Windows\Setup\Scripts'
+    New-Item -Path $dir -ItemType Directory -Force | Out-Null
+    $ensure = @'
+# Converge WinRM until it actually listens. Registered by the MutaSpace cloud-init
+# user-data, which runs too early in specialize to do this reliably itself.
+$log = 'C:\Windows\Temp\mutaspace-ensure-winrm.log'
+function L { param($m) "[{0}] {1}" -f (Get-Date -Format 'o'), $m | Add-Content -Path $log }
+L 'ensure-winrm starting'
+$deadline = (Get-Date).AddMinutes(15)
+while ((Get-Date) -lt $deadline) {
+    $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+          Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' }
+    if (-not $ip) { L 'no usable IPv4 yet'; Start-Sleep -Seconds 10; continue }
+
+    Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+        Where-Object { $_.NetworkCategory -eq 'Public' } |
+        ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private -ErrorAction SilentlyContinue }
+
     Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service -Name WinRM -ErrorAction SilentlyContinue
 
-    # Report what actually exists, not merely that commands were issued. A service
-    # that is Running with no listener is the failure mode this step was written for.
-    $listener = ((& winrm enumerate winrm/config/listener 2>&1) -match 'Port|ListeningOn') -join ' | '
-    Write-Step ('WinRM service: {0}' -f (Get-Service WinRM).Status)
-    if ([string]::IsNullOrWhiteSpace($listener)) {
-        Write-Step 'WARNING: WinRM has NO LISTENER. Ansible will not be able to connect.'
-    } else {
-        Write-Step ('WinRM listener: {0}' -f $listener)
+    if (-not ((& winrm enumerate winrm/config/listener 2>&1) -match 'Transport = HTTP')) {
+        L 'creating HTTP listener'
+        & winrm create "winrm/config/Listener?Address=*+Transport=HTTP" 2>&1 | Out-Null
     }
+
+    $listening = ((& winrm enumerate winrm/config/listener 2>&1) -match 'ListeningOn') -join ' '
+    if ($listening) {
+        L ("listener up: " + $listening)
+        Unregister-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Confirm:$false -ErrorAction SilentlyContinue
+        L 'task unregistered - done'
+        return
+    }
+    Start-Sleep -Seconds 10
+}
+L 'WARNING: gave up without a listener'
+'@
+    Set-Content -Path (Join-Path $dir 'ensure-winrm.ps1') -Value $ensure -Encoding UTF8
+
+    $act  = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\ensure-winrm.ps1`""
+    $trg  = New-ScheduledTaskTrigger -AtStartup
+    $prn  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Unregister-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -Action $act -Trigger $trg -Principal $prn | Out-Null
+    Start-ScheduledTask -TaskName 'MutaSpaceEnsureWinRM' -ErrorAction SilentlyContinue
+    Write-Step 'Registered MutaSpaceEnsureWinRM (AtStartup, self-unregistering) to converge the listener'
 }
 
-Invoke-Step 'Computer name' {
-    # Cloudbase-Init cannot do this: Proxmox's `cicustom user=` supplies user-data
-    # ONLY, with no meta-data, so SetHostNamePlugin logs "Hostname not found in
-    # metadata" and does nothing. Observed on both clones - they came up as
-    # DESKTOP-FEET0KV and DESKTOP-22VU4RM.
-    #
-    # The rename needs a reboot to take effect, and deliberately does NOT force one:
-    # 30-domain-join renames and joins in a single operation anyway, and rebooting
-    # underneath a bootstrap that is still running is how first boots get stuck.
-    $want = '${hostname}'
-    if ($env:COMPUTERNAME -ieq $want) {
-        Write-Step ('Computer name already {0}' -f $want)
-    } else {
-        Write-Step ('Renaming {0} -> {1} (applies on next restart)' -f $env:COMPUTERNAME, $want)
-        Rename-Computer -NewName $want -Force -ErrorAction Stop
-    }
-}
+# NO COMPUTER-NAME STEP HERE, DELIBERATELY.
+#
+# Renaming from this script does not stick. It runs during specialize, before OOBE has
+# assigned the machine its identity: on a hands-off clone it logged
+# "Renaming PKR-WIN11-TPL -> win-client-01" - the TEMPLATE's name - and OOBE then
+# overwrote the result with DESKTOP-RA0MI6L. Fighting that would need another
+# reboot-and-converge cycle for no benefit, because ansible/playbooks/30-domain-join.yml
+# renames and domain-joins in a single microsoft.ad.membership operation anyway, and the
+# bootstrap inventory addresses the host by IP until it does.
+#
+# Cloudbase-Init cannot do it either: Proxmox's `cicustom user=` ships user-data only,
+# so SetHostNamePlugin logs "Hostname not found in metadata" and does nothing.
 
-# ---------------------------------------------------------------------------
-# DNS
-# ---------------------------------------------------------------------------
-# Point the resolver at the domain controller statically rather than accepting
-# whatever DHCP offers.
-#
-# This is what breaks the circular dependency at the heart of the lab: every guest
-# needs dc-01 to resolve names, and dc-01 is itself a guest. If members waited for
-# DHCP to tell them where DNS lives, the first boot of the first machine would have
-# nowhere to ask. Writing the resolver in at build time removes the question.
-#
-# It also matters for correctness rather than just ordering: a domain member that
-# resolves at the firewall instead of the domain controller cannot find the
-# _ldap._tcp SRV records, and the domain join fails with an error that blames the
-# network.
 Invoke-Step 'DNS' {
     $dnsServers = @(${dns_servers})
     if ($dnsServers.Count -gt 0) {
