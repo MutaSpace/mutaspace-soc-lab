@@ -54,6 +54,44 @@ The Proxmox environment hosts the enterprise infrastructure, security systems, e
 
 ---
 
+# Official Lab Host
+
+The MutaSpace Enterprise Security Lab runs on a dedicated custom-built host designed to support virtualization, security monitoring, identity services, networking, container workloads, and hands-on lab environments.
+
+## Hardware
+
+| Component | Specification |
+|---|---|
+| Motherboard | B650 AORUS Elite AX |
+| CPU | AMD Ryzen 9 7900X |
+| Memory | 64 GB DDR5 |
+| Storage | 2 TB NVMe SSD |
+| Power Supply | 850W PSU |
+| Case | Corsair 3500X |
+| CPU Cooling | Arctic Liquid Freezer III Pro 360 |
+| Hypervisor | Proxmox VE |
+
+## Host Role
+
+The physical host provides the compute foundation for:
+
+- Enterprise infrastructure VMs
+- Active Directory and DNS
+- PKI and certificate services
+- Wazuh SIEM
+- Linux application servers
+- Docker workloads
+- Student investigation endpoints
+- Remote lab access services
+- Future detection engineering and incident response systems
+
+## Host Identity
+
+```text
+Hostname: mutaspace-soc-node01
+Platform: Proxmox VE
+Role: Primary enterprise security lab hypervisor
+
 ## Network
 
 The internal SOC environment currently operates on:
