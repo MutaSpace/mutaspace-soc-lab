@@ -1,6 +1,6 @@
 # MutaSpace Enterprise Security Lab
 
-A hands-on enterprise cybersecurity environment built to develop practical experience across SOC operations, security engineering, identity and access management, networking, detection engineering, incident investigation, and security consulting.
+The MutaSpace Enterprise Security Lab is a custom-built, Proxmox-based enterprise cybersecurity environment designed for hands-on security operations, SOC engineering, identity, networking, detection engineering, incident investigation, and cybersecurity instruction.
 
 The lab is built on Proxmox VE and models a small enterprise environment with centralized identity, network security, endpoint telemetry, SIEM monitoring, application infrastructure, PKI, containerized services, and remotely accessible security workstations.
 
