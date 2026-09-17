@@ -1,237 +1,206 @@
-# Remote Access Architecture
+# Building Secure Browser-Based Remote Access for a Cybersecurity Lab
 
-This document describes the remote-access design used to provide browser-based access to the MutaSpace Enterprise Security Lab.
+This guide explains how to provide browser-based remote access to internal lab systems without exposing the hypervisor, firewall, RDP, or management interfaces directly to the public Internet.
 
-The objective is to allow students to interact with assigned Windows investigation environments from managed school computers without requiring direct access to Proxmox, VPN software installation, or public exposure of internal management services.
+The reference design uses:
 
----
-
-# 1. Remote Access Goal
-
-The student access requirement was:
-
-- Browser-only
-- No Tailscale installation on school-managed computers
-- No direct Proxmox access
-- No direct RDP exposure to the public Internet
-- No access to the home network
-- Team-specific access to assigned Windows environments
-- Centralized monitoring through Wazuh
-- Minimal disruption to existing infrastructure
-
-The resulting design uses:
-
-- Cloudflare Tunnel
 - Apache Guacamole
+- Docker
 - RDP
-- Dedicated Windows student endpoints
+- Cloudflare Tunnel
+- A dedicated public hostname
+
+The same architecture can be adapted to other homelab or training environments.
 
 ---
 
-# 2. Public Access Domain
+# 1. Design Goal
 
-Primary lab domain:
+A remote cybersecurity lab should allow users to access the systems they need without giving them unnecessary access to the infrastructure that hosts the lab.
 
-```text
-mutaspacesoc.com
-```
-
-Remote lab hostname:
+The target experience is:
 
 ```text
-lab.mutaspacesoc.com
+Remote User
+    |
+    | HTTPS
+    v
+Public Lab URL
+    |
+    v
+Remote Access Gateway
+    |
+    v
+Assigned Internal Endpoint
 ```
 
-Students access the environment through:
+The user should not need:
 
-```text
-https://lab.mutaspacesoc.com
-```
-
-The Guacamole application is available through the published lab hostname.
+- Proxmox access
+- Direct firewall access
+- A public RDP port
+- A local RDP client
+- VPN software on a managed school or work computer
 
 ---
 
-# 3. High-Level Architecture
+# 2. Why Not Expose Proxmox Directly?
+
+Giving students direct access to the hypervisor creates unnecessary risk.
+
+A user who only needs to interact with a Windows workstation does not need access to:
+
+- VM creation
+- VM deletion
+- Storage
+- Network bridges
+- Snapshots
+- Host configuration
+- Other lab systems
+
+The better model is:
 
 ```text
-School-Managed Computer
-        |
-        | HTTPS
-        v
-lab.mutaspacesoc.com
-        |
-        v
-Cloudflare Edge
-        |
-        | Encrypted Cloudflare Tunnel
-        v
-docker-01
-10.10.10.40
-        |
-        v
-Apache Guacamole
-        |
-        | RDP
-        v
-Assigned Windows Endpoint
+User
+  |
+  v
+Remote Access Gateway
+  |
+  v
+Assigned VM
 ```
 
-Current student endpoints:
-
-```text
-HELPDESK-TEAM01
-HELPDESK-TEAM02
-HELPDESK-TEAM03
-```
+This follows least privilege.
 
 ---
 
-# 4. Why Browser-Based Access Was Selected
+# 3. Why Not Expose RDP Directly?
 
-Several access models were considered.
-
-## Direct Proxmox Access
-
-Rejected as the primary student-access method.
-
-Reasons:
-
-- Students do not need hypervisor administration
-- Increased exposure of management infrastructure
-- Greater risk of accidental VM or infrastructure changes
-- More complex RBAC requirements
-- Poorer student experience for simple endpoint access
-
----
-
-## Tailscale on Student Computers
-
-Tailscale is used by the administrator to access the lab remotely.
-
-It was not selected as the primary student method because school-managed computers may:
-
-- Restrict software installation
-- Require administrative privileges
-- Block unapproved VPN clients
-- Have institutional security restrictions
-
-The goal was therefore to remove the requirement for locally installed VPN software.
-
----
-
-## Direct Public RDP
-
-Rejected.
-
-Direct exposure of:
+Directly publishing:
 
 ```text
 TCP 3389
 ```
 
-would unnecessarily expose Windows endpoints to the public Internet.
+to the public Internet increases exposure of the Windows endpoint.
 
-The final design keeps RDP internal.
-
----
-
-## Browser-Based Gateway
-
-Selected.
-
-Apache Guacamole allows users to access RDP sessions through an HTML5 browser.
-
-Advantages include:
-
-- No local RDP client required
-- No student VPN installation
-- No Proxmox account required
-- Centralized connection management
-- Team-specific connection permissions
-- Browser-based access from managed school computers
-
----
-
-# 5. Apache Guacamole
-
-Guacamole runs as a containerized service on:
+Instead, keep RDP internal:
 
 ```text
-docker-01
-10.10.10.40
+Remote Browser
+     |
+     v
+Gateway
+     |
+     | Internal RDP
+     v
+Windows Endpoint
 ```
 
-Internal Guacamole access:
+The gateway becomes the only externally reachable application.
+
+---
+
+# 4. Why Apache Guacamole?
+
+Apache Guacamole provides browser-based remote desktop access using HTML5.
+
+It can proxy protocols such as:
+
+- RDP
+- SSH
+- VNC
+
+For a Windows student lab, this means a user can open a browser and interact with a Windows desktop without installing a local RDP client.
+
+---
+
+# 5. Why Cloudflare Tunnel?
+
+A traditional public service often requires:
+
+- Router port forwarding
+- Public firewall rules
+- Public exposure of an origin service
+
+Cloudflare Tunnel changes that model.
+
+The connector establishes an outbound connection from the lab to Cloudflare.
+
+Conceptually:
 
 ```text
-http://10.10.10.40:8081/guacamole
+Lab
+ |
+ | Outbound tunnel
+ v
+Cloudflare
 ```
 
-Current supporting containers include:
+Remote users then access the application through Cloudflare without opening inbound ports on the home router.
+
+---
+
+# 6. Reference Architecture
 
 ```text
-guacamole
-guacd
-guac-postgres
+School / Remote Computer
+          |
+          | HTTPS
+          v
+     Cloudflare Edge
+          |
+          | Tunnel
+          v
+      Docker Host
+          |
+          v
+ Apache Guacamole
+          |
+          | RDP
+          v
+ Windows Lab Endpoint
 ```
 
----
-
-# 6. Guacamole Component Roles
-
-## `guacamole`
-
-Provides the browser-based application interface.
-
-Responsibilities include:
-
-- User authentication
-- Connection configuration
-- Session presentation
-- Permission assignment
-- Browser interface
+The Docker host remains on the private internal lab network.
 
 ---
 
-## `guacd`
+# 7. Prerequisites
 
-Guacamole proxy daemon.
+Before deploying the remote access layer, you should already have:
 
-`guacd` establishes the actual remote desktop session to the destination endpoint.
+- A working internal lab network
+- A Linux system with Docker
+- A Windows endpoint
+- RDP enabled on that endpoint
+- Internal network connectivity between Docker and Windows
+- A domain you control
+- DNS managed through Cloudflare
 
-For the current student environment:
+You should also confirm that the Windows endpoint is reachable internally before adding Guacamole.
+
+---
+
+# 8. Validate RDP First
+
+Do not begin by troubleshooting Guacamole.
+
+First prove that the Windows endpoint is listening for RDP.
+
+On Windows:
+
+```powershell
+Get-NetTCPConnection -LocalPort 3389 -State Listen
+```
+
+Expected:
 
 ```text
-guacd
-   |
-   | RDP TCP 3389
-   v
-HELPDESK-TEAM0X
+State : Listen
 ```
 
----
-
-## PostgreSQL
-
-Guacamole stores configuration data in PostgreSQL.
-
-The database stores information such as:
-
-- Users
-- Connections
-- Permissions
-- Configuration relationships
-
-Passwords and database secrets must never be committed to this repository.
-
----
-
-# 7. Windows RDP Configuration
-
-Student endpoints require Remote Desktop to be enabled.
-
-Example PowerShell configuration:
+Enable RDP if required:
 
 ```powershell
 Set-ItemProperty `
@@ -240,262 +209,465 @@ Set-ItemProperty `
   -Value 0
 ```
 
-Windows Firewall RDP rules:
+Enable the Windows Firewall rules:
 
 ```powershell
 Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 ```
 
-RDP listener validation:
+---
 
-```powershell
-Get-NetTCPConnection -LocalPort 3389 -State Listen
+# 9. Validate the Network Path
+
+From the future Guacamole host, verify TCP 3389 is reachable.
+
+Example:
+
+```bash
+nc -vz <WINDOWS-LAB-IP> 3389
 ```
 
-Expected result:
+A successful result proves:
 
 ```text
-LocalPort : 3389
-State     : Listen
+Docker Host
+    |
+    | TCP 3389
+    v
+Windows Endpoint
 ```
+
+If this fails, troubleshoot networking before installing or changing Guacamole.
 
 ---
 
-# 8. Student RDP Accounts
+# 10. Student RDP Account
 
-Each team workstation contains a student-facing local account.
-
-Examples:
-
-```text
-HELPDESK-TEAM01\Team01
-HELPDESK-TEAM02\Team02
-HELPDESK-TEAM03\Team03
-```
-
-These accounts are separate from the instructor recovery account:
-
-```text
-LabAdmin
-```
-
-Student accounts must:
+The Windows account used for remote access should:
 
 - Be active
-- Have a valid password
+- Have a password
 - Be authorized for Remote Desktop
-- Use credentials assigned only to their team
+- Have only the permissions required for the lab
 
 Example:
 
 ```powershell
-net localgroup "Remote Desktop Users" Team01 /add
+net localgroup "Remote Desktop Users" <STUDENT_USER> /add
 ```
 
----
-
-# 9. Guacamole Connection Mapping
-
-The intended connection model is:
-
-```text
-Guacamole User: team01
-        |
-        v
-HELPDESK-TEAM01
-
-Guacamole User: team02
-        |
-        v
-HELPDESK-TEAM02
-
-Guacamole User: team03
-        |
-        v
-HELPDESK-TEAM03
-```
-
-Each user should only receive permission to use their assigned connection.
-
-Students should not receive:
-
-- Guacamole administrator privileges
-- Access to other teams
-- Connection creation privileges
-- User-management privileges
-- System-management privileges
-
----
-
-# 10. Team 01 Proof of Concept
-
-The first fully validated remote-access path was built for:
-
-```text
-HELPDESK-TEAM01
-```
-
-Validation sequence:
-
-```text
-Student Account
-      |
-      v
-RDP Enabled
-      |
-      v
-TCP 3389 Listening
-      |
-      v
-docker-01 Reaches TCP 3389
-      |
-      v
-Guacamole Connection Created
-      |
-      v
-Browser Session Established
-```
-
----
-
-# 11. RDP Troubleshooting
-
-The first Guacamole connection attempt failed.
-
-## Symptom
-
-Clicking the Guacamole connection caused the session to close immediately.
-
-The browser did not display the Windows desktop.
-
----
-
-## Network Validation
-
-From `docker-01`, the RDP service was tested:
-
-```bash
-nc -vz <TEAM01-IP> 3389
-```
-
-The connection succeeded.
-
-This proved:
-
-```text
-docker-01
-     |
-     | TCP 3389
-     v
-HELPDESK-TEAM01
-```
-
-was reachable.
-
-Therefore, the failure was not caused by:
-
-- Routing
-- Firewall connectivity
-- Closed TCP port
-- RDP listener failure
-
----
-
-## Guacamole Logs
-
-The `guacd` container logs were reviewed:
-
-```bash
-sudo docker logs guacd --tail 50
-```
-
-The logs identified:
-
-```text
-Authentication failure
-```
-
-This isolated the issue to the Windows authentication layer.
-
----
-
-## Root Cause
-
-The Team01 local account did not have a usable password for remote authentication.
-
-The account showed:
-
-```text
-Password required: No
-```
-
-A valid password was configured:
+Verify:
 
 ```powershell
-net user Team01 *
+net localgroup "Remote Desktop Users"
 ```
-
-Guacamole credentials were updated accordingly.
 
 ---
 
-## Validation
+# 11. Important Windows Authentication Note
 
-After correcting the Windows credentials:
+Local Windows accounts used over RDP require valid credentials.
+
+A local user with no usable password may work interactively at the console but fail when used for remote authentication.
+
+Set a password securely:
+
+```powershell
+net user <STUDENT_USER> *
+```
+
+Do not hard-code passwords into scripts or GitHub documentation.
+
+---
+
+# 12. Deploy Apache Guacamole with Docker
+
+A typical deployment uses three components:
 
 ```text
-Browser
-   |
-   v
-Guacamole
-   |
-   v
+guacamole
+guacd
+postgresql
+```
+
+Roles:
+
+```text
+guacamole
+    |
+    +---- Web application
+
+guacd
+    |
+    +---- Remote desktop proxy
+
+postgresql
+    |
+    +---- Configuration database
+```
+
+---
+
+# 13. Create a Working Directory
+
+Example:
+
+```bash
+mkdir -p ~/guacamole
+cd ~/guacamole
+```
+
+---
+
+# 14. Example Docker Compose Design
+
+Use placeholders for secrets.
+
+```yaml
+services:
+
+  guacd:
+    image: guacamole/guacd:latest
+    container_name: guacd
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: guac-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: guacamole_db
+      POSTGRES_USER: guacamole_user
+      POSTGRES_PASSWORD: <STRONG_DATABASE_PASSWORD>
+    volumes:
+      - guac_db:/var/lib/postgresql/data
+
+  guacamole:
+    image: guacamole/guacamole:latest
+    container_name: guacamole
+    restart: unless-stopped
+    depends_on:
+      - guacd
+      - postgres
+    environment:
+      GUACD_HOSTNAME: guacd
+      POSTGRESQL_HOSTNAME: postgres
+      POSTGRESQL_DATABASE: guacamole_db
+      POSTGRESQL_USER: guacamole_user
+      POSTGRESQL_PASSWORD: <STRONG_DATABASE_PASSWORD>
+    ports:
+      - "8081:8080"
+
+volumes:
+  guac_db:
+```
+
+Do not commit real database passwords.
+
+---
+
+# 15. Initialize the Guacamole Database
+
+Generate the PostgreSQL schema:
+
+```bash
+docker run --rm \
+  guacamole/guacamole:latest \
+  /opt/guacamole/bin/initdb.sh --postgresql \
+  > initdb.sql
+```
+
+Start PostgreSQL:
+
+```bash
+docker compose up -d postgres
+```
+
+Import the schema:
+
+```bash
+cat initdb.sql |
+docker exec -i guac-postgres \
+psql -U guacamole_user -d guacamole_db
+```
+
+Then start the remaining services:
+
+```bash
+docker compose up -d
+```
+
+---
+
+# 16. Verify Containers
+
+Check:
+
+```bash
+docker ps
+```
+
+Expected services include:
+
+```text
+guacamole
+guacd
+guac-postgres
+```
+
+---
+
+# 17. Test Guacamole Internally
+
+Before publishing anything externally, open Guacamole from a system already inside the lab.
+
+Example:
+
+```text
+http://<DOCKER-HOST-IP>:8081/guacamole
+```
+
+Do not publish the service until internal access works.
+
+---
+
+# 18. Change Default Administrative Credentials
+
+If the deployment includes default administrative credentials, change them immediately.
+
+Do not leave default credentials enabled once the service is reachable beyond a local test environment.
+
+---
+
+# 19. Create an RDP Connection
+
+In Guacamole, create a new connection.
+
+Example:
+
+```text
+Name:
+Windows-Lab-01
+
+Protocol:
 RDP
-   |
-   v
-HELPDESK-TEAM01
-   |
-   v
-Windows Desktop
 ```
 
-completed successfully.
+Network parameters:
+
+```text
+Hostname:
+<PRIVATE_WINDOWS_IP>
+
+Port:
+3389
+```
+
+Authentication:
+
+```text
+Username:
+<STUDENT_USER>
+
+Password:
+<STUDENT_PASSWORD>
+
+Domain:
+<LOCAL_COMPUTER_NAME_OR_DOMAIN>
+```
+
+Keep credentials out of GitHub.
 
 ---
 
-# 12. Cloudflare Tunnel
+# 20. Local vs Domain Accounts
 
-Cloudflare Tunnel provides the external access path.
-
-Tunnel name:
+If the user is a local Windows account:
 
 ```text
-mutaspace-guacamole
+LAB-PC\Student01
 ```
 
-The connector runs from:
+then the RDP authentication domain should correspond to the local computer.
+
+If the user is an Active Directory account:
 
 ```text
-docker-01
+LABDOMAIN\Student01
 ```
 
-The tunnel establishes an outbound connection from the lab to Cloudflare.
+then use the domain context.
 
-This means no inbound port forwarding is required on the home router.
+This distinction is important when troubleshooting authentication failures.
 
 ---
 
-# 13. Cloudflare Tunnel Traffic Flow
+# 21. RDP Security Settings
+
+For an internal lab environment, Guacamole may require adjustments for certificate or security negotiation.
+
+Common options include:
 
 ```text
-docker-01
-     |
-     | outbound encrypted connection
-     v
-Cloudflare
+Security Mode: Any
+Ignore Server Certificate: Enabled
 ```
 
-External users connect in the opposite logical direction:
+Use the least permissive settings that work in your environment.
+
+---
+
+# 22. Test the Browser Session
+
+From the Guacamole interface:
+
+1. Select the connection
+2. Start the session
+3. Confirm the Windows desktop loads
+4. Verify keyboard and mouse input
+5. Confirm the correct user session
+
+Do not move to external publishing until this works reliably.
+
+---
+
+# 23. Troubleshooting Immediate Disconnects
+
+A common symptom is:
+
+```text
+Connection opens
+        |
+        v
+Session closes immediately
+```
+
+Do not assume this is a firewall issue.
+
+First check:
+
+```bash
+docker logs guacd --tail 50
+```
+
+`guacd` is the component responsible for the actual RDP connection.
+
+---
+
+# 24. Example Authentication Failure
+
+A Guacamole RDP session may fail even when:
+
+```text
+TCP 3389 is reachable
+RDP is listening
+Guacamole is healthy
+```
+
+because the Windows credentials are invalid.
+
+Troubleshooting flow:
+
+```text
+Can the Docker host reach TCP 3389?
+            |
+            v
+Yes
+            |
+            v
+Check guacd logs
+            |
+            v
+Authentication failure?
+            |
+            v
+Validate Windows account
+```
+
+This helps distinguish a network issue from an identity issue.
+
+---
+
+# 25. Deploy Cloudflare Tunnel
+
+Once Guacamole works internally, create a Cloudflare Tunnel.
+
+A typical tunnel should publish only the required application.
+
+Do not publish:
+
+- Proxmox
+- pfSense
+- SSH
+- Wazuh administration
+- Docker management
+
+if students only require Guacamole.
+
+---
+
+# 26. Cloudflare Connector
+
+The connector can run as another Docker container.
+
+Cloudflare provides the actual connector command and token.
+
+The token is sensitive.
+
+Never commit:
+
+```text
+<CLOUDFLARE_TUNNEL_TOKEN>
+```
+
+to GitHub.
+
+---
+
+# 27. Container Restart Policy
+
+For a persistent lab gateway, the Cloudflare connector should use an appropriate restart policy so it returns after a Docker host reboot.
+
+Example concept:
+
+```text
+restart: unless-stopped
+```
+
+Do not publish the actual tunnel token as part of a Docker command.
+
+---
+
+# 28. Publish the Application
+
+Create a public hostname such as:
+
+```text
+lab.example.com
+```
+
+and route it to the internal Guacamole service.
+
+Example origin:
+
+```text
+HTTP
+http://<GUACAMOLE-HOST>:8081
+```
+
+Guacamole itself may remain under:
+
+```text
+/guacamole
+```
+
+depending on the deployment.
+
+---
+
+# 29. External Traffic Flow
+
+The completed architecture becomes:
 
 ```text
 Remote Browser
@@ -504,524 +676,302 @@ Remote Browser
       v
 Cloudflare
       |
-      | Existing tunnel
+      | Tunnel
       v
-docker-01
+Docker Host
       |
       v
 Guacamole
+      |
+      | RDP
+      v
+Internal Windows Endpoint
 ```
 
 ---
 
-# 14. Published Application Route
+# 30. Validate from Outside the Lab
 
-The published hostname is:
+Do not consider the remote-access layer complete because it works from inside the network.
+
+Test from a genuinely external system.
+
+Examples:
+
+- Cellular hotspot
+- School computer
+- Work computer
+- Another external network
+
+The test should not depend on your existing administrative VPN.
+
+---
+
+# 31. Browser-Only Validation
+
+A successful browser-only design should require the remote user to install nothing.
+
+The remote system should only require:
 
 ```text
-lab.mutaspacesoc.com
+Modern Web Browser
+        +
+Valid Lab Credentials
 ```
 
-The Cloudflare route forwards the application to:
+No:
 
 ```text
-HTTP
-10.10.10.40:8081
+Tailscale
+RDP Client
+Proxmox Client
+VPN Software
 ```
 
-The Guacamole application path is:
+should be required for the basic user experience.
+
+---
+
+# 32. User Separation
+
+Do not give students the Guacamole administrator account.
+
+Create separate users:
 
 ```text
-/guacamole
+team01
+team02
+team03
 ```
+
+Each user should only receive permission to use its assigned connection.
 
 Example:
 
 ```text
-https://lab.mutaspacesoc.com/guacamole
+team01
+   |
+   v
+Windows-Lab-Team01
 ```
 
----
-
-# 15. Public Exposure Model
-
-The remote-access design intentionally avoids directly exposing:
+not:
 
 ```text
-Proxmox TCP 8006
-RDP TCP 3389
-SSH TCP 22
-Portainer TCP 9443
-Wazuh management interfaces
-pfSense administration
-Active Directory
-AD CS
-```
-
-The publicly accessible application layer is:
-
-```text
-Cloudflare
-     |
-     v
-Guacamole
-```
-
-Internal services remain behind the private lab network.
-
----
-
-# 16. Trust Boundaries
-
-## Boundary 1: Public Internet to Cloudflare
-
-Protected through:
-
-- HTTPS
-- Cloudflare edge infrastructure
-- Tunnel routing
-
----
-
-## Boundary 2: Cloudflare to Lab
-
-Protected through:
-
-- Cloudflare Tunnel
-- Outbound connector
-- No inbound router port forwarding
-
----
-
-## Boundary 3: Guacamole to Windows Endpoint
-
-Protected through:
-
-- Internal networking
-- RDP authentication
-- Windows account permissions
-
----
-
-## Boundary 4: Team User to Assigned Endpoint
-
-Controlled through:
-
-- Guacamole user permissions
-- Connection assignment
-- Windows authentication
-
----
-
-# 17. External Validation
-
-The remote-access architecture was tested from outside the home network.
-
-Validation included:
-
-1. Access from the administrator laptop while on campus
-2. Access from a school-managed computer
-3. No Tailscale client on the school computer
-4. Browser-based Guacamole login
-5. Team01 connection selection
-6. Successful Windows RDP authentication
-7. Successful interactive desktop session
-
-Result:
-
-```text
-External Browser Access: PASSED
+team01
+   |
+   +---- Team01
+   +---- Team02
+   +---- Team03
+   +---- Administrative Connections
 ```
 
 ---
 
-# 18. Successful End-to-End Path
+# 33. Multiple Security Layers
 
-The validated path is:
-
-```text
-School-Managed Computer
-        |
-        | HTTPS
-        v
-lab.mutaspacesoc.com
-        |
-        v
-Cloudflare
-        |
-        v
-Cloudflare Tunnel
-        |
-        v
-docker-01
-        |
-        v
-Apache Guacamole
-        |
-        | TCP 3389
-        v
-HELPDESK-TEAM01
-        |
-        v
-Team01 Windows Session
-```
-
-This is the current reference architecture for future student remote access.
-
----
-
-# 19. Security Advantages
-
-The architecture provides several advantages over direct access models.
-
-## Reduced Public Exposure
-
-Internal management services are not directly exposed.
-
-## Browser-Only Student Workflow
-
-Students require only:
-
-- Supported browser
-- Guacamole credentials
-- Windows lab credentials
-
-## Centralized Access
-
-Remote sessions are brokered through one controlled gateway.
-
-## Endpoint Assignment
-
-Users can be limited to their assigned systems.
-
-## No Hypervisor Access
-
-Students do not require Proxmox accounts.
-
-## No Student VPN Requirement
-
-School computers do not require local VPN software installation.
-
----
-
-# 20. Current Limitations
-
-The current design is functional but not considered fully hardened.
-
-Known limitations include:
-
-- Cloudflare Access is not yet implemented
-- Team 02 Guacamole access requires final configuration
-- Team 03 Guacamole access requires final configuration
-- Student networks are not yet isolated by VLAN/subnet
-- Team systems share the current `10.10.10.0/24` network
-- Credential rotation procedures still need formalization
-- Automated workstation reset procedures remain planned
-
----
-
-# 21. Planned Cloudflare Access Layer
-
-A planned improvement is to place Cloudflare Access in front of Guacamole.
-
-Future flow:
-
-```text
-Remote Browser
-      |
-      v
-Cloudflare Access
-      |
-      | identity check
-      v
-Guacamole
-      |
-      | team-specific login
-      v
-Assigned Endpoint
-```
-
-This creates two authentication layers:
-
-```text
-Cloudflare Access
-        +
-Guacamole
-        +
-Windows
-```
-
----
-
-# 22. Planned Authentication Model
-
-Long-term student authentication may use:
-
-```text
-Layer 1
-Cloudflare identity validation
-
-Layer 2
-Guacamole team/user identity
-
-Layer 3
-Active Directory or Windows identity
-```
-
-This will provide clearer separation between:
-
-- External access
-- Lab access
-- Endpoint identity
-
----
-
-# 23. Planned Team Isolation
-
-Future network segmentation will place each team on a dedicated subnet or VLAN.
+A mature implementation can use multiple authentication layers.
 
 Example:
 
 ```text
-Team 01
-10.10.21.0/24
+Layer 1:
+Cloudflare Access
 
-Team 02
-10.10.22.0/24
+Layer 2:
+Guacamole Authentication
 
-Team 03
-10.10.23.0/24
+Layer 3:
+Windows / Active Directory Authentication
 ```
 
-pfSense will control communication between these environments.
+Each layer protects a different boundary.
 
 ---
 
-# 24. Planned Session Security Improvements
+# 34. Add Cloudflare Access
 
-Future hardening may include:
+Cloudflare Tunnel publishes the application.
 
-- Session timeouts
-- Account lockout
-- Password rotation
-- Temporary student accounts
-- Per-semester account lifecycle
-- Limited clipboard permissions
-- Limited file transfer
-- Connection recording where appropriate
-- Audit logging
-- Conditional Cloudflare policies
-- Device or location restrictions where appropriate
+Cloudflare Access can add an identity-aware gate in front of it.
 
----
-
-# 25. Operational Checks
-
-## Guacamole Containers
-
-Validate:
-
-```bash
-sudo docker ps
-```
-
-Expected containers include:
+Conceptually:
 
 ```text
-guacamole
-guacd
-guac-postgres
-cloudflared
+Internet
+   |
+   v
+Cloudflare Access
+   |
+   v
+Guacamole
+   |
+   v
+Windows Endpoint
 ```
+
+This is recommended before broad or long-term student use.
 
 ---
 
-## Guacamole Logs
+# 35. Remote Access and Network Segmentation
 
-```bash
-sudo docker logs guacamole --tail 50
-```
+Remote access does not automatically isolate internal endpoints.
 
----
-
-## RDP Proxy Logs
-
-```bash
-sudo docker logs guacd --tail 50
-```
-
-These logs are useful when distinguishing:
+Even if:
 
 ```text
-Network failure
-Authentication failure
-Protocol negotiation failure
-Session failure
+team01
+```
+
+can only see Team01 in Guacamole, the underlying Windows endpoints may still share a network.
+
+For stronger isolation, combine the remote access gateway with:
+
+- VLANs
+- Separate subnets
+- Firewall policies
+- Team-specific ACLs
+
+---
+
+# 36. Security Boundaries
+
+A useful remote-access design separates:
+
+```text
+External Access
+      |
+      v
+Access Gateway
+      |
+      v
+Internal Endpoint
+      |
+      v
+Core Infrastructure
+```
+
+Students should not need access to the infrastructure layer.
+
+---
+
+# 37. Logging
+
+Remote access itself should eventually become part of the monitoring architecture.
+
+Useful log sources include:
+
+- Cloudflare access events
+- Guacamole authentication
+- Guacamole connection activity
+- Windows RDP authentication
+- Windows Security logs
+- Wazuh endpoint telemetry
+
+This creates an investigation path such as:
+
+```text
+Remote Login
+    |
+    v
+Guacamole
+    |
+    v
+Windows Authentication
+    |
+    v
+Windows Security Log
+    |
+    v
+SIEM
 ```
 
 ---
 
-## Cloudflare Connector
+# 38. Recommended Validation Checklist
+
+Before allowing users into the lab, validate:
+
+```text
+[ ] Guacamole containers are healthy
+[ ] Guacamole loads internally
+[ ] RDP is listening
+[ ] Docker host reaches RDP
+[ ] Student account has a password
+[ ] Student account has RDP permission
+[ ] Guacamole connection succeeds
+[ ] Public hostname resolves
+[ ] Cloudflare Tunnel is healthy
+[ ] External browser reaches Guacamole
+[ ] Non-admin user can log in
+[ ] User only sees assigned connection
+```
+
+---
+
+# 39. Common Failure: Tunnel Is Inactive
+
+If Cloudflare reports the tunnel as inactive:
+
+1. Verify the connector is running
+2. Review connector logs
+3. Confirm the tunnel token was entered correctly
+4. Confirm the connector registered successfully
+5. Do not troubleshoot DNS before the connector itself is healthy
+
+---
+
+# 40. Common Failure: Public URL Returns 404
+
+A 404 does not always mean the tunnel is broken.
 
 Check:
 
-```bash
-sudo docker ps --filter name=cloudflared
-```
+- Published application route
+- Origin service address
+- Application path
+- Guacamole context path
+- Whether the root hostname and `/guacamole` path behave differently
 
-Review logs:
-
-```bash
-sudo docker logs cloudflared --tail 50
-```
-
-The connector should remain healthy.
-
----
-
-# 26. RDP Endpoint Validation
-
-On Windows:
-
-```powershell
-Get-NetTCPConnection -LocalPort 3389 -State Listen
-```
-
-Account validation:
-
-```powershell
-Get-LocalUser Team01
-```
-
-Remote Desktop Users:
-
-```powershell
-net localgroup "Remote Desktop Users"
-```
-
----
-
-# 27. Troubleshooting Workflow
-
-If a remote session fails:
+Always distinguish:
 
 ```text
-Can the public hostname load?
-        |
-        v
-Is Cloudflare Tunnel healthy?
-        |
-        v
-Can Guacamole load?
-        |
-        v
-Can docker-01 reach endpoint:3389?
-        |
-        v
-Is Windows listening on 3389?
-        |
-        v
-Is the student account active?
-        |
-        v
-Does it have a valid password?
-        |
-        v
-Is it allowed to use RDP?
-        |
-        v
-Do guacd logs show authentication failure?
+Cloudflare routing problem
 ```
 
-This sequence avoids immediately changing firewall or network configuration when the problem may exist at the authentication layer.
-
----
-
-# 28. Security Decision Record
-
-## Decision
-
-Use Cloudflare Tunnel and Apache Guacamole for student remote access.
-
-## Alternatives Considered
-
-- Direct Proxmox access
-- Tailscale on student devices
-- Public RDP
-- Direct VPN access
-
-## Reason
-
-The selected architecture:
-
-- Requires only a browser
-- Works from managed school computers
-- Does not require student software installation
-- Avoids direct Proxmox exposure
-- Avoids public RDP
-- Preserves internal network boundaries
-- Supports team-specific endpoint assignments
-
----
-
-# 29. Credential Handling
-
-The following must never be stored in this repository:
-
-- Cloudflare Tunnel tokens
-- Guacamole passwords
-- PostgreSQL passwords
-- Windows student passwords
-- Administrator passwords
-- Wazuh enrollment keys
-- API keys
-- Private authentication secrets
-
-Example documentation:
+from:
 
 ```text
-Tunnel Name: mutaspace-guacamole
-Tunnel Token: [REDACTED]
+Application routing problem
 ```
 
 ---
 
-# 30. Remote Access Status
+# 41. MutaSpace Reference Implementation
 
-| Capability | Status |
-|---|---|
-| Internal Guacamole | Operational |
-| Team01 RDP | Operational |
-| Team01 Guacamole | Operational |
-| Cloudflare Tunnel | Operational |
-| Public HTTPS hostname | Operational |
-| School computer access | Validated |
-| No-Tailscale student access | Validated |
-| Team02 Guacamole | Pending |
-| Team03 Guacamole | Pending |
-| Cloudflare Access | Planned |
-| Team network segmentation | Planned |
+The MutaSpace lab uses this design to provide browser-based access to internal Windows investigation systems.
+
+The implementation successfully demonstrated:
+
+- Internal RDP
+- Guacamole proxying
+- Docker-based deployment
+- Cloudflare Tunnel
+- Public HTTPS access
+- Browser-based Windows sessions
+- Access from a school-managed computer without VPN software
+
+The MutaSpace environment serves as the reference implementation for this guide.
 
 ---
 
-# 31. Architecture Principle
+# 42. Security Principle
 
-The remote-access architecture follows this rule:
+The core design principle is:
 
-> Students should receive access to the systems required for the lab without receiving unnecessary access to the infrastructure that hosts the lab.
+> Publish the minimum application required for the user to perform the task.
 
-The long-term goal is to combine:
+If a user only needs a Windows desktop, publish the controlled remote desktop gateway.
 
-```text
-Strong external authentication
-        +
-Team-specific application access
-        +
-Network segmentation
-        +
-Centralized logging
-        +
-Repeatable reset procedures
-```
-
-to provide a secure and reusable browser-based cybersecurity lab environment.
+Do not expose the hypervisor, firewall, or internal management interfaces simply because they are convenient.
