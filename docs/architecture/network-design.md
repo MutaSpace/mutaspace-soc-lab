@@ -1,70 +1,73 @@
-# Network Design
+# Network Architecture
 
-This document describes the current network architecture of the MutaSpace Enterprise Security Lab.
+This document explains the network design of the MutaSpace Enterprise Security Lab.
 
-It separates the **current operational design** from the **planned segmentation model** so that deployed infrastructure is not confused with future architecture.
+For step-by-step implementation instructions, see the guides under:
 
----
-
-# 1. Network Overview
-
-The current lab operates primarily on a single internal SOC network:
-
-```text
-Network: 10.10.10.0/24
-Gateway: 10.10.10.1
-Internal DNS: 10.10.10.10
-Active Directory Domain: mutaspace.local
-```
-
-The network is hosted within Proxmox and routed through a virtual pfSense firewall.
-
-Current design goals include:
-
-- Centralized routing
-- Controlled internet access
-- Internal DNS
-- Active Directory communication
-- Wazuh telemetry transport
-- Application testing
-- Remote student access
-- Future network segmentation
-- Future attack and defense scenarios
+`docs/network/`
 
 ---
 
-# 2. Physical and Virtual Network Layers
+# 1. Design Goals
 
-The lab uses a dedicated Proxmox virtualization host:
+The lab network was designed to provide:
+
+- Separation between upstream and internal lab traffic
+- A dedicated firewall and gateway
+- Predictable infrastructure addressing
+- Active Directory-integrated DNS
+- Centralized security monitoring
+- Support for Windows and Linux endpoints
+- Containerized applications
+- Student lab environments
+- A foundation for future VLAN segmentation
+
+The goal is to model the structure of an enterprise network rather than place every virtual machine directly on the upstream network.
+
+---
+
+# 2. High-Level Topology
 
 ```text
-mutaspace-soc-node01
-```
-
-Proxmox provides virtual network bridges that connect virtual machines to management, upstream, and internal SOC networks.
-
-Current bridges include:
-
-```text
-vmbr0
-vmbr1
+                         Internet
+                            |
+                            v
+                    Upstream Network
+                            |
+                            v
+                          vmbr0
+                            |
+                         pfSense
+                            |
+                          vmbr1
+                            |
+                   Internal Lab Network
+                            |
+          +-----------------+-----------------+
+          |                 |                 |
+          v                 v                 v
+       Identity          Security         Applications
+       Services         Monitoring            |
+          |                 |                 |
+          +--------+--------+--------+--------+
+                   |                 |
+                   v                 v
+                Endpoints        Student Lab
 ```
 
 ---
 
-# 3. Current Virtual Bridges
+# 3. Virtual Bridges
+
+The reference architecture uses two primary Proxmox bridges.
 
 ## `vmbr0`
 
-### Purpose
+Purpose:
 
-`vmbr0` provides the upstream-facing side of the lab architecture.
-
-Current uses include:
-
-- Proxmox host management
-- Connectivity to the upstream/home network
-- WAN-side connectivity for pfSense
+- Proxmox management connectivity
+- Upstream network access
+- pfSense WAN connectivity
 
 Conceptually:
 
@@ -74,1038 +77,477 @@ Upstream Network
       v
     vmbr0
       |
-      +---- Proxmox Management
+      +---- Proxmox Host
       |
       +---- pfSense WAN
 ```
 
-Students should not receive direct access to this network layer.
-
----
-
 ## `vmbr1`
 
-### Purpose
+Purpose:
 
-`vmbr1` provides the internal SOC network.
-
-Current network:
-
-```text
-10.10.10.0/24
-```
-
-This bridge connects most internal enterprise security systems.
+- Internal enterprise lab network
 
 Conceptually:
 
 ```text
-                       vmbr1
-                         |
-        +----------------+----------------+
-        |                |                |
-        v                v                v
-      dc-01           wazuh-01         docker-01
-        |
-        +------------------------------------------+
-        |                 |                        |
-        v                 v                        v
-   win-client-01     ubuntu-app-01         student endpoints
+               vmbr1
+                 |
+        +--------+--------+
+        |        |        |
+        v        v        v
+       AD      Wazuh    Endpoints
 ```
 
 ---
 
-# 4. Firewall and Gateway
+# 4. Firewall Boundary
 
-## `fw-01`
-
-Platform:
+pfSense sits between the upstream network and the internal lab network.
 
 ```text
-pfSense
+Upstream
+   |
+   v
+pfSense WAN
+   |
+   | Routing / NAT / Firewall
+   v
+pfSense LAN
+   |
+   v
+Internal Lab
 ```
 
-Internal address:
+This provides a central control point for:
 
-```text
-10.10.10.1
-```
-
-Roles:
-
-- Default gateway
-- Firewall
 - Routing
+- NAT
 - DHCP
-- Internet access
-- Network policy foundation
-
-The firewall separates the internal SOC network from upstream connectivity.
-
-Current internal systems use:
-
-```text
-Default Gateway: 10.10.10.1
-```
+- Firewall policy
+- Future VLAN routing
+- Future segmentation
 
 ---
 
-# 5. Current Internal Addressing
+# 5. Internal Addressing
 
-## Infrastructure Systems
-
-| System | IP Address | Address Type | Role |
-|---|---:|---|---|
-| `fw-01` | `10.10.10.1` | Static | Firewall / Gateway |
-| `dc-01` | `10.10.10.10` | Static | AD DS / DNS |
-| `wazuh-01` | `10.10.10.20` | Static | SIEM |
-| `ubuntu-app-01` | `10.10.10.30` | Static | Application Server |
-| `docker-01` | `10.10.10.40` | Static | Container Infrastructure |
-| `ca-01` | `10.10.10.50` | Static | Enterprise CA |
-
-## Dynamic / Endpoint Systems
-
-| System | Addressing | Observed Address | Role |
-|---|---|---:|---|
-| `analyst-01` | DHCP | `10.10.10.103` | Analyst Workstation |
-| `win-client-01` | DHCP | `10.10.10.105` | Windows Endpoint |
-| `HELPDESK-TEAM01` | DHCP | Dynamic | Student Endpoint |
-| `HELPDESK-TEAM02` | DHCP | Dynamic | Student Endpoint |
-| `HELPDESK-TEAM03` | DHCP | Dynamic | Student Endpoint |
-
-Observed DHCP addresses should not be treated as permanent until DHCP reservations or static assignments are configured.
-
----
-
-# 6. DNS Architecture
-
-## Internal DNS
-
-Primary internal DNS server:
-
-```text
-dc-01
-10.10.10.10
-```
-
-Domain:
-
-```text
-mutaspace.local
-```
-
-Domain-joined systems should use:
-
-```text
-10.10.10.10
-```
-
-as their primary DNS resolver.
-
-This allows clients to resolve:
-
-- Active Directory domain records
-- Domain controllers
-- Internal servers
-- Kerberos service records
-- Internal application names
-
-Examples:
-
-```text
-dc-01.mutaspace.local
-wazuh-01.mutaspace.local
-ubuntu-app-01.mutaspace.local
-```
-
----
-
-# 7. External DNS Resolution
-
-Internal clients use `dc-01` for DNS.
-
-External DNS requests are forwarded upstream.
-
-Conceptually:
-
-```text
-Client
-  |
-  v
-dc-01 DNS
-  |
-  +---- Internal zone? ----> Answer locally
-  |
-  +---- External name? ----> Forward upstream
-```
-
-This keeps Active Directory name resolution centralized while still supporting internet access.
-
----
-
-# 8. DHCP
-
-DHCP is currently provided through pfSense.
-
-Dynamic systems may receive addresses within the internal SOC network:
+The current reference implementation uses:
 
 ```text
 10.10.10.0/24
 ```
 
-DHCP is currently used for systems such as:
+with:
 
-- Analyst workstation
-- Windows endpoints
-- Student endpoints
+```text
+10.10.10.1
+```
 
-Infrastructure systems use static addressing.
+as the internal gateway.
+
+Core infrastructure uses predictable addressing.
+
+Example pattern:
+
+```text
+Gateway               10.10.10.1
+Directory / DNS        10.10.10.10
+Security Monitoring    10.10.10.20
+Application Server     10.10.10.30
+Container Host         10.10.10.40
+Certificate Services   10.10.10.50
+```
+
+Client systems may use DHCP.
+
+These addresses are examples from the reference implementation and can be changed in another environment.
 
 ---
 
-# 9. Routing Model
+# 6. DNS Design
 
-The current routing path is:
+Active Directory-integrated DNS is provided by the domain controller.
 
-```text
-Internal VM
-    |
-    v
-vmbr1
-    |
-    v
-fw-01
-10.10.10.1
-    |
-    v
-Upstream Network
-    |
-    v
-Internet
-```
-
-Examples of validated paths include:
-
-```text
-HELPDESK-TEAM01
-      |
-      v
-10.10.10.1
-      |
-      v
-Internet
-```
-
-and:
-
-```text
-analyst-01
-      |
-      v
-ubuntu-app-01
-10.10.10.30
-```
-
----
-
-# 10. Active Directory Traffic
-
-Domain-joined Windows systems communicate with:
-
-```text
-dc-01
-10.10.10.10
-```
-
-for:
-
-- DNS
-- Kerberos
-- LDAP
-- Group Policy
-- Domain authentication
-- Computer account validation
+Domain-joined systems should normally use the internal DNS server rather than a public DNS resolver.
 
 Conceptually:
 
 ```text
 Windows Endpoint
       |
-      +---- DNS --------+
-      |
-      +---- Kerberos ---+
-      |
-      +---- LDAP -------+
-      |
-      +---- Group Policy
-      |
+      | DNS
       v
-    dc-01
+Active Directory DNS
+      |
+      +---- Internal domain -> resolve locally
+      |
+      +---- External domain -> forward upstream
 ```
+
+This allows internal domain services and external Internet names to resolve through one consistent client configuration.
 
 ---
 
-# 11. Wazuh Communication
+# 7. Why DNS Is Critical
 
-Wazuh agents communicate with:
+In an Active Directory environment, DNS is part of the identity architecture.
 
-```text
-wazuh-01
-10.10.10.20
-```
+Clients use DNS to locate:
 
-Important ports currently include:
+- Domain controllers
+- Kerberos services
+- LDAP services
+- Other internal systems
 
-```text
-TCP 1514 - Agent communication
-TCP 1515 - Agent enrollment
-```
-
-Conceptually:
-
-```text
-Endpoint
-   |
-   | Security telemetry
-   v
-wazuh-01:1514
-```
-
-Agent enrollment uses:
-
-```text
-Endpoint
-   |
-   v
-wazuh-01:1515
-```
-
-Current student agents include:
-
-```text
-006 - HELPDESK-TEAM01
-007 - HELPDESK-TEAM03
-008 - HELPDESK-TEAM02
-```
+A machine can have working Internet connectivity and still fail domain operations if its DNS configuration is incorrect.
 
 ---
 
-# 12. Application Traffic
+# 8. Routing Model
 
-## Nginx Application Server
+Traffic between systems on the same subnet can communicate directly at Layer 2.
 
-`ubuntu-app-01` hosts Nginx on:
-
-```text
-10.10.10.30
-TCP 80
-```
-
-Traffic flow:
+Traffic leaving the internal subnet is sent to the default gateway.
 
 ```text
-analyst-01
-     |
-     | HTTP
-     v
-ubuntu-app-01:80
+Internal Host
      |
      v
-Nginx
+10.10.10.1
+     |
+     v
+pfSense
+     |
+     v
+Upstream Network
 ```
-
-This server is used for:
-
-- HTTP testing
-- Web log analysis
-- Security telemetry
-- Reconnaissance simulations
-- Detection engineering
 
 ---
 
-# 13. Docker Networking
+# 9. NAT
 
-## docker-01
+Internal systems use private RFC1918 addresses.
 
-Address:
+pfSense performs NAT for outbound Internet access.
 
 ```text
-10.10.10.40
+10.10.10.x
+     |
+     v
+pfSense NAT
+     |
+     v
+Upstream / Internet
 ```
 
-Docker also maintains an internal bridge network.
+This allows internal systems to initiate external connections without requiring public IP addresses.
+
+---
+
+# 10. Security Monitoring Traffic
+
+Endpoints send security telemetry to the SIEM over the internal network.
 
 Example:
 
 ```text
-Docker bridge:
-172.17.0.0/16
+Endpoint
+   |
+   | Security Telemetry
+   v
+Wazuh
 ```
 
-Conceptual traffic path:
+The monitoring layer depends on working:
+
+- Routing
+- DNS
+- Service ports
+- Endpoint agent configuration
+
+---
+
+# 11. Application Traffic
+
+Application systems remain on the internal network.
+
+Example:
 
 ```text
-SOC Network
-10.10.10.0/24
-     |
-     v
-docker-01
-10.10.10.40
-     |
-     v
+Analyst Workstation
+        |
+        | HTTP
+        v
+Application Server
+        |
+        v
+Application Logs
+        |
+        v
+SIEM
+```
+
+This provides a controlled environment for generating and analyzing realistic application telemetry.
+
+---
+
+# 12. Container Networking
+
+The container host participates in the internal enterprise network while Docker maintains its own internal bridge network.
+
+Conceptually:
+
+```text
+Enterprise Network
+       |
+       v
+Docker Host
+       |
+       v
 Docker Bridge
-172.17.0.0/16
-     |
-     v
-Container
+       |
+       +---- Container
+       +---- Container
 ```
+
+Port mappings allow selected container services to be reached from the enterprise network.
 
 ---
 
-# 14. Docker Port Mapping
+# 13. Remote Access Traffic
 
-Containerized services may be exposed through Docker port mapping.
-
-Example:
-
-```text
-docker-01:8080
-      |
-      v
-web-test:80
-```
-
-This means:
-
-```text
-Host Port: 8080
-Container Port: 80
-```
-
-External lab systems connect to:
-
-```text
-http://10.10.10.40:8080
-```
-
-Docker forwards the traffic to the Nginx container.
-
----
-
-# 15. Portainer
-
-Portainer provides Docker management over:
-
-```text
-TCP 9443
-```
-
-Portainer is considered administrative infrastructure and should not be directly exposed to students.
-
----
-
-# 16. Guacamole Remote Access
-
-Apache Guacamole is hosted on `docker-01`.
-
-Internal access currently uses:
-
-```text
-http://10.10.10.40:8081/guacamole
-```
-
-Guacamole brokers browser-based RDP connections to student Windows systems.
-
-Conceptually:
-
-```text
-Browser
-   |
-   v
-Guacamole
-   |
-   | RDP
-   v
-HELPDESK-TEAM0X
-```
-
----
-
-# 17. Remote Access Architecture
-
-The public student lab hostname is:
-
-```text
-lab.mutaspacesoc.com
-```
-
-Current flow:
+Remote access follows a different path from ordinary internal traffic.
 
 ```text
 Remote Browser
       |
-      | HTTPS
       v
 Cloudflare
       |
       v
-Cloudflare Tunnel
+Tunnel
       |
       v
-docker-01
+Remote Access Gateway
       |
       v
-Apache Guacamole
-      |
-      | RDP
-      v
-Assigned Windows Endpoint
+Internal Endpoint
 ```
 
-This allows school-managed computers to access the lab without:
+The user does not require direct access to:
 
-- Tailscale
-- Local RDP clients
-- Proxmox access
-- VPN software
-- Direct exposure of TCP 3389
+- Proxmox
+- pfSense
+- Internal management interfaces
+- Public RDP
 
 ---
 
-# 18. Cloudflare Tunnel
+# 14. Current Segmentation State
 
-The Cloudflare Tunnel connector runs from `docker-01`.
+The current lab primarily operates on a single internal subnet.
 
-The connector establishes an outbound session to Cloudflare.
+This simplifies the initial build and allows the core services to be validated before introducing more complex segmentation.
 
-This avoids inbound port forwarding from the public internet into the home network.
-
-Conceptually:
-
-```text
-docker-01
-    |
-    | outbound encrypted tunnel
-    v
-Cloudflare
-```
-
-Students then access:
-
-```text
-https://lab.mutaspacesoc.com
-```
-
-Cloudflare forwards requests through the tunnel to Guacamole.
+Logical security roles already exist, but logical role separation is not the same as network isolation.
 
 ---
 
-# 19. Public Exposure Model
+# 15. Future Segmentation
 
-The current design intentionally does not directly publish:
+The network is designed to evolve toward separate security zones.
+
+Possible future zones include:
 
 ```text
-Proxmox TCP 8006
-RDP TCP 3389
-SSH TCP 22
-Wazuh
-pfSense
-Active Directory
-Docker management ports
+Management
+Identity
+SOC
+Applications
+Student Labs
+Attack Simulation
+Sensors
 ```
 
-Instead:
+A future architecture might resemble:
+
+```text
+                         pfSense
+                            |
+       +--------------------+--------------------+
+       |                    |                    |
+       v                    v                    v
+   Infrastructure       Applications          Students
+                                               |
+                                   +-----------+-----------+
+                                   |           |           |
+                                   v           v           v
+                                Team 01     Team 02     Team 03
+```
+
+---
+
+# 16. Why Segment Later?
+
+Introducing VLANs too early adds complexity while the builder is still learning basic:
+
+- Addressing
+- Routing
+- DNS
+- Active Directory
+- Firewalling
+
+The reference build intentionally follows:
+
+```text
+Build a working network
+        |
+        v
+Validate it
+        |
+        v
+Understand traffic flow
+        |
+        v
+Introduce segmentation
+```
+
+---
+
+# 17. Future VLAN Design
+
+One possible design could include:
+
+```text
+VLAN 10  Management
+VLAN 20  Infrastructure
+VLAN 30  Applications
+VLAN 40  Student Labs
+VLAN 50  Security Sensors
+```
+
+Team-based student environments could later receive dedicated subnets or VLANs.
+
+The exact VLAN numbering is a design choice rather than a requirement.
+
+---
+
+# 18. Trust Boundaries
+
+The network architecture creates several trust boundaries.
+
+Examples:
 
 ```text
 Internet
    |
    v
-Cloudflare
+Remote Access Boundary
+
+Upstream Network
    |
    v
-Guacamole
+Firewall Boundary
+
+Internal Network
    |
-   v
-Internal Windows endpoint
+   +---- Identity Infrastructure
+   +---- Monitoring Infrastructure
+   +---- Applications
+   +---- Endpoints
 ```
 
-This reduces direct exposure of core lab infrastructure.
+Future firewall rules should enforce communication based on system role rather than allowing unrestricted east-west traffic.
 
 ---
 
-# 20. Current Student Network Model
+# 19. Validation Philosophy
 
-The three student systems currently exist on the same internal SOC network:
+Network validation should occur before application troubleshooting.
 
-```text
-10.10.10.0/24
-```
-
-Current systems:
+A useful model is:
 
 ```text
-HELPDESK-TEAM01
-HELPDESK-TEAM02
-HELPDESK-TEAM03
-```
-
-At present, these systems are logically separated through:
-
-- Unique hostnames
-- Unique accounts
-- Unique Wazuh identities
-- Guacamole connection assignment
-
-They are **not yet fully isolated at the network layer**.
-
-This is a known design limitation.
-
----
-
-# 21. Current Student Trust Model
-
-Current access separation is primarily identity-based:
-
-```text
-Guacamole user team01
-      |
-      v
-HELPDESK-TEAM01
-
-Guacamole user team02
-      |
-      v
-HELPDESK-TEAM02
-
-Guacamole user team03
-      |
-      v
-HELPDESK-TEAM03
-```
-
-Future architecture will add network-based segmentation.
-
----
-
-# 22. Planned Student Network Segmentation
-
-The future student architecture will separate each team into its own subnet.
-
-Example planned model:
-
-```text
-TEAM 1
-10.10.21.0/24
-
-TEAM 2
-10.10.22.0/24
-
-TEAM 3
-10.10.23.0/24
-```
-
-Conceptually:
-
-```text
-                    pfSense
-                       |
-          +------------+------------+
-          |            |            |
-          v            v            v
-       TEAM 1        TEAM 2        TEAM 3
-   10.10.21.0/24 10.10.22.0/24 10.10.23.0/24
-```
-
----
-
-# 23. Planned VLAN Model
-
-Potential future VLAN structure:
-
-| VLAN | Purpose | Example Network |
-|---:|---|---|
-| 10 | Core Infrastructure | `10.10.10.0/24` |
-| 20 | Analyst Systems | TBD |
-| 21 | Student Team 01 | `10.10.21.0/24` |
-| 22 | Student Team 02 | `10.10.22.0/24` |
-| 23 | Student Team 03 | `10.10.23.0/24` |
-| 30 | Application / Server Network | TBD |
-| 40 | Attack / Testing Network | TBD |
-| 50 | Monitoring / Sensor Network | TBD |
-
-These VLANs are planned and should not be treated as currently deployed.
-
----
-
-# 24. Planned Firewall Policy
-
-Future pfSense policies should support:
-
-```text
-Student Team -> Assigned Domain Services
-Student Team -> DNS
-Student Team -> Required Application Services
-Student Team -> Wazuh
-Student Team -> Internet as needed
-```
-
-while restricting:
-
-```text
-Team 01 -> Team 02
-Team 01 -> Team 03
-
-Team 02 -> Team 01
-Team 02 -> Team 03
-
-Team 03 -> Team 01
-Team 03 -> Team 02
-```
-
-except where a specific lab intentionally requires cross-team communication.
-
----
-
-# 25. Planned Core Infrastructure Protection
-
-Student systems should not receive unrestricted network access to:
-
-```text
-Proxmox
-pfSense administration
-Wazuh administration
-AD CS administration
-Docker administration
-Cloudflare Tunnel configuration
-```
-
-Where communication is required, access should be limited to the necessary service ports.
-
----
-
-# 26. Planned Security Zones
-
-Future logical zones may include:
-
-```text
-MANAGEMENT
-CORE INFRASTRUCTURE
-IDENTITY
-SOC
-APPLICATION
-STUDENT
-ATTACK
-SENSOR
-CLOUD
-```
-
-Example:
-
-```text
-Management
-    |
-    v
-Proxmox / pfSense
-
-Core
-    |
-    +-- dc-01
-    +-- wazuh-01
-    +-- ca-01
-
+NIC
+ |
+ v
+IP Address
+ |
+ v
+Subnet
+ |
+ v
+Gateway
+ |
+ v
+Routing
+ |
+ v
+DNS
+ |
+ v
+Service Port
+ |
+ v
 Application
-    |
-    +-- ubuntu-app-01
-    +-- docker-01
+```
 
-Student
-    |
-    +-- Team 01
-    +-- Team 02
-    +-- Team 03
+If the lower layers fail, troubleshooting the application first wastes time.
 
-Attack
-    |
-    +-- future Kali systems
+---
 
-Sensor
-    |
-    +-- future Zeek / Suricata
+# 20. Implementation Guides
+
+The step-by-step build process is documented separately under:
+
+`docs/network/`
+
+Recommended sequence:
+
+```text
+01. Proxmox Bridges
+02. pfSense Network Setup
+03. Addressing and DHCP
+04. Active Directory DNS
+05. Linux Network Configuration
+06. Network Validation and Troubleshooting
+07. VLAN Segmentation
 ```
 
 ---
 
-# 27. Planned Network Monitoring
+# 21. MutaSpace Reference Implementation
 
-Future monitoring expansion includes:
+The current MutaSpace implementation validates:
 
-- Zeek
-- Suricata
-- Packet capture
-- IDS/IPS
-- DNS monitoring
-- NetFlow-style analysis
-- East-west traffic analysis
+- Separate upstream and internal Proxmox bridges
+- pfSense routing
+- Private internal addressing
+- DHCP
+- Active Directory-integrated DNS
+- Windows and Linux connectivity
+- Wazuh telemetry
+- Container workloads
+- Remote browser-based access
 
-Potential architecture:
-
-```text
-Traffic
-   |
-   +---- Normal destination
-   |
-   +---- Mirrored / monitored traffic
-             |
-             v
-         sensor-01
-        /         \
-      Zeek      Suricata
-        \         /
-             |
-             v
-          SIEM
-```
+The architecture is intentionally being expanded in stages so each layer can be understood and validated before additional complexity is introduced.
 
 ---
 
-# 28. Network Validation Procedures
+# 22. Design Principle
 
-A system should not be considered network-ready simply because it receives an IP address.
+The network should not exist merely to provide Internet connectivity.
 
-Validation should include:
-
-## Interface
-
-```bash
-ip addr
-```
-
-or:
-
-```powershell
-ipconfig /all
-```
-
-## Gateway
+It should provide the structure that connects:
 
 ```text
-Ping 10.10.10.1
+Identity
+Monitoring
+Applications
+Endpoints
+Remote Access
+Training Environments
 ```
 
-## DNS Server
-
-```text
-Ping 10.10.10.10
-```
-
-## Internal DNS
-
-Example:
-
-```text
-Resolve dc-01.mutaspace.local
-```
-
-## External IP Connectivity
-
-Example:
-
-```text
-Ping 1.1.1.1
-```
-
-## External DNS
-
-Example:
-
-```text
-Resolve microsoft.com
-```
-
-## Service-Specific Ports
-
-Examples:
-
-```text
-Wazuh: 1514
-Enrollment: 1515
-RDP: 3389
-HTTP: 80
-HTTPS: 443
-Guacamole: 8081 internal
-Portainer: 9443
-```
-
----
-
-# 29. Example Windows Validation
-
-```powershell
-ipconfig /all
-
-Test-Connection 10.10.10.1 -Count 2
-Test-Connection 10.10.10.10 -Count 2
-Test-Connection 10.10.10.20 -Count 2
-
-Resolve-DnsName dc-01.mutaspace.local
-Resolve-DnsName microsoft.com
-
-Test-NetConnection 10.10.10.20 -Port 1514
-Test-NetConnection 10.10.10.20 -Port 1515
-```
-
----
-
-# 30. Example Linux Validation
-
-```bash
-ip -br addr
-
-ip route
-
-resolvectl status
-
-ping -c 3 10.10.10.1
-ping -c 3 10.10.10.10
-ping -c 3 10.10.10.20
-ping -c 3 1.1.1.1
-
-getent hosts dc-01.mutaspace.local
-getent hosts google.com
-```
-
----
-
-# 31. Known Network Issues Resolved
-
-## docker-01 Dual Addressing
-
-### Symptom
-
-`docker-01` had two addresses:
-
-```text
-10.10.10.40
-10.10.10.107
-```
-
-and multiple default routes.
-
-### Cause
-
-Two Netplan configurations were active:
-
-```text
-00-installer-config.yaml
-50-cloud-init.yaml
-```
-
-The first configured static addressing.
-
-The second enabled DHCP.
-
-### Resolution
-
-The cloud-init configuration was disabled.
-
-The intended configuration retained:
-
-```text
-Address: 10.10.10.40/24
-Gateway: 10.10.10.1
-DNS: 10.10.10.10
-Search Domain: mutaspace.local
-```
-
-### Validation
-
-Confirmed:
-
-- Single IPv4 address
-- Single default route
-- Internal connectivity
-- Internet connectivity
-- Internal DNS
-- External DNS
-
----
-
-# 32. Remote RDP Validation
-
-Before enabling Guacamole access, RDP was validated independently.
-
-Example:
-
-```text
-docker-01
-    |
-    | TCP 3389
-    v
-HELPDESK-TEAM01
-```
-
-Successful TCP connectivity confirmed that the network path was functional before Guacamole authentication was investigated.
-
-This prevented an application authentication issue from being misdiagnosed as a network problem.
-
----
-
-# 33. Network Troubleshooting Philosophy
-
-Network troubleshooting should proceed by layer.
-
-Example:
-
-```text
-Is the VM running?
-       |
-       v
-Does it have an IP?
-       |
-       v
-Does it have a route?
-       |
-       v
-Can it reach the gateway?
-       |
-       v
-Can it reach the destination IP?
-       |
-       v
-Does DNS resolve?
-       |
-       v
-Is the destination port open?
-       |
-       v
-Does the application authenticate?
-```
-
-This approach helps distinguish:
-
-```text
-Network failure
-```
-
-from:
-
-```text
-Application failure
-```
-
-or:
-
-```text
-Authentication failure
-```
-
----
-
-# 34. Network Security Principle
-
-The current design follows the principle:
-
-> Connectivity should be validated before application troubleshooting, and access should be restricted to the minimum paths required for each system's role.
-
-The long-term architecture will continue moving from a functional flat lab network toward a segmented enterprise-style design with clearly defined trust boundaries and controlled east-west traffic.
+and eventually provide the security boundaries between them.
