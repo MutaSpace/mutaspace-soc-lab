@@ -1,795 +1,681 @@
-# Current Architecture
+# MutaSpace Enterprise Security Lab Architecture
 
-This document describes the current operational architecture of the MutaSpace Enterprise Security Lab.
+This document explains the architecture of the MutaSpace Enterprise Security Lab, how its major components interact, and the design decisions behind the environment.
 
-It reflects systems and services that are deployed and actively used today. Planned components are documented separately in the project roadmap.
+The architecture can also be used as a reference for building a similar Proxmox-based enterprise cybersecurity lab.
 
 ---
 
-# 1. Physical Host
+# 1. Architecture Goals
 
-The entire environment runs on a dedicated custom-built virtualization host.
+The environment was designed to support practical work across multiple security domains without requiring separate physical hardware for every system.
 
-## Official Lab Host
+The architecture needed to support:
+
+- Enterprise networking
+- Active Directory
+- DNS
+- Kerberos authentication
+- Enterprise PKI
+- Windows and Linux endpoints
+- Centralized security monitoring
+- Application workloads
+- Containerized services
+- Remote security labs
+- Security investigations
+- Detection engineering
+- Controlled attack simulation
+- Repeatable student environments
+
+Rather than building each technology independently, the environment connects them so activity generated on one system can be observed and investigated elsewhere.
+
+---
+
+# 2. Physical Foundation
+
+The environment runs on a dedicated custom-built virtualization server.
+
+## Reference Host
 
 | Component | Specification |
 |---|---|
-| Hostname | `mutaspace-soc-node01` |
-| Hypervisor | Proxmox VE |
 | Motherboard | B650 AORUS Elite AX |
-| CPU | AMD Ryzen 9 7900X |
+| Processor | AMD Ryzen 9 7900X |
 | Memory | 64 GB DDR5 |
 | Storage | 2 TB NVMe SSD |
 | Power Supply | 850W |
 | Case | Corsair 3500X |
 | CPU Cooling | Arctic Liquid Freezer III Pro 360 |
+| Hypervisor | Proxmox VE |
 
-The host provides compute resources for:
+The host was designed to run multiple Windows and Linux systems simultaneously while leaving room for future security tooling.
 
-- Firewall and routing
-- Active Directory
-- DNS
-- PKI
-- SIEM
-- Analyst workstations
-- Windows endpoints
-- Linux application servers
-- Container infrastructure
-- Remote access services
-- Student investigation systems
+### Why Proxmox?
+
+Proxmox VE provides:
+
+- Virtual machines
+- Virtual networking
+- Snapshots
+- Cloning
+- Resource pools
+- Centralized VM management
+- Linux-based administration
+
+These capabilities make it possible to model enterprise infrastructure while maintaining the ability to break, restore, clone, and rebuild systems.
 
 ---
 
-# 2. Architecture Overview
+# 3. High-Level Architecture
 
 ```text
-                           INTERNET
-                              |
-                              |
-                     Cloudflare Network
-                              |
-                       HTTPS / Tunnel
-                              |
-                              v
-                     +----------------+
-                     |   docker-01    |
-                     |----------------|
-                     | Docker Engine  |
-                     | Portainer      |
-                     | Guacamole      |
-                     | cloudflared    |
-                     +--------+-------+
-                              |
-                              | RDP
-                              |
-               +--------------+--------------+
-               |              |              |
-               v              v              v
-      HELPDESK-TEAM01 HELPDESK-TEAM02 HELPDESK-TEAM03
-               |
-               |
-+---------------------------------------------------------------+
-|                    SOC INTERNAL NETWORK                       |
-|                       10.10.10.0/24                            |
-|                                                               |
-|                         fw-01                                 |
-|                        pfSense                                |
-|                     10.10.10.1                               |
-|                           |                                   |
-|       +-------------------+-------------------+               |
-|       |                   |                   |               |
-|       v                   v                   v               |
-|     dc-01              wazuh-01             ca-01             |
-| AD DS / DNS              SIEM               AD CS             |
-| 10.10.10.10           10.10.10.20        10.10.10.50          |
-|       |                   ^                                   |
-|       |                   |                                   |
-|       +-------------------+--------------------------------+  |
-|                           |                                |  |
-|                           | Endpoint telemetry             |  |
-|                           |                                |  |
-|              +------------+------------+                   |  |
-|              |            |            |                   |  |
-|              v            v            v                   |  |
-|         analyst-01   win-client-01 ubuntu-app-01            |  |
-|                                     10.10.10.30             |  |
-|                                                               |
-|                           docker-01                            |
-|                         10.10.10.40                            |
-+---------------------------------------------------------------+
+                         INTERNET
+                            |
+                            v
+                    External Access Layer
+                            |
+                            v
+                      Remote Gateway
+                            |
+                            v
++-------------------------------------------------------+
+|               ENTERPRISE SECURITY LAB                 |
+|                                                       |
+|                     Firewall                          |
+|                        |                              |
+|          +-------------+-------------+                |
+|          |             |             |                |
+|          v             v             v                |
+|      Identity        Security      Application         |
+|   Infrastructure   Monitoring    Infrastructure        |
+|          |             |             |                |
+|          |             |             |                |
+|          +-------+-----+------+------+-+              |
+|                  |            |                        |
+|                  v            v                        |
+|             Endpoints     Student Labs                 |
+|                  |            |                        |
+|                  +-----+------+                        |
+|                        |                               |
+|                        v                               |
+|                 Security Telemetry                    |
++-------------------------------------------------------+
 ```
+
+The architecture intentionally separates responsibilities even when systems currently share the same virtual network.
 
 ---
 
-# 3. Network Architecture
+# 4. Virtualization Layer
 
-## Internal Network
+The virtualization layer provides the foundation for every logical security environment above it.
 
 ```text
-Network: 10.10.10.0/24
-Gateway: 10.10.10.1
-Internal DNS: 10.10.10.10
-Domain: mutaspace.local
+Physical Hardware
+       |
+       v
+   Proxmox VE
+       |
+       +-------- Virtual Networking
+       |
+       +-------- Infrastructure VMs
+       |
+       +-------- Security Systems
+       |
+       +-------- Endpoints
+       |
+       +-------- Application Workloads
+       |
+       +-------- Student Environments
 ```
 
-## Virtual Bridges
-
-### `vmbr0`
-
-Purpose:
-
-- Proxmox host management
-- Upstream connectivity
-- WAN-side connectivity for pfSense
-
-### `vmbr1`
-
-Purpose:
-
-- Internal SOC network
-- Communication between enterprise systems
-- Endpoint-to-server traffic
-- Wazuh telemetry
-- Student investigation environments
+This makes the environment reproducible and allows systems to be cloned or restored without rebuilding physical machines.
 
 ---
 
-# 4. Firewall and Routing
+# 5. Network Layer
 
-## `fw-01`
+The lab uses two primary Proxmox bridges.
 
-Platform:
+```text
+vmbr0
+```
 
-`pfSense`
+provides management and upstream connectivity.
 
-Primary role:
+```text
+vmbr1
+```
 
-- Internal gateway
-- Firewall
-- Routing
-- DHCP
-- Upstream internet access
+provides the internal enterprise security network.
 
-Internal address:
+The reference implementation currently uses:
+
+```text
+10.10.10.0/24
+```
+
+with:
 
 ```text
 10.10.10.1
 ```
 
-The pfSense VM separates the SOC network from upstream connectivity and provides the routing foundation for the environment.
+as the internal gateway.
 
-Current validation includes:
+A virtual pfSense firewall provides:
 
-- Gateway reachability
-- Internal routing
-- Internet access
-- DHCP functionality
-- DNS forwarding path
-- VM-to-VM communication
+- Routing
+- Firewall services
+- DHCP
+- Internet connectivity
+- Foundation for future segmentation
 
 ---
 
-# 5. Identity Infrastructure
+# 6. Why Use a Virtual Firewall?
 
-## `dc-01`
+Placing pfSense inside the virtualization environment allows the lab network to behave more like an enterprise network.
 
-Platform:
-
-Windows Server 2022
-
-Address:
+Instead of allowing every VM to communicate directly through the host's upstream network:
 
 ```text
-10.10.10.10
+VM -> Home Network
 ```
 
-Roles:
+traffic can follow:
+
+```text
+VM
+ |
+ v
+Internal Virtual Network
+ |
+ v
+pfSense
+ |
+ v
+Upstream Network
+```
+
+This creates a control point where routing and security policies can later be implemented.
+
+---
+
+# 7. Identity Layer
+
+The environment uses Microsoft Active Directory as its primary enterprise identity system.
+
+The identity layer provides:
 
 - Active Directory Domain Services
 - DNS
-- Kerberos authentication
-- Domain identity
+- Kerberos
+- Domain authentication
+- Computer identities
 - Group Policy
+- Centralized Windows identity management
 
-Domain:
+Reference domain:
 
 ```text
 mutaspace.local
 ```
 
-Current capabilities:
-
-- Domain user authentication
-- Domain computer authentication
-- Kerberos ticketing
-- Internal DNS resolution
-- Domain-joined Windows endpoints
-- Group Policy processing
-
-Critical services include:
+Architecture:
 
 ```text
-NTDS
-DNS
-Netlogon
-KDC
-DFSR
-W32Time
+Windows Endpoint
+      |
+      +------ DNS
+      |
+      +------ Kerberos
+      |
+      +------ LDAP
+      |
+      +------ Group Policy
+      |
+      v
+Domain Controller
 ```
+
+This allows identity activity to become part of security investigations rather than treating endpoints as independent machines.
 
 ---
 
-# 6. PKI Architecture
+# 8. PKI Layer
 
-## `ca-01`
-
-Platform:
-
-Windows Server 2022
-
-Address:
+Active Directory Certificate Services adds enterprise certificate infrastructure.
 
 ```text
-10.10.10.50
+Active Directory
+       |
+       v
+Certificate Authority
+       |
+       +---- Certificate Enrollment
+       +---- Certificate Templates
+       +---- Trust
+       +---- Certificate Lifecycle
 ```
 
-Role:
+The PKI environment provides a foundation for studying:
 
-Active Directory Certificate Services
-
-Current CA:
-
-```text
-MutaSpace Enterprise Root CA
-```
-
-Current capabilities:
-
-- Enterprise CA deployment
-- Active Directory integration
-- Certificate services foundation
-
-Planned extensions include:
-
-- Certificate templates
-- Manual enrollment
+- Digital certificates
+- Enterprise trust
+- Certificate enrollment
 - Auto-enrollment
+- Certificate templates
+- Revocation
 - Certificate lifecycle management
-- CRLs
-- OCSP
-- AD CS security assessment
-- Certificate abuse scenarios
+- AD CS security weaknesses
 
 ---
 
-# 7. Security Monitoring
+# 9. Security Monitoring Layer
 
-## `wazuh-01`
+Wazuh provides centralized security monitoring.
 
-Platform:
-
-Ubuntu Server
-
-Address:
+Instead of relying only on logs stored locally:
 
 ```text
-10.10.10.20
+Endpoint
+   |
+   v
+Local Logs
 ```
 
-Role:
-
-Central SIEM and security monitoring platform
-
-Current Wazuh components include:
-
-- Wazuh Manager
-- Wazuh Indexer
-- Wazuh Dashboard
-- Agent management
-- Security Configuration Assessment
-- File Integrity Monitoring
-- Rootcheck
-- System inventory
-- Windows event collection
-- Linux log collection
-- Application log collection
-
-Current monitored systems include:
+the architecture adds:
 
 ```text
-dc-01
-analyst-01
-win-client-01
-ubuntu-app-01
-docker-01
-HELPDESK-TEAM01
-HELPDESK-TEAM02
-HELPDESK-TEAM03
+Endpoint
+   |
+   | Security telemetry
+   v
+Wazuh
+   |
+   v
+Centralized Investigation
 ```
 
-Student Wazuh identities:
-
-```text
-006 - HELPDESK-TEAM01
-007 - HELPDESK-TEAM03
-008 - HELPDESK-TEAM02
-```
+This allows activity from multiple systems to be investigated from one security platform.
 
 ---
 
-# 8. SOC Analyst Workstation
+# 10. Endpoint Layer
 
-## `analyst-01`
+The environment includes Windows and Linux endpoints representing different enterprise workloads.
 
-Platform:
+Examples include:
 
-Ubuntu Desktop
+- Windows user workstations
+- Windows infrastructure servers
+- Linux analyst systems
+- Linux application servers
+- Container hosts
 
-Role:
+Endpoints generate telemetry that can be correlated with:
 
-SOC analyst workstation
-
-Current uses:
-
-- Wazuh dashboard access
-- Investigation
-- Internal testing
-- Web traffic generation
-- Security validation
-- Analyst workflow simulation
-
-The analyst workstation is intentionally separate from the SIEM server so investigations can be performed from the perspective of an analyst accessing centralized telemetry.
+- Authentication
+- Network activity
+- Application activity
+- File changes
+- Security configuration
+- System state
 
 ---
 
-# 9. Windows Security Endpoint
+# 11. Application Layer
 
-## `win-client-01`
+A Linux application server provides a realistic workload for security monitoring.
 
-Platform:
+The current reference implementation uses Nginx.
 
-Windows 10 Pro
+This provides:
 
-Role:
-
-Primary Windows security testing endpoint
-
-Current capabilities:
-
-- Domain membership
-- Active Directory authentication
-- Group Policy
-- Windows Event Viewer
-- Wazuh endpoint monitoring
-- Authentication telemetry generation
-- Endpoint security testing
-
-Observed Windows security events include:
-
-```text
-4624 - Successful logon
-4625 - Failed logon
-4648 - Explicit credential usage
-4768 - Kerberos TGT request
-4769 - Kerberos service ticket request
-4771 - Kerberos pre-authentication failure
-```
-
-This endpoint is used to generate and investigate Windows authentication activity.
-
----
-
-# 10. Linux Application Server
-
-## `ubuntu-app-01`
-
-Platform:
-
-Ubuntu Server
-
-Address:
-
-```text
-10.10.10.30
-```
-
-Services:
-
-- Nginx
-- SSH
-- Wazuh Agent
-
-Current monitored application logs:
-
-```text
-/var/log/nginx/access.log
-/var/log/nginx/error.log
-```
-
-Validated activity includes:
-
-- HTTP 200 responses
-- HTTP 404 responses
-- Web requests
-- Sensitive-path enumeration tests
-- Wazuh ingestion of Nginx telemetry
-
-Example test paths:
-
-```text
-/admin
-/login
-/backup
-/phpmyadmin
-/.env
-/.git
-```
-
-The system provides a controlled application workload for web log analysis and future detection engineering exercises.
-
----
-
-# 11. Container Infrastructure
-
-## `docker-01`
-
-Platform:
-
-Ubuntu Server
-
-Address:
-
-```text
-10.10.10.40
-```
-
-Role:
-
-Container and application infrastructure host
-
-Current services:
-
-- Docker Engine
-- Docker Compose
-- Portainer
-- Nginx test container
-- Apache Guacamole
-- Cloudflare Tunnel
-- Wazuh Agent
-
-## Docker Network
-
-Docker uses an internal bridge network in addition to the SOC network.
+- HTTP traffic
+- Access logs
+- Error logs
+- Web reconnaissance activity
+- Application troubleshooting
+- Detection engineering opportunities
 
 Example:
 
 ```text
-SOC LAN:
-10.10.10.0/24
-
-docker-01:
-10.10.10.40
-
-Docker bridge:
-172.17.0.0/16
-```
-
-Port mapping allows external lab systems to reach containerized services.
-
-Example:
-
-```text
-docker-01:8080
-        |
-        v
-web-test container:80
-        |
-        v
+Client
+  |
+  | HTTP Request
+  v
 Nginx
+  |
+  +---- access.log
+  |
+  +---- error.log
+          |
+          v
+        Wazuh
 ```
 
 ---
 
-# 12. Container Log Collection
+# 12. Container Layer
 
-Docker currently uses:
+A dedicated Linux server hosts containerized infrastructure using Docker.
 
-```text
-json-file
-```
+This introduces another common enterprise technology into the lab.
 
-as the container logging driver.
+Container workloads currently support areas such as:
 
-Container logs are stored under:
+- Web applications
+- Infrastructure management
+- Remote access
+- Security telemetry
 
-```text
-/var/lib/docker/containers/
-```
-
-Wazuh log collection has been configured to monitor selected Docker JSON logs.
-
-Testing with `wazuh-logtest` confirmed:
+Architecture:
 
 ```text
-Phase 1 - Pre-decoding
-Phase 2 - JSON decoding
-Phase 3 - Rule evaluation
+Enterprise Network
+       |
+       v
+Docker Host
+       |
+       v
+Docker Bridge
+       |
+       +---- Container
+       +---- Container
+       +---- Container
 ```
 
-The current Docker/Nginx telemetry is successfully decoded as JSON but currently maps to generic Wazuh rules.
-
-This creates a future detection engineering objective:
-
-> Build custom decoding and detection logic that extracts the security meaning of containerized Nginx traffic.
+Containerization allows new applications to be introduced without requiring an additional VM for every service.
 
 ---
 
-# 13. Student Lab Architecture
+# 13. Student Lab Layer
 
-The environment currently contains three student Help Desk investigation workstations.
-
-```text
-HELPDESK-TEAM01
-HELPDESK-TEAM02
-HELPDESK-TEAM03
-```
-
-Each system has:
-
-- Unique Windows identity
-- Unique hostname
-- Active Directory membership
-- Student-facing local account
-- Instructor recovery account
-- Unique Wazuh enrollment
-- Independent endpoint telemetry
-- Remote Desktop enabled
-
-## Template Build Process
-
-The student machines were created using:
+Reusable Windows endpoints provide isolated logical environments for hands-on exercises.
 
 ```text
-win-client-01
-      |
-      v
-helpdesk-template-prep
-      |
-      | Sysprep /generalize
-      v
 Generalized Windows Master
+           |
+           +----------+
+           |          |
+           v          v
+        Team 01    Team 02
+           |
+           v
+        Team 03
+```
+
+Each deployed workstation receives its own:
+
+- Windows machine identity
+- Hostname
+- Active Directory computer identity
+- Wazuh identity
+- User context
+
+This prevents cloned systems from operating under duplicated identities.
+
+---
+
+# 14. Remote Access Layer
+
+The environment supports browser-based access using:
+
+```text
+Cloudflare Tunnel
+        +
+Apache Guacamole
+        +
+RDP
+```
+
+Architecture:
+
+```text
+Remote Browser
       |
-      +--------+--------+
-      |        |        |
-      v        v        v
-   TEAM01   TEAM02   TEAM03
+      | HTTPS
+      v
+Cloudflare
+      |
+      v
+Secure Tunnel
+      |
+      v
+Guacamole
+      |
+      | RDP
+      v
+Assigned Endpoint
 ```
 
-Each clone was independently:
-
-1. Named
-2. Network validated
-3. Joined to `mutaspace.local`
-4. Assigned a unique Wazuh agent name
-5. Assigned a unique Wazuh key
-6. Validated as Active in the Wazuh Manager
+This approach avoids requiring users to connect directly to the hypervisor or expose RDP publicly.
 
 ---
 
-# 14. Remote Access Architecture
+# 15. Why Use an Access Gateway?
 
-The student environment can now be accessed remotely using a web browser.
+The user needs access to the endpoint.
 
-## External Flow
+The user does **not** need access to the infrastructure hosting the endpoint.
 
-```text
-School-Managed Computer
-         |
-         | HTTPS
-         v
-lab.mutaspacesoc.com
-         |
-         v
-Cloudflare Network
-         |
-   Cloudflare Tunnel
-         |
-         v
-docker-01
-         |
-   Apache Guacamole
-         |
-         | RDP
-         v
-HELPDESK-TEAM0X
-```
-
-## Public Domain
+Instead of:
 
 ```text
-mutaspacesoc.com
+Student
+   |
+   v
+Proxmox
+   |
+   v
+VM
 ```
 
-Student lab hostname:
+the architecture uses:
 
 ```text
-lab.mutaspacesoc.com
+Student
+   |
+   v
+Remote Access Gateway
+   |
+   v
+Assigned VM
 ```
 
-## Security Benefits
-
-This design avoids directly exposing:
-
-- Proxmox
-- RDP port 3389
-- pfSense
-- Wazuh
-- SSH
-- Internal SOC addresses
-
-to the public Internet.
-
-The Cloudflare connector establishes an outbound tunnel from the lab infrastructure.
-
-Apache Guacamole then brokers browser-based RDP sessions to the assigned internal Windows endpoint.
+This follows the principle of providing only the access required for the task.
 
 ---
 
-# 15. Student Access Flow
+# 16. Security Telemetry Flow
 
-Current Team 01 proof-of-concept:
+One of the most important design characteristics is centralized observability.
+
+Example authentication flow:
 
 ```text
-Student browser
-       |
-       v
-lab.mutaspacesoc.com
-       |
-       v
-Guacamole authentication
-       |
-       v
-HELPDESK-TEAM01 connection
-       |
-       v
-RDP authentication
-       |
-       v
-Windows desktop
+User
+ |
+ v
+Windows Endpoint
+ |
+ +------ Authentication Request ------> Active Directory
+ |
+ +------ Windows Security Event
+ |
+ v
+Wazuh Agent
+ |
+ v
+Wazuh Manager
+ |
+ v
+Security Analyst
 ```
 
-This complete path has been successfully tested from a school-managed computer outside the home environment.
+This allows the same activity to be studied from multiple perspectives.
 
-No Tailscale client or RDP software was required on the school computer.
+For example:
+
+```text
+User Perspective
+Endpoint Perspective
+Identity Perspective
+SIEM Perspective
+Network Perspective
+```
 
 ---
 
-# 16. Trust Boundaries
+# 17. Investigation Model
 
-The architecture contains several important trust boundaries.
+A typical security investigation can cross several systems.
 
-## Boundary 1: Internet to Lab
+```text
+Suspicious Activity
+       |
+       v
+Endpoint Evidence
+       |
+       +------ Event Viewer
+       |
+       +------ Application Logs
+       |
+       +------ Network State
+       |
+       v
+Centralized Telemetry
+       |
+       v
+Wazuh
+       |
+       v
+Analyst Investigation
+```
 
-Controlled through:
+Future tooling will expand this model with network and incident-response telemetry.
 
-- Cloudflare
-- HTTPS
-- Cloudflare Tunnel
+---
 
-## Boundary 2: Remote Access Gateway to Endpoint
+# 18. Current Segmentation Model
 
-Controlled through:
+The current reference implementation primarily uses:
 
-- Guacamole authentication
-- Assigned connections
-- RDP authentication
+```text
+10.10.10.0/24
+```
 
-## Boundary 3: Windows Endpoint to Active Directory
+for the internal environment.
 
-Controlled through:
+Logical roles already exist, but full network segmentation is still being developed.
 
-- Active Directory identity
+This is intentional documentation of the current maturity level rather than representing planned controls as already implemented.
+
+---
+
+# 19. Future Segmentation
+
+The architecture is designed to evolve toward multiple security zones.
+
+Potential future model:
+
+```text
+                    pfSense
+                       |
+       +---------------+---------------+
+       |               |               |
+       v               v               v
+Infrastructure     Applications      Students
+       |                               |
+       |                    +----------+----------+
+       |                    |          |          |
+       v                    v          v          v
+Identity / SOC           Team 01    Team 02    Team 03
+```
+
+Additional zones may eventually include:
+
+- Management
+- Identity
+- Applications
+- SOC
+- Student environments
+- Attack simulation
+- Network sensors
+
+---
+
+# 20. Planned Monitoring Expansion
+
+Future architecture will introduce additional visibility layers.
+
+Potential tools include:
+
+```text
+Sysmon
+Suricata
+Zeek
+Splunk
+Velociraptor
+```
+
+Example future telemetry architecture:
+
+```text
+Endpoints --------+
+                  |
+Applications -----+----> Security Platforms
+                  |
+Identity ---------+
+                  |
+Network Sensors --+
+```
+
+---
+
+# 21. MutaSpace Implementation
+
+The current MutaSpace implementation has successfully validated the core architecture across:
+
+- Proxmox virtualization
+- pfSense routing
+- Active Directory
 - DNS
 - Kerberos
-- Domain membership
+- Enterprise PKI
+- Windows endpoints
+- Linux workloads
+- Wazuh monitoring
+- Docker infrastructure
+- Containerized applications
+- Reusable student workstations
+- Browser-based remote access
 
-## Boundary 4: Endpoint to SIEM
-
-Controlled through:
-
-- Wazuh agent identity
-- Enrollment keys
-- Manager communication
-
-## Boundary 5: Proxmox Management
-
-Proxmox administration remains separate from student browser access.
-
-Students do not require direct Proxmox administration to interact with assigned endpoint systems.
+The environment has progressed from individual virtual machines into an interconnected security lab capable of generating, collecting, and investigating activity across multiple security domains.
 
 ---
 
-# 17. Current Security Considerations
+# 22. Design Principle
 
-The current architecture is operational but will continue to be hardened.
+The architecture follows one central rule:
 
-Planned improvements include:
+> Security technologies should not be studied as isolated tools.
 
-- Cloudflare Access policy
-- Stronger external identity controls
-- Team-specific Guacamole permissions
-- Network isolation between student teams
-- VLANs
-- Separate team subnets
-- pfSense ACLs
-- Additional student role restrictions
-- Credential rotation procedures
-- Automated reset procedures
+A firewall affects network communication.
 
----
+DNS affects Active Directory.
 
-# 18. Current Validation Status
+Active Directory generates authentication activity.
 
-| Component | Validation |
-|---|---|
-| Proxmox host | Passed |
-| pfSense | Passed |
-| Active Directory | Passed |
-| DNS | Passed |
-| Kerberos | Passed |
-| Wazuh Manager | Passed |
-| Windows Wazuh agents | Passed |
-| Linux Wazuh agents | Passed |
-| Nginx telemetry | Passed |
-| Docker Engine | Passed |
-| Docker container access | Passed |
-| Portainer | Passed |
-| Apache Guacamole | Passed |
-| Windows RDP | Passed |
-| Cloudflare Tunnel | Passed |
-| External browser access | Passed |
-| School-managed computer test | Passed |
+Endpoints generate security events.
 
----
+Applications generate logs.
 
-# 19. Planned Architecture Expansion
+Security platforms collect that evidence.
 
-Future systems may include:
+Analysts use the combined evidence to investigate what happened.
 
-```text
-sensor-01
-Splunk
-Zeek
-Suricata
-Velociraptor
-Kali Linux
-Microsoft Sentinel
-Microsoft Entra ID
-Okta
-TheHive
-Shuffle
-additional Windows endpoints
-additional Linux workloads
-team-specific student networks
-```
-
-Planned components will not be represented as operational until deployed and validated.
-
----
-
-# 20. Architecture Principle
-
-The architecture follows a simple rule:
-
-> A system is not considered operational simply because it is installed.
-
-Each component must be:
-
-1. Deployed
-2. Configured
-3. Connected
-4. Tested
-5. Monitored
-6. Documented
-7. Troubleshot when necessary
-8. Validated from the perspective of the user or analyst who will depend on it
+Building these systems together creates a more realistic environment for understanding how enterprise security actually operates.
