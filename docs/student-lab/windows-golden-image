@@ -1,0 +1,1189 @@
+# Building a Reusable Windows Golden Image for Cybersecurity Labs
+
+Creating individual Windows virtual machines for every lab user quickly becomes repetitive and difficult to maintain.
+
+A better approach is to build one clean Windows system, prepare it for cloning, generalize it with Sysprep, and use it as the foundation for future lab workstations.
+
+This guide walks through that process using Proxmox VE, Windows, Active Directory, and Wazuh.
+
+---
+
+# 1. What Are We Building?
+
+The target architecture is:
+
+```text
+Windows Base VM
+      |
+      v
+Configure Lab Software
+      |
+      v
+Remove Machine-Specific Identity
+      |
+      v
+Sysprep / Generalize
+      |
+      v
+Golden Image
+      |
+      +----------+----------+
+      |          |          |
+      v          v          v
+   Clone 01   Clone 02   Clone 03
+      |          |          |
+      v          v          v
+Unique AD     Unique AD   Unique AD
+Identity      Identity    Identity
+
+Unique Wazuh  Unique Wazuh Unique Wazuh
+Identity      Identity     Identity
+```
+
+The important concept is:
+
+> Clone the desired operating system state, not the identity of the source computer.
+
+---
+
+# 2. Why Use a Golden Image?
+
+Without a reusable image, every new workstation requires:
+
+```text
+Install Windows
+      |
+Install Updates
+      |
+Install Tools
+      |
+Configure Settings
+      |
+Install Monitoring
+      |
+Configure Remote Access
+      |
+Repeat Everything Again
+```
+
+A golden image moves the reusable work earlier in the process:
+
+```text
+Build Once
+    |
+Generalize
+    |
+Clone
+    |
+Assign Unique Identity
+```
+
+This becomes especially useful when building:
+
+- Student workstations
+- SOC analyst endpoints
+- Help Desk labs
+- Incident-response exercises
+- Malware-analysis environments
+- Temporary training systems
+
+---
+
+# 3. Understand What Cloning Copies
+
+A VM clone can contain much more than the Windows installation.
+
+Depending on when the source is cloned, it may contain:
+
+- Computer name
+- Local accounts
+- Application configuration
+- Domain-related state
+- Monitoring agent configuration
+- Authentication material
+- Certificates
+- Cached data
+- Security tooling
+- Log files
+
+This means:
+
+```text
+VM Clone ≠ Automatically Unique Computer
+```
+
+The cloning workflow must deliberately separate reusable configuration from machine-specific identity.
+
+---
+
+# 4. Reference Technology
+
+This guide assumes:
+
+```text
+Hypervisor:
+Proxmox VE
+
+Operating System:
+Windows 10/11 Pro or Enterprise
+
+Identity:
+Microsoft Active Directory
+
+Endpoint Monitoring:
+Wazuh
+
+Remote Access:
+RDP
+```
+
+The concepts also apply to other hypervisors and monitoring platforms.
+
+---
+
+# 5. Build the Base Windows VM
+
+Start with a clean Windows virtual machine.
+
+Recommended baseline tasks include:
+
+- Install Windows
+- Install current updates
+- Install required drivers
+- Configure the virtual NIC
+- Install required classroom or security tools
+- Remove unnecessary temporary files
+- Verify Windows activation where applicable
+- Confirm the system is stable
+
+Do not generalize a system that is already experiencing unresolved operating-system problems.
+
+---
+
+# 6. Create an Instructor Recovery Account
+
+Before removing domain membership or changing machine identity, create a local administrative recovery account.
+
+Example:
+
+```text
+LabAdmin
+```
+
+Verify that it belongs to the local Administrators group:
+
+```powershell
+net localgroup Administrators
+```
+
+Then verify that you can actually sign in using:
+
+```text
+.\LabAdmin
+```
+
+This provides a recovery path if domain authentication becomes unavailable.
+
+Do not publish the password.
+
+---
+
+# 7. Why a Local Recovery Account Matters
+
+Consider a workstation that currently depends on Active Directory:
+
+```text
+Windows VM
+   |
+   v
+Domain Authentication
+```
+
+If you remove that system from the domain before verifying local administrative access, you can create an unnecessary recovery problem.
+
+The safer sequence is:
+
+```text
+Create Local Administrator
+        |
+        v
+Test Local Login
+        |
+        v
+Remove Domain Identity
+```
+
+---
+
+# 8. Decide What Belongs in the Image
+
+A golden image should contain **reusable configuration**.
+
+Good candidates include:
+
+- Operating-system updates
+- Common applications
+- Endpoint monitoring software binaries
+- Administrative utilities
+- Classroom software
+- Browser configuration
+- General security settings
+
+Avoid embedding machine-specific secrets such as:
+
+- Enrollment keys
+- API tokens
+- Private keys
+- User passwords
+- Cloud credentials
+- Temporary access tokens
+
+Those should be assigned after deployment.
+
+---
+
+# 9. Domain-Joined Source Systems
+
+If your source VM is already joined to Active Directory, do not simply clone it repeatedly and use the clones as independent domain computers.
+
+The source has an existing relationship with Active Directory.
+
+A reusable image should be prepared so deployed clones can establish their own computer identities.
+
+---
+
+# 10. Remove the Source from the Domain
+
+Using the local administrator account, remove the preparation VM from the domain and return it to a workgroup.
+
+One PowerShell method is:
+
+```powershell
+Remove-Computer `
+  -UnjoinDomainCredential "<DOMAIN>\<AUTHORIZED_ACCOUNT>" `
+  -WorkgroupName "WORKGROUP" `
+  -Restart
+```
+
+Enter the credential interactively.
+
+Do not hard-code domain credentials into the script.
+
+---
+
+# 11. Validate Domain Removal
+
+After restart:
+
+```powershell
+Get-CimInstance Win32_ComputerSystem |
+Select-Object Name,Domain,PartOfDomain
+```
+
+Expected:
+
+```text
+Domain       : WORKGROUP
+PartOfDomain : False
+```
+
+Do not proceed based only on the absence of an error message.
+
+Validate the resulting state.
+
+---
+
+# 12. Prepare Endpoint Monitoring
+
+Security agents deserve special attention before cloning.
+
+An installed monitoring agent may contain identity information used by the management platform.
+
+For Wazuh, this can include:
+
+```text
+Agent Name
+Agent ID
+Enrollment State
+client.keys
+```
+
+If every clone inherits the same identity, the SIEM may interpret multiple computers as the same endpoint or reject the duplicates.
+
+---
+
+# 13. Stop the Wazuh Agent
+
+Before preparing the reusable image:
+
+```powershell
+Stop-Service WazuhSvc
+```
+
+Verify:
+
+```powershell
+Get-Service WazuhSvc
+```
+
+The goal is to prevent the preparation system from reconnecting while its identity is being cleaned.
+
+---
+
+# 14. Remove Machine-Specific Wazuh Identity
+
+The Wazuh agent installation itself can remain available in the image.
+
+The reusable enrollment identity should not.
+
+A common Windows installation location is:
+
+```text
+C:\Program Files (x86)\ossec-agent\
+```
+
+If an existing `client.keys` file belongs to the source endpoint, it should not become the permanent identity used by every clone.
+
+For example, preserve it temporarily while preparing the image:
+
+```powershell
+Rename-Item `
+  "C:\Program Files (x86)\ossec-agent\client.keys" `
+  "client.keys.pre-generalization"
+```
+
+Before publishing or distributing the image, make sure sensitive enrollment material is not exposed.
+
+---
+
+# 15. Why Monitoring Identity Must Be Unique
+
+Consider this incorrect design:
+
+```text
+Source VM
+Agent Identity 005
+      |
+      +---------+
+      |         |
+      v         v
+Clone A      Clone B
+ID 005       ID 005
+```
+
+The monitoring platform cannot reliably distinguish the systems.
+
+The correct design is:
+
+```text
+Golden Image
+      |
+      +----------+
+      |          |
+      v          v
+Clone A       Clone B
+      |          |
+      v          v
+Agent A       Agent B
+```
+
+Each deployed endpoint receives its own monitoring identity.
+
+---
+
+# 16. Prepare for Sysprep
+
+Before running Sysprep, verify:
+
+```text
+[ ] Local administrator tested
+[ ] Domain membership removed if required
+[ ] Required software installed
+[ ] Updates completed
+[ ] No installation is actively running
+[ ] Machine-specific monitoring identity removed
+[ ] Sensitive temporary files removed
+[ ] System is stable
+```
+
+A snapshot before generalization can also provide a useful recovery point during image development.
+
+---
+
+# 17. What Does Sysprep Do?
+
+Sysprep is Microsoft's System Preparation tool.
+
+For this workflow, two options matter:
+
+```text
+OOBE
+Generalize
+```
+
+### OOBE
+
+OOBE causes the deployed clone to enter the Windows Out-of-Box Experience on first boot.
+
+### Generalize
+
+Generalization removes system-specific information so Windows can be deployed as a new machine.
+
+Conceptually:
+
+```text
+Configured Windows System
+          |
+          v
+       Sysprep
+          |
+          v
+Generalized Windows Image
+```
+
+---
+
+# 18. Run Sysprep
+
+Launch:
+
+```powershell
+C:\Windows\System32\Sysprep\Sysprep.exe
+```
+
+Select:
+
+```text
+System Cleanup Action:
+Enter System Out-of-Box Experience (OOBE)
+
+Generalize:
+Checked
+
+Shutdown Options:
+Shutdown
+```
+
+Start Sysprep and allow Windows to shut down automatically.
+
+---
+
+# 19. Do Not Interrupt Generalization
+
+Once Sysprep begins:
+
+- Do not force-stop the VM
+- Do not reboot it manually
+- Do not close the process
+- Do not reset the VM
+
+Wait for Windows to shut itself down.
+
+---
+
+# 20. Troubleshooting Sysprep Validation Errors
+
+A common failure is:
+
+```text
+Sysprep was not able to validate your Windows installation.
+```
+
+Instead of repeatedly retrying Sysprep, inspect its logs.
+
+The primary log directory is:
+
+```text
+C:\Windows\System32\Sysprep\Panther\
+```
+
+Review:
+
+```powershell
+Get-Content `
+  "C:\Windows\System32\Sysprep\Panther\setuperr.log" `
+  -Tail 40
+```
+
+The log usually provides a much more useful explanation than the graphical error message.
+
+---
+
+# 21. Common AppX Problem
+
+One common failure pattern is:
+
+```text
+Package <PACKAGE> was installed for a user,
+but not provisioned for all users.
+```
+
+This can happen when Microsoft Store/AppX applications change after Windows installation.
+
+Do not respond by deleting every AppX package.
+
+Identify the package named in the Sysprep log first.
+
+---
+
+# 22. Inspect Installed AppX Packages
+
+Example:
+
+```powershell
+Get-AppxPackage -AllUsers |
+Where-Object {$_.Name -like "*<PACKAGE>*"}
+```
+
+Inspect provisioned packages:
+
+```powershell
+Get-AppxProvisionedPackage -Online |
+Where-Object {$_.DisplayName -like "*<PACKAGE>*"}
+```
+
+This helps determine whether the application is:
+
+```text
+Installed for a user
+Provisioned for future users
+Both
+```
+
+---
+
+# 23. Remove Only the Blocking Package
+
+If the Sysprep log identifies a specific package and you determine it is safe to remove:
+
+```powershell
+Get-AppxPackage -AllUsers *<PACKAGE>* |
+Remove-AppxPackage -AllUsers
+```
+
+If a corresponding provisioned package must also be removed:
+
+```powershell
+Get-AppxProvisionedPackage -Online |
+Where-Object {$_.DisplayName -like "*<PACKAGE>*"} |
+Remove-AppxProvisionedPackage -Online
+```
+
+Then run Sysprep again.
+
+---
+
+# 24. Troubleshooting Lesson
+
+During the MutaSpace build, multiple AppX packages had to be investigated before Sysprep completed successfully.
+
+The important lesson was not the names of those specific applications.
+
+The reusable troubleshooting method was:
+
+```text
+Sysprep fails
+      |
+      v
+Read setuperr.log
+      |
+      v
+Identify exact package
+      |
+      v
+Inspect installation/provisioning state
+      |
+      v
+Remove only the blocker
+      |
+      v
+Retry
+```
+
+That workflow is more useful than blindly applying a list of package-removal commands.
+
+---
+
+# 25. Successful Generalization
+
+When Sysprep succeeds, the VM should shut down.
+
+At this point:
+
+> Do not boot the generalized master just to check whether it worked.
+
+Booting it begins the deployment/OOBE process.
+
+Instead, preserve the powered-off VM as the source for future clones.
+
+---
+
+# 26. Protect the Golden Image
+
+Treat the generalized master as infrastructure.
+
+Recommended practices:
+
+- Keep it powered off
+- Give it a clear name
+- Do not assign it to students
+- Do not use it for ordinary testing
+- Clone from it instead of booting it
+- Document major image versions
+
+Example:
+
+```text
+windows-lab-golden-v1
+```
+
+---
+
+# 27. Create a Full Clone in Proxmox
+
+From the generalized master:
+
+```text
+Clone
+  |
+  v
+Full Clone
+```
+
+A full clone gives the new VM independent storage.
+
+This is useful for student environments because each machine can be changed, broken, restored, or deleted independently.
+
+---
+
+# 28. Naming Strategy
+
+Use predictable names.
+
+Example:
+
+```text
+helpdesk-team01
+helpdesk-team02
+helpdesk-team03
+```
+
+or:
+
+```text
+student-win01
+student-win02
+student-win03
+```
+
+Consistent naming makes later work with:
+
+- Active Directory
+- Wazuh
+- DNS
+- Guacamole
+- SIEM searches
+
+much easier.
+
+---
+
+# 29. Interrupted Clone Operations
+
+A clone operation should normally be allowed to finish.
+
+If a clone is interrupted, Proxmox may leave the destination VM locked.
+
+First determine whether a clone task is still running.
+
+Do not unlock a VM while a legitimate operation is active.
+
+If the task has stopped and the clone is incomplete:
+
+```bash
+qm unlock <VM-ID>
+```
+
+The incomplete clone can then be removed and recreated.
+
+---
+
+# 30. Complete OOBE
+
+Start the new clone.
+
+Because the image was generalized, Windows should enter OOBE.
+
+Complete the initial setup according to your lab's account model.
+
+For a local lab account, Windows Pro editions may provide:
+
+```text
+Set up for an organization
+```
+
+and:
+
+```text
+Domain join instead
+```
+
+The wording can vary between Windows releases.
+
+---
+
+# 31. Assign a Unique Computer Name
+
+After deployment, assign the clone its permanent hostname.
+
+Example:
+
+```powershell
+Rename-Computer -NewName "HELPDESK-TEAM01" -Restart
+```
+
+Every clone must have a unique name.
+
+---
+
+# 32. Validate Networking
+
+Before attempting Active Directory enrollment, verify the endpoint's network configuration.
+
+```powershell
+ipconfig /all
+```
+
+Then test:
+
+```powershell
+Test-Connection <GATEWAY_IP> -Count 2
+Test-Connection <DOMAIN_CONTROLLER_IP> -Count 2
+```
+
+Verify DNS:
+
+```powershell
+Resolve-DnsName <DOMAIN_CONTROLLER_FQDN>
+```
+
+---
+
+# 33. Why DNS Comes Before Domain Join
+
+Active Directory depends heavily on DNS.
+
+A computer may have:
+
+```text
+Working Internet
+```
+
+while still being unable to join the domain because it is using the wrong DNS server.
+
+The correct troubleshooting order is:
+
+```text
+IP Configuration
+      |
+      v
+Gateway
+      |
+      v
+Internal DNS
+      |
+      v
+Domain Controller Resolution
+      |
+      v
+Domain Join
+```
+
+---
+
+# 34. Join the Clone to Active Directory
+
+Once networking and DNS are validated:
+
+```powershell
+Add-Computer `
+  -DomainName "<LAB_DOMAIN>" `
+  -Credential "<AUTHORIZED_DOMAIN_ACCOUNT>" `
+  -Restart
+```
+
+Provide the password interactively.
+
+---
+
+# 35. Validate the New AD Identity
+
+After restart:
+
+```powershell
+Get-ComputerInfo |
+Select-Object CsName,CsDomain,CsPartOfDomain
+```
+
+Confirm:
+
+```text
+Unique Computer Name
+Correct Domain
+CsPartOfDomain = True
+```
+
+The clone now has its own Active Directory computer identity.
+
+---
+
+# 36. Create a Unique Wazuh Agent
+
+The clone also needs its own monitoring identity.
+
+On the Wazuh manager:
+
+```bash
+sudo /var/ossec/bin/manage_agents
+```
+
+Create a new agent corresponding to the deployed endpoint.
+
+Use a unique name such as:
+
+```text
+HELPDESK-TEAM01
+```
+
+Do not publish the generated authentication key.
+
+---
+
+# 37. Configure the Windows Agent Name
+
+On the deployed Windows system, review:
+
+```text
+C:\Program Files (x86)\ossec-agent\ossec.conf
+```
+
+Configure the appropriate unique agent name.
+
+Example:
+
+```xml
+<enrollment>
+  <enabled>yes</enabled>
+  <agent_name>HELPDESK-TEAM01</agent_name>
+</enrollment>
+```
+
+---
+
+# 38. Import the Unique Wazuh Identity
+
+Use the Windows agent management utility:
+
+```powershell
+& "C:\Program Files (x86)\ossec-agent\manage_agents.exe"
+```
+
+Import the unique key generated for this endpoint.
+
+The actual key should never appear in:
+
+- GitHub
+- Screenshots
+- Documentation examples
+- Public terminal recordings
+
+---
+
+# 39. Start the Agent
+
+```powershell
+Start-Service WazuhSvc
+```
+
+Verify:
+
+```powershell
+Get-Service WazuhSvc
+```
+
+---
+
+# 40. Validate from the Manager
+
+On the Wazuh server:
+
+```bash
+sudo /var/ossec/bin/agent_control -l
+```
+
+The deployed workstations should appear as independent agents.
+
+Conceptually:
+
+```text
+Windows-Lab-01 -> Active
+Windows-Lab-02 -> Active
+Windows-Lab-03 -> Active
+```
+
+---
+
+# 41. Enable RDP if Required
+
+For environments using a remote access gateway:
+
+```powershell
+Set-ItemProperty `
+  -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+  -Name 'fDenyTSConnections' `
+  -Value 0
+```
+
+Enable the Windows Firewall rules:
+
+```powershell
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+```
+
+---
+
+# 42. Validate RDP
+
+```powershell
+Get-NetTCPConnection -LocalPort 3389 -State Listen
+```
+
+Then test TCP connectivity from the remote-access gateway:
+
+```bash
+nc -vz <WINDOWS_ENDPOINT_IP> 3389
+```
+
+This verifies the network path before adding another application layer such as Guacamole.
+
+---
+
+# 43. Validate the Entire Clone
+
+A deployed clone should not be considered ready until all required layers have been tested.
+
+Example:
+
+```text
+Windows boots
+      |
+      v
+Unique hostname
+      |
+      v
+Network works
+      |
+      v
+Internal DNS works
+      |
+      v
+AD membership works
+      |
+      v
+Wazuh is Active
+      |
+      v
+RDP works
+      |
+      v
+Remote gateway works
+```
+
+---
+
+# 44. Create a Known-Good Baseline
+
+Once the deployed workstation is fully functional, create a snapshot.
+
+Example:
+
+```text
+Clean Deployment
+      |
+      v
+Known-Good Snapshot
+      |
+      v
+Lab Scenario
+      |
+      v
+Student Changes
+      |
+      v
+Restore
+```
+
+This is what makes the environment safe to break.
+
+---
+
+# 45. Golden Image vs Baseline Snapshot
+
+These serve different purposes.
+
+### Golden Image
+
+Used to create entirely new machines.
+
+```text
+Golden Image
+     |
+     v
+New VM
+```
+
+### Baseline Snapshot
+
+Used to restore an existing deployed machine.
+
+```text
+Existing VM
+     |
+     v
+Scenario
+     |
+     v
+Restore Snapshot
+```
+
+Both are useful in a reusable cyber lab.
+
+---
+
+# 46. Version the Image
+
+As the lab evolves, the golden image will evolve too.
+
+Example:
+
+```text
+windows-lab-v1
+windows-lab-v2
+windows-lab-v3
+```
+
+Document meaningful changes such as:
+
+- Windows version
+- Monitoring agent version
+- New applications
+- Major configuration changes
+- Removed software
+- Security baseline changes
+
+---
+
+# 47. Security Considerations
+
+Before converting a VM into a reusable image, ask:
+
+```text
+What would every clone inherit?
+```
+
+Review the image for:
+
+- Passwords
+- API tokens
+- Private keys
+- SSH keys
+- Enrollment secrets
+- Browser sessions
+- Cloud credentials
+- Personal files
+- Cached administrative credentials
+- Certificates with private keys
+
+A reusable image should not become a mechanism for duplicating secrets.
+
+---
+
+# 48. MutaSpace Reference Implementation
+
+This workflow was used to create reusable Windows workstations for the MutaSpace Enterprise Security Lab.
+
+During implementation, the process exposed several practical issues that are easy to miss in a diagram:
+
+- Domain identity must be handled deliberately
+- Monitoring agents can retain clone-specific identity
+- Sysprep may fail because of AppX provisioning state
+- Interrupted hypervisor operations can leave incomplete clones locked
+- Working network connectivity does not guarantee working authentication
+- Every deployed endpoint needs independent validation
+
+Those lessons informed the repeatable workflow documented here.
+
+---
+
+# 49. Final Build Pattern
+
+The complete deployment pattern is:
+
+```text
+Build Windows
+      |
+      v
+Install Reusable Tools
+      |
+      v
+Create Recovery Access
+      |
+      v
+Remove Source Identity
+      |
+      v
+Remove Reusable Secrets
+      |
+      v
+Sysprep / Generalize
+      |
+      v
+Protect Golden Image
+      |
+      v
+Full Clone
+      |
+      v
+Complete OOBE
+      |
+      v
+Unique Hostname
+      |
+      v
+Validate Network + DNS
+      |
+      v
+Unique AD Identity
+      |
+      v
+Unique Wazuh Identity
+      |
+      v
+Configure Remote Access
+      |
+      v
+Validate
+      |
+      v
+Create Baseline Snapshot
+```
+
+---
+
+# 50. Design Principle
+
+The most important rule when cloning security lab endpoints is:
+
+> **Standardize configuration. Regenerate identity.**
+
+A good golden image saves time without creating duplicate identities, shared secrets, or systems that the rest of the infrastructure cannot reliably distinguish.
