@@ -1,646 +1,830 @@
 # MutaSpace Enterprise Security Lab
 
-The MutaSpace Enterprise Security Lab is a custom-built, Proxmox-based enterprise cybersecurity environment designed for hands-on security operations, SOC engineering, identity, networking, detection engineering, incident investigation, and cybersecurity instruction.
+A hands-on enterprise cybersecurity lab built to practice, teach, and document security operations, identity, networking, monitoring, incident investigation, and infrastructure security.
 
-The lab is built on Proxmox VE and models a small enterprise environment with centralized identity, network security, endpoint telemetry, SIEM monitoring, application infrastructure, PKI, containerized services, and remotely accessible security workstations.
-
-This repository documents the environment from architecture and implementation through troubleshooting, validation, security investigations, and lessons learned.
-
----
-
-## Project Purpose
-
-Cybersecurity concepts become much more useful when they can be built, broken, investigated, and explained.
-
-The MutaSpace Enterprise Security Lab was created to turn security knowledge into practical experience through a repeatable process:
-
-> **Build it. Understand it. Validate it. Document it. Teach it. Assess it.**
-
-Rather than treating the environment as a collection of disconnected virtual machines, the goal is to build an evolving enterprise security environment where technologies interact realistically.
-
-The lab supports hands-on work involving:
-
-- Security Operations Center workflows
-- SIEM administration and analysis
-- Windows and Linux endpoint monitoring
-- Active Directory security
-- Identity and access management
-- PKI and certificate services
-- Authentication and Kerberos
-- Network security
-- Firewall administration
-- Container security
-- Detection engineering
-- Incident investigation
-- Vulnerability assessment
-- Security architecture
-- Security consulting
-- Troubleshooting and root cause analysis
-- Cybersecurity instruction and live lab exercises
-
----
-
-# Current Environment
-
-## Virtualization Platform
-
-**Proxmox VE**
-
-Primary node:
-
-`mutaspace-soc-node01`
-
-The Proxmox environment hosts the enterprise infrastructure, security systems, endpoints, application services, and student investigation environments.
-
----
-
-# Official Lab Host
-
-The MutaSpace Enterprise Security Lab runs on a dedicated custom-built host designed to support virtualization, security monitoring, identity services, networking, container workloads, and hands-on lab environments.
-
-## Hardware
-
-| Component | Specification |
-|---|---|
-| Motherboard | B650 AORUS Elite AX |
-| CPU | AMD Ryzen 9 7900X |
-| Memory | 64 GB DDR5 |
-| Storage | 2 TB NVMe SSD |
-| Power Supply | 850W PSU |
-| Case | Corsair 3500X |
-| CPU Cooling | Arctic Liquid Freezer III Pro 360 |
-| Hypervisor | Proxmox VE |
-
-## Host Role
-
-The physical host provides the compute foundation for:
-
-- Enterprise infrastructure VMs
-- Active Directory and DNS
-- PKI and certificate services
-- Wazuh SIEM
-- Linux application servers
-- Docker workloads
-- Student investigation endpoints
-- Remote lab access services
-- Future detection engineering and incident response systems
-
-## Host Identity
-
-```text
-Hostname: mutaspace-soc-node01
-Platform: Proxmox VE
-Role: Primary enterprise security lab hypervisor
-
-## Network
-
-The internal SOC environment currently operates on:
-
-```text
-Network: 10.10.10.0/24
-Gateway: 10.10.10.1
-Domain: mutaspace.local
-```
-
-### Virtual Bridges
-
-| Bridge | Purpose |
-|---|---|
-| `vmbr0` | Proxmox management and upstream connectivity |
-| `vmbr1` | Internal SOC network |
-
-Network routing and firewall services are provided by **pfSense**.
-
----
-
-# Current Architecture
-
-```text
-                         Remote Browser Access
-                                  |
-                               HTTPS
-                                  |
-                          Cloudflare Tunnel
-                                  |
-                              docker-01
-                                  |
-                         Apache Guacamole
-                                  |
-                                  v
-+----------------------------------------------------------------+
-|                    MutaSpace SOC Network                        |
-|                       10.10.10.0/24                             |
-|                                                                |
-|                         fw-01                                  |
-|                        pfSense                                 |
-|                     10.10.10.1                                |
-|                           |                                    |
-|          +----------------+----------------+                   |
-|          |                |                |                   |
-|          v                v                v                   |
-|        dc-01           wazuh-01          ca-01                 |
-|     AD DS + DNS          SIEM            AD CS                 |
-|     10.10.10.10       10.10.10.20     10.10.10.50             |
-|          |                |                                    |
-|          |          Central Telemetry                           |
-|          |                ^                                    |
-|          |                |                                    |
-|    +-----+----------------+-------------------------+          |
-|    |              |               |                |          |
-|    v              v               v                v          |
-| analyst-01  ubuntu-app-01     docker-01       win-client-01    |
-|               Nginx           Docker                           |
-|               SSH             Portainer                        |
-|               Wazuh           Guacamole                        |
-|                               Wazuh                            |
-|                                                                |
-|                    Student Lab                                 |
-|                                                                |
-|         +----------------+----------------+                    |
-|         |                |                |                    |
-|         v                v                v                    |
-| HELPDESK-TEAM01   HELPDESK-TEAM02   HELPDESK-TEAM03           |
-| Windows Endpoint  Windows Endpoint  Windows Endpoint           |
-| Domain Joined     Domain Joined     Domain Joined              |
-| Wazuh Agent 006   Wazuh Agent 008   Wazuh Agent 007           |
-+----------------------------------------------------------------+
-```
-
----
-
-# Core Systems
-
-| System | Platform | Role | Status |
-|---|---|---|---|
-| `fw-01` | pfSense | Firewall, routing, gateway | Operational |
-| `dc-01` | Windows Server 2022 | Active Directory Domain Services + DNS | Operational |
-| `wazuh-01` | Ubuntu | Wazuh SIEM manager and dashboard | Operational |
-| `analyst-01` | Ubuntu Desktop | SOC analyst workstation | Operational |
-| `win-client-01` | Windows 10 Pro | Domain endpoint and security testing | Operational |
-| `ubuntu-app-01` | Ubuntu Server | Nginx application server + SSH | Operational |
-| `docker-01` | Ubuntu Server | Container and application infrastructure | Operational |
-| `ca-01` | Windows Server 2022 | Active Directory Certificate Services | Operational |
-| `HELPDESK-TEAM01` | Windows | Student investigation endpoint | Operational |
-| `HELPDESK-TEAM02` | Windows | Student investigation endpoint | Operational |
-| `HELPDESK-TEAM03` | Windows | Student investigation endpoint | Operational |
-
----
-
-# Security Monitoring
-
-## Wazuh SIEM
-
-Wazuh provides centralized security monitoring across the environment.
-
-Current telemetry sources include:
-
-- Windows Server
-- Windows endpoints
-- Ubuntu systems
-- Application servers
-- Docker infrastructure
-- Student investigation endpoints
-
-Current classroom workstation enrollment:
-
-```text
-006 -> HELPDESK-TEAM01
-007 -> HELPDESK-TEAM03
-008 -> HELPDESK-TEAM02
-```
-
-The environment has been used to observe and investigate Windows security events including:
-
-- Successful authentication
-- Failed authentication
-- Explicit credential usage
-- User creation
-- Kerberos authentication
-- Kerberos service ticket activity
-
-Examples include Windows Event IDs:
-
-```text
-4624
-4625
-4648
-4720
-4768
-4769
-```
-
-Wazuh also collects security configuration assessment, file integrity monitoring, system inventory, rootcheck, Linux logs, and selected application/container telemetry.
-
----
-
-# Identity Infrastructure
-
-The lab contains an Active Directory environment for hands-on identity security work.
-
-## Active Directory
-
-Domain:
-
-`mutaspace.local`
-
-Primary domain controller:
-
-`dc-01`
-
-Current identity capabilities include:
-
-- Active Directory Domain Services
-- DNS
-- Domain-joined Windows endpoints
-- Kerberos authentication
-- Centralized identity administration
-- Windows security event generation and monitoring
-
-## Enterprise PKI
-
-`ca-01` provides Active Directory Certificate Services.
-
-Current deployment:
-
-```text
-Server: ca-01
-Role: Enterprise Root Certification Authority
-CA Name: MutaSpace Enterprise Root CA
-```
-
-The PKI environment is being expanded to support hands-on work involving:
-
-- Certificate templates
-- Certificate enrollment
-- Auto-enrollment
-- Certificate lifecycle management
-- Revocation
-- CRLs
-- OCSP
-- AD CS security assessment
-- Certificate-based attack paths
-
----
-
-# Application and Container Infrastructure
-
-## docker-01
-
-`docker-01` provides containerized infrastructure for application and security experimentation.
-
-Current services include:
-
-- Docker Engine
-- Docker Compose
-- Portainer
-- Nginx test workloads
-- Apache Guacamole
-- Cloudflare Tunnel
-- Wazuh endpoint monitoring
-
-Container telemetry is also being integrated into Wazuh for security monitoring and detection development.
-
----
-
-# Remote Cybersecurity Lab Access
-
-The environment now supports browser-based remote access for live cybersecurity exercises.
-
-Students can access assigned Windows investigation environments without:
-
-- Direct Proxmox access
-- Public RDP exposure
-- VPN software installation on managed computers
-- Direct access to the home network
-
-Current access architecture:
-
-```text
-School / Remote Computer
-        |
-      HTTPS
-        |
-        v
-Cloudflare
-        |
- Cloudflare Tunnel
-        |
-        v
-    docker-01
-        |
- Apache Guacamole
-        |
-       RDP
-        |
-        v
-Assigned Windows Investigation Endpoint
-```
-
-The remote access path has been successfully validated from a school-managed computer outside the home network.
-
-This allows the lab to support live investigations where users interact with endpoint systems while security telemetry is observed centrally through the SOC environment.
-
----
-
-# Student Security Lab
-
-A dedicated student environment is being developed within the larger enterprise lab.
-
-Current team workstations:
-
-```text
-HELPDESK-TEAM01
-HELPDESK-TEAM02
-HELPDESK-TEAM03
-```
-
-Each workstation was created from a generalized Windows master image and then assigned a unique:
-
-- Windows system identity
-- Hostname
-- Active Directory computer object
-- Student account
-- Wazuh agent identity
-- Wazuh enrollment key
-
-The workstations can be used for scenarios involving:
-
-- Help desk investigation
-- Authentication troubleshooting
-- Windows Event Viewer
-- Network troubleshooting
-- DNS troubleshooting
-- Account problems
-- Endpoint security
-- Log analysis
-- SOC escalation
-- Incident investigation
-
-The objective is to allow students to investigate problems locally while corresponding telemetry can be analyzed centrally.
-
----
-
-# Troubleshooting as Part of the Build
-
-Failures and troubleshooting are intentionally documented as part of this project.
-
-Significant issues encountered include:
-
-### Windows Sysprep and AppX Conflicts
-
-Windows image generalization initially failed because installed AppX packages prevented Sysprep from completing.
-
-Problematic packages were identified through Sysprep logs, removed, and the image was successfully generalized.
-
-### Cloned Wazuh Agent Identity
-
-Cloned Windows systems initially inherited the Wazuh identity of the source workstation.
-
-The issue was resolved by:
-
-1. Stopping the Wazuh service
-2. Removing the inherited client key
-3. Assigning a unique agent name
-4. Creating a new agent on the Wazuh manager
-5. Importing a unique enrollment key
-6. Restarting the service
-7. Validating independent agent connectivity
-
-### Docker Dual-IP Configuration
-
-`docker-01` initially received both static and DHCP addresses because multiple Netplan configurations were active.
-
-The conflicting cloud-init configuration was disabled and network configuration was validated.
-
-### Guacamole RDP Authentication
-
-Apache Guacamole could reach the Windows endpoint over TCP 3389, but the RDP session immediately terminated.
-
-`guacd` logs identified an authentication failure.
-
-The root cause was traced to the local Windows student account configuration. After configuring valid credentials and updating the Guacamole connection, browser-based RDP access succeeded.
-
-The final connection was validated from a school-managed computer outside the home environment.
-
----
-
-# Current Capabilities
-
-The environment currently supports hands-on work across several security domains.
-
-### SOC Operations
-
-- Centralized endpoint monitoring
-- Windows security event analysis
-- Linux monitoring
-- File integrity monitoring
-- Security configuration assessment
-- System inventory
-- Authentication investigation
-
-### Identity Security
+The environment is built on **Proxmox VE** and models a small enterprise network containing:
 
 - Active Directory
 - DNS
 - Kerberos
-- Domain-joined endpoints
+- Enterprise PKI
+- Windows and Linux endpoints
+- Wazuh SIEM
+- pfSense
+- Docker
+- Web application workloads
+- Browser-based student lab access
+- Reusable team investigation environments
+
+This repository documents how the environment is designed, built, validated, troubleshot, and expanded.
+
+The goal is not simply to install security tools.
+
+The goal is to understand how the systems interact.
+
+---
+
+# Project Philosophy
+
+The MutaSpace lab follows a simple process:
+
+```text
+Build it
+   |
+   v
+Understand it
+   |
+   v
+Validate it
+   |
+   v
+Break it
+   |
+   v
+Investigate it
+   |
+   v
+Document it
+   |
+   v
+Teach it
+```
+
+Security technologies become more useful when they are connected to the infrastructure around them.
+
+For example:
+
+```text
+User authentication
+        |
+        v
+Active Directory
+        |
+        v
+Windows Security Event
+        |
+        v
+Wazuh
+        |
+        v
+SOC Investigation
+```
+
+The lab is designed to make those relationships visible.
+
+---
+
+# What This Lab Is Built For
+
+The environment supports hands-on work across several security domains.
+
+## Security Operations
+
+- Centralized endpoint monitoring
+- Windows event analysis
+- Linux log analysis
+- Authentication investigations
+- File integrity monitoring
+- Security configuration assessment
+- Alert investigation
+- Detection engineering
+
+## Identity and Access Management
+
+- Active Directory
+- Kerberos
+- DNS
+- Group Policy
+- Domain authentication
 - Enterprise PKI
 - Certificate services
+- Future SSO and cloud identity scenarios
 
-### Network Security
+## Network Security
 
-- pfSense firewall
-- Internal routing
-- Segmented virtual networking foundation
-- DNS infrastructure
-- Controlled application services
+- Firewalling
+- Routing
+- NAT
+- DHCP
+- Internal DNS
+- Network troubleshooting
+- Future VLAN segmentation
+- Future IDS/IPS monitoring
 
-### Security Engineering
+## Security Engineering
 
 - Proxmox virtualization
 - Windows Server
 - Linux administration
 - Docker
-- Centralized logging
-- Remote security lab infrastructure
+- Container networking
+- Remote access architecture
+- Reusable workstation deployment
 
-### Investigation
+## Cybersecurity Education
 
-- Endpoint troubleshooting
-- Authentication failures
+- Team-based investigation labs
+- Help Desk troubleshooting
+- SOC escalation
 - Windows Event Viewer
-- SIEM correlation
-- Network troubleshooting
-- Application/service investigation
+- SIEM analysis
+- Authentication troubleshooting
+- Live security demonstrations
+
+---
+
+# Official Lab Host
+
+The environment runs on a dedicated custom-built virtualization host.
+
+| Component | Specification |
+|---|---|
+| Motherboard | B650 AORUS Elite AX |
+| Processor | AMD Ryzen 9 7900X |
+| Memory | 64 GB DDR5 |
+| Storage | 2 TB NVMe SSD |
+| Power Supply | 850W |
+| Case | Corsair 3500X |
+| CPU Cooling | Arctic Liquid Freezer III Pro 360 |
+| Hypervisor | Proxmox VE |
+
+The host provides compute resources for:
+
+- Enterprise infrastructure
+- Security monitoring
+- Identity services
+- Application workloads
+- Containers
+- Student workstations
+- Remote lab access
+- Future detection and incident-response tooling
+
+---
+
+# High-Level Architecture
+
+```text
+                           Internet
+                              |
+                              v
+                     External Access Layer
+                              |
+                              v
+                       Remote Gateway
+                              |
+                              v
++----------------------------------------------------------------+
+|                 MUTASPACE ENTERPRISE SECURITY LAB               |
+|                                                                |
+|                         pfSense                                |
+|                    Firewall / Gateway                          |
+|                            |                                   |
+|          +-----------------+-----------------+                 |
+|          |                 |                 |                 |
+|          v                 v                 v                 |
+|       Identity          Monitoring       Applications           |
+|          |                 |                 |                 |
+|          |                 |                 |                 |
+|          +---------+-------+-------+---------+                 |
+|                    |               |                           |
+|                    v               v                           |
+|                Endpoints       Student Lab                     |
+|                    |               |                           |
+|                    +-------+-------+                           |
+|                            |                                   |
+|                            v                                   |
+|                     Security Telemetry                         |
++----------------------------------------------------------------+
+```
+
+The current environment connects networking, identity, endpoints, applications, monitoring, and remote-access infrastructure into one lab.
+
+---
+
+# Current Technology Stack
+
+## Virtualization
+
+```text
+Proxmox VE
+```
+
+Used for:
+
+- Virtual machines
+- Virtual networking
+- Snapshots
+- Cloning
+- Resource pools
+- Infrastructure management
+
+---
+
+## Networking
+
+```text
+pfSense
+Proxmox Linux Bridges
+```
+
+Current network design includes:
+
+```text
+vmbr0 -> Upstream / Management
+vmbr1 -> Internal Enterprise Lab
+```
+
+The internal reference subnet is:
+
+```text
+10.10.10.0/24
+```
+
+---
+
+## Identity
+
+```text
+Windows Server
+Active Directory Domain Services
+DNS
+Kerberos
+Group Policy
+```
+
+Reference domain:
+
+```text
+mutaspace.local
+```
+
+---
+
+## Enterprise PKI
+
+```text
+Active Directory Certificate Services
+```
+
+The environment includes an Enterprise Certification Authority for certificate and trust-based security work.
+
+---
+
+## Security Monitoring
+
+```text
+Wazuh
+```
+
+Current capabilities include:
+
+- Windows event collection
+- Linux log collection
+- File Integrity Monitoring
+- Security Configuration Assessment
+- Rootcheck
+- System inventory
+- Authentication telemetry
+- Application telemetry
+
+---
+
+## Applications
+
+```text
+Ubuntu Server
+Nginx
+SSH
+```
+
+The application layer provides realistic server-side telemetry for investigation and detection exercises.
+
+---
+
+## Containers
+
+```text
+Docker
+Docker Compose
+Portainer
+```
+
+Containerized services are used for:
+
+- Web workloads
+- Remote access
+- Infrastructure services
+- Security experimentation
+
+---
+
+## Remote Lab Access
+
+```text
+Apache Guacamole
+Cloudflare Tunnel
+RDP
+```
+
+This allows users to access assigned Windows environments through a browser without requiring direct Proxmox access or exposing RDP publicly.
+
+---
+
+# Current Lab Capabilities
+
+The environment currently supports:
+
+- Internal virtual networking
+- Firewall routing
+- DHCP
+- Active Directory
+- Active Directory-integrated DNS
+- Kerberos authentication
+- Windows domain joins
+- Enterprise certificate services
+- Windows endpoint monitoring
+- Linux endpoint monitoring
+- Application log collection
+- Docker infrastructure
+- Container telemetry experimentation
+- Team-based Windows lab workstations
+- Wazuh monitoring for student endpoints
+- Browser-based remote Windows access
+- External lab access from managed computers
+
+---
+
+# Student Cybersecurity Lab
+
+A reusable team-based student environment has been added to the larger enterprise lab.
+
+The design uses:
+
+```text
+Generalized Windows Golden Image
+             |
+             +----------+----------+
+             |          |          |
+             v          v          v
+          Team 01    Team 02    Team 03
+```
+
+Each deployed workstation receives its own:
+
+- Windows identity
+- Hostname
+- Active Directory computer object
+- Wazuh identity
+- User context
+- Remote-access connection
+
+The goal is to provide systems students can investigate and modify without giving them unnecessary access to the infrastructure hosting the lab.
+
+---
+
+# Browser-Based Student Access
+
+The current remote-access design is:
+
+```text
+Remote Browser
+      |
+      | HTTPS
+      v
+Cloudflare
+      |
+      v
+Cloudflare Tunnel
+      |
+      v
+Apache Guacamole
+      |
+      | RDP
+      v
+Assigned Windows Endpoint
+```
+
+This design avoids directly exposing:
+
+- Proxmox
+- pfSense
+- RDP
+- SSH
+- Wazuh administration
+- Internal infrastructure
+
+The browser-based access path has been validated from a managed computer outside the home network.
+
+---
+
+# Repository Structure
+
+```text
+mutaspace-soc-lab/
+|
+├── README.md
+|
+└── docs/
+    |
+    ├── README.md
+    |
+    ├── architecture/
+    │   ├── current-architecture.md
+    │   ├── network-design.md
+    │   ├── lab-systems-and-roles.md
+    │   └── remote-access-architecture.md
+    |
+    ├── hardware/
+    |
+    ├── proxmox/
+    |
+    ├── network/
+    │   ├── README.md
+    │   ├── 01-proxmox-bridges.md
+    │   ├── 02-pfsense-network-setup.md
+    │   ├── 03-ip-addressing-and-dhcp.md
+    │   ├── 04-active-directory-dns.md
+    │   └── 05-network-validation-and-troubleshooting.md
+    |
+    ├── identity/
+    |
+    ├── wazuh/
+    |
+    ├── docker/
+    |
+    ├── student-lab/
+    │   ├── building-a-team-based-cybersecurity-lab.md
+    │   └── windows-golden-image.md
+    |
+    ├── troubleshooting/
+    |
+    ├── labs/
+    |
+    └── incident-scenarios/
+```
+
+Some sections will expand as additional lab components are implemented.
+
+---
+
+# Build Path
+
+If you want to build a similar environment, follow the project in layers.
+
+```text
+01. Physical Host
+        |
+        v
+02. Proxmox
+        |
+        v
+03. Virtual Networking
+        |
+        v
+04. pfSense
+        |
+        v
+05. IP Addressing + DHCP
+        |
+        v
+06. Active Directory + DNS
+        |
+        v
+07. Wazuh
+        |
+        v
+08. Windows Endpoint
+        |
+        v
+09. Linux Workloads
+        |
+        v
+10. Docker
+        |
+        v
+11. Enterprise PKI
+        |
+        v
+12. Student Workstations
+        |
+        v
+13. Remote Access
+        |
+        v
+14. Security Investigations
+        |
+        v
+15. Detection Engineering
+```
+
+Each layer should be validated before moving to the next.
+
+---
+
+# Start Here
+
+## Architecture
+
+Understand the overall design:
+
+[`docs/architecture/current-architecture.md`](docs/architecture/current-architecture.md)
+
+Learn what each system does:
+
+[`docs/architecture/lab-systems-and-roles.md`](docs/architecture/lab-systems-and-roles.md)
+
+Review the network design:
+
+[`docs/architecture/network-design.md`](docs/architecture/network-design.md)
+
+Review the remote-access architecture:
+
+[`docs/architecture/remote-access-architecture.md`](docs/architecture/remote-access-architecture.md)
+
+---
+
+# Network Build
+
+Start the network implementation here:
+
+[`docs/network/README.md`](docs/network/README.md)
+
+The current networking sequence is:
+
+1. Proxmox virtual bridges
+2. pfSense
+3. IP addressing and DHCP
+4. Active Directory DNS
+5. Network validation and troubleshooting
+
+---
+
+# Student Lab
+
+Build reusable team environments:
+
+[`docs/student-lab/building-a-team-based-cybersecurity-lab.md`](docs/student-lab/building-a-team-based-cybersecurity-lab.md)
+
+Build a reusable Windows image:
+
+[`docs/student-lab/windows-golden-image.md`](docs/student-lab/windows-golden-image.md)
 
 ---
 
 # Validation Philosophy
 
-A system is not considered complete simply because it installs successfully.
+A system is not considered complete because it installed successfully.
 
-Each major component is validated through testing.
+Every component should have an explicit validation step.
 
-Examples include:
+Examples:
 
 ```text
-Can the endpoint reach the gateway?
-Can the endpoint resolve internal DNS?
-Can the workstation authenticate to Active Directory?
-Can the Wazuh manager receive endpoint telemetry?
-Can the analyst identify authentication failures centrally?
-Can Docker workloads generate observable telemetry?
-Can Guacamole reach the endpoint over RDP?
-Can a remote school computer access the assigned environment?
+Can the client reach the gateway?
+
+Can internal DNS resolve?
+
+Can Windows locate the domain controller?
+
+Can the workstation join Active Directory?
+
+Can the Wazuh agent connect independently?
+
+Can the application generate logs?
+
+Can those logs reach the SIEM?
+
+Can the remote gateway reach the endpoint?
+
+Can an external user reach the assigned lab?
 ```
 
-This validation-first approach is intended to make the environment reproducible and defensible.
+This helps distinguish:
+
+```text
+Installed
+```
+
+from:
+
+```text
+Operational
+```
 
 ---
 
-# Documentation
+# Troubleshooting Philosophy
 
-Detailed implementation documentation is maintained under:
+Troubleshooting is part of the project rather than something hidden from the documentation.
+
+A useful workflow is:
 
 ```text
-docs/
+Symptom
+   |
+   v
+Evidence
+   |
+   v
+Hypothesis
+   |
+   v
+Test
+   |
+   v
+Root Cause
+   |
+   v
+Remediation
+   |
+   v
+Validation
 ```
 
-Major documentation areas include:
+Examples encountered during the build have included:
 
-- Hardware
-- Proxmox
-- Networking
-- Virtual machines
-- Identity
-- Wazuh
-- Docker
-- Student lab
-- Remote access
-- Troubleshooting
-- Security labs
-- Incident scenarios
+- DNS misconfiguration
+- Multiple Linux IP addresses
+- Windows Sysprep failures
+- AppX provisioning conflicts
+- Duplicate monitoring identities after cloning
+- Interrupted VM clone operations
+- RDP authentication failures
+- Remote-access troubleshooting
+
+These failures are useful because they demonstrate how the environment behaves when something is wrong.
+
+---
+
+# Current Project Status
+
+## Infrastructure
+
+- [x] Dedicated physical lab host
+- [x] Proxmox VE
+- [x] Internal virtual network
+- [x] pfSense
+- [x] DHCP
+- [x] Internal routing and NAT
+
+## Identity
+
+- [x] Active Directory
+- [x] DNS
+- [x] Kerberos
+- [x] Domain-joined Windows systems
+- [x] Enterprise PKI foundation
+
+## Monitoring
+
+- [x] Wazuh
+- [x] Windows monitoring
+- [x] Linux monitoring
+- [x] Application telemetry
+- [x] Student workstation telemetry
+- [ ] Advanced custom detections
+
+## Applications and Containers
+
+- [x] Linux application server
+- [x] Nginx
+- [x] Docker
+- [x] Docker Compose
+- [x] Portainer
+- [x] Container log collection experimentation
+
+## Student Lab
+
+- [x] Windows golden image
+- [x] Multiple student workstations
+- [x] Active Directory integration
+- [x] Independent Wazuh enrollment
+- [x] Browser-based remote-access proof of concept
+- [ ] Complete remote-access rollout to all teams
+- [ ] Network-level team segmentation
+- [ ] Automated reset workflow
+
+## Remote Access
+
+- [x] Apache Guacamole
+- [x] Cloudflare Tunnel
+- [x] External browser validation
+- [x] Managed-computer validation
+- [ ] Cloudflare Access policy
+- [ ] Additional access hardening
 
 ---
 
 # Roadmap
 
-The environment will continue expanding in phases.
+The project will continue expanding in stages.
+
+## Detection Engineering
 
 Planned areas include:
 
-### Detection and SOC Engineering
-
 - Sysmon
-- Custom Wazuh detection rules
-- Splunk
+- Custom Wazuh rules
+- Additional Windows telemetry
+- Detection tuning
+- Threat-hunting exercises
+
+## Network Visibility
+
+Planned technologies include:
+
+- Wireshark
 - Suricata
 - Zeek
-- Detection engineering exercises
+- Network traffic analysis
 
-### Incident Response
+## Incident Response
 
+Future capabilities may include:
+
+- Velociraptor
 - TheHive
 - Shuffle
-- Velociraptor
 - Incident timelines
 - Analyst runbooks
 - After-action reviews
 
-### Identity Security
+## Identity Security
+
+Planned work includes:
 
 - Certificate templates
 - Auto-enrollment
-- CRL and OCSP
-- AD CS attack paths
-- MFA
+- Revocation
+- AD CS security assessment
+- Certificate attack paths
+- SSO
 - SAML
 - OIDC
 - OAuth
-- SSO
-- Okta
-- Identity security assessments
+- MFA
+- Cloud identity
 
-### Networking
+## Attack Simulation
 
-- VLAN segmentation
-- Student network isolation
-- Inter-VLAN routing
-- ACLs
-- Wireshark
-- IDS/IPS monitoring
-- Additional enterprise network scenarios
+Controlled attack simulation will be introduced to validate defensive monitoring.
 
-### Offensive Security Validation
-
-Controlled attack simulation will be introduced to generate telemetry and validate defensive controls.
-
-Potential systems and techniques include:
+Potential future systems and scenarios include:
 
 - Kali Linux
 - Authentication attacks
-- Reconnaissance
 - Credential abuse
+- Reconnaissance
 - Web enumeration
 - Active Directory attack paths
 
-All offensive testing will remain within controlled lab environments.
+All testing will remain inside controlled lab environments.
 
 ---
 
-# Project Status
+# Public Documentation and Security
 
-The project has progressed from initial hardware and virtualization deployment into an operational enterprise security environment.
+This repository intentionally documents architecture and implementation without publishing operational secrets.
 
-Current major milestones include:
+The following should never be committed:
 
-- [x] Physical lab hardware assembled
-- [x] Proxmox VE installed
-- [x] Internal SOC network created
-- [x] pfSense firewall deployed
-- [x] Active Directory deployed
-- [x] Internal DNS operational
-- [x] Wazuh SIEM deployed
-- [x] Windows endpoint monitoring
-- [x] Linux endpoint monitoring
-- [x] Application server deployed
-- [x] Docker infrastructure deployed
-- [x] Portainer deployed
-- [x] Docker telemetry integration started
-- [x] Enterprise Root CA deployed
-- [x] Windows student master image created
-- [x] Three student investigation workstations deployed
-- [x] Student endpoints joined to Active Directory
-- [x] Independent Wazuh enrollment validated
-- [x] Apache Guacamole deployed
-- [x] Cloudflare Tunnel deployed
-- [x] Browser-based remote endpoint access validated
-- [x] External access validated from a school-managed computer
-- [ ] Cloudflare Access policy implementation
-- [ ] Student network segmentation
-- [ ] Advanced detection engineering
-- [ ] Incident response platform
-- [ ] Advanced identity security scenarios
+```text
+Passwords
+API tokens
+Enrollment keys
+Cloudflare tunnel tokens
+Private certificate keys
+SSH private keys
+Recovery codes
+Session tokens
+Administrative credentials
+```
+
+Placeholders are used where sensitive values would otherwise appear.
 
 ---
 
-# Repository Philosophy
+# MutaSpace
 
-This repository is intentionally not limited to successful final configurations.
+MutaSpace is focused on creating practical learning opportunities around technology, cybersecurity, infrastructure, and professional development.
 
-It documents:
+The MutaSpace Enterprise Security Lab serves as a hands-on environment for:
 
-- Architecture decisions
-- Commands
-- Configuration
-- Validation
+- Building
+- Experimenting
 - Troubleshooting
-- Failures
-- Root causes
-- Remediation
-- Security observations
-- Lessons learned
+- Teaching
+- Security investigation
+- Technical documentation
 
-The objective is not simply to show that a tool was installed.
+A dedicated public site for the SOC lab is also being developed separately from the technical repository.
 
-The objective is to demonstrate the ability to **design, implement, troubleshoot, secure, monitor, investigate, explain, and improve an enterprise security environment.**
+---
+
+# Project Principle
+
+The purpose of this repository is not to show a collection of installed tools.
+
+It is to demonstrate how to:
+
+> **Design, build, connect, troubleshoot, monitor, investigate, secure, document, and teach an enterprise security environment.**
