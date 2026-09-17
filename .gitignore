@@ -49,3 +49,12 @@ redacted-needed/
 # Local notes not intended for public documentation
 private-notes/
 scratch/
+
+# Additional environment and certificate protection
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.p7b
+*.jks
+*.keystore
